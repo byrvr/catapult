@@ -107,6 +107,8 @@ class AppleAuthClient:
 
         # ── Phase 1: SRP init ──
         logger.info("GSA init for %s", apple_id)
+
+        # Create SRP user with empty password for init (we don't have derived pw yet)
         usr = srp.User(apple_id.encode(), b"", hash_alg=srp.SHA256, ng_type=srp.NG_2048)
         _, A = usr.start_authentication()
 
@@ -137,8 +139,11 @@ class AppleAuthClient:
         logger.info("GSA init ok: protocol=%s iterations=%d", protocol, iterations)
 
         # ── Phase 2: SRP complete ──
+        # Derive password using server-provided salt/iterations/protocol
         derived_pw = _derive_password(password, salt, iterations, protocol)
 
+        # New SRP user with derived password — generates new A, which is fine:
+        # Apple's GSA only verifies M1 against the password, not against init's A
         usr = srp.User(apple_id.encode(), derived_pw, hash_alg=srp.SHA256, ng_type=srp.NG_2048)
         _, A = usr.start_authentication()
         M = usr.process_challenge(salt, B)
@@ -146,23 +151,37 @@ class AppleAuthClient:
         if M is None:
             return {"status": "error", "message": "SRP verification failed — incorrect password?"}
 
+        # Fetch fresh Anisette for the complete request
+        try:
+            cpd2 = get_anisette_headers()
+        except AnisetteError:
+            cpd2 = cpd
+
         logger.info("GSA complete (sending proof)")
         complete_resp = await self._gsa_request({
             "M1": M,
             "c": cookie,
-            "cpd": cpd,
+            "cpd": cpd2,
             "o": "complete",
             "u": apple_id,
         })
 
+        logger.info("GSA complete response: %s", {
+            k: (v if k == "Status" else f"<{type(v).__name__}>")
+            for k, v in complete_resp.items()
+        })
+
         comp_status = complete_resp.get("Status", {})
-        ec = comp_status.get("ec", -1)
-        if ec != 0:
+        ec = comp_status.get("ec")
+        if ec is not None and ec != 0:
             msg = comp_status.get("em", f"GSA error {ec}")
             if ec == 5000:
                 msg = "Incorrect Apple ID or password"
-            logger.error("GSA complete failed: %s (ec=%d)", msg, ec)
+            logger.error("GSA complete failed: %s (ec=%s)", msg, ec)
             return {"status": "error", "message": msg}
+        if ec is None and not complete_resp.get("Response"):
+            logger.error("GSA complete: unexpected response: %s", complete_resp)
+            return {"status": "error", "message": "Unexpected response from Apple"}
 
         comp_data = complete_resp.get("Response", {})
 
