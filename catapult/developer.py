@@ -115,9 +115,21 @@ class DeveloperServices:
             {"teamId": team_id, "csrContent": csr_pem, "machineId": "catapult-local"},
         )
 
-        cert_info = data.get("certRequest", data)
-        cert_content = cert_info.get("certContent") or cert_info.get("certificate", {}).get("certContent")
+        logger.info("CSR response keys: %s", list(data.keys()))
+        cert_info = data.get("certRequest") or data.get("certificate") or data
+        if isinstance(cert_info, dict):
+            logger.info("cert_info keys: %s", list(cert_info.keys()))
+        cert_content = None
+        for key in ("certContent", "certificate", "_certContent"):
+            if key in cert_info:
+                val = cert_info[key]
+                if isinstance(val, dict):
+                    cert_content = val.get("certContent")
+                else:
+                    cert_content = val
+                break
         if not cert_content:
+            logger.error("No cert found in response: %s", {k: type(v).__name__ for k, v in data.items()})
             raise DeveloperServicesError("Apple did not return a certificate")
 
         self._cert_id = cert_info.get("certificateId") or cert_info.get("certificate", {}).get("certificateId")
