@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.venv/
+.idea/
+*.iml
+.DS_Store
+*.pem
+*.p12
+*.mobileprovision

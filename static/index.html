@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Catapult</title>
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <div class="app">
+        <header>
+            <div class="logo">
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M5 12l5-8 4 8"/>
+                    <path d="M5 12h9"/>
+                    <circle cx="18" cy="12" r="3"/>
+                    <path d="M5 12c0 4 3 8 8 8"/>
+                </svg>
+                <h1>Catapult</h1>
+            </div>
+            <button class="btn-icon" id="refreshDevices" title="Refresh devices">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/>
+                    <path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/>
+                </svg>
+            </button>
+        </header>
+
+        <!-- Step 1: Device selection -->
+        <section class="card" id="deviceSection">
+            <h2>Device</h2>
+            <div class="device-list" id="deviceList">
+                <div class="placeholder">Scanning network...</div>
+            </div>
+        </section>
+
+        <!-- Step 2: IPA selection -->
+        <section class="card" id="ipaSection">
+            <h2>Application</h2>
+            <div class="drop-zone" id="dropZone">
+                <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                    <polyline points="17 8 12 3 7 8"/>
+                    <line x1="12" y1="3" x2="12" y2="15"/>
+                </svg>
+                <p>Drop an IPA file here or <label class="file-link">browse<input type="file" id="ipaFile" accept=".ipa" hidden></label></p>
+            </div>
+            <div class="ipa-info" id="ipaInfo" hidden>
+                <div class="ipa-icon">IPA</div>
+                <div class="ipa-meta">
+                    <strong id="ipaName">—</strong>
+                    <span id="ipaBundle">—</span>
+                    <span id="ipaVersion">—</span>
+                </div>
+                <button class="btn-icon" id="clearIpa" title="Remove">&times;</button>
+            </div>
+        </section>
+
+        <!-- Step 3: Apple ID -->
+        <section class="card" id="authSection">
+            <h2>Apple ID</h2>
+            <form id="authForm" autocomplete="off">
+                <input type="email" id="appleId" placeholder="Apple ID" required autocomplete="username">
+                <input type="password" id="applePassword" placeholder="Password" required autocomplete="current-password">
+                <button type="submit" class="btn-primary" id="authBtn">Sign In</button>
+            </form>
+            <div id="tfaSection" hidden>
+                <p class="hint">Enter the 2FA code sent to your devices</p>
+                <div class="tfa-inputs">
+                    <input type="text" id="tfaCode" maxlength="6" placeholder="000000" inputmode="numeric" pattern="[0-9]*">
+                    <button class="btn-primary" id="tfaBtn">Verify</button>
+                </div>
+            </div>
+            <div class="auth-status" id="authStatus"></div>
+        </section>
+
+        <!-- Install button + progress -->
+        <section class="card" id="installSection">
+            <button class="btn-launch" id="installBtn" disabled>
+                <span>Install</span>
+            </button>
+            <div class="progress-container" id="progressContainer" hidden>
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progressFill"></div>
+                </div>
+                <p class="progress-text" id="progressText">Preparing...</p>
+            </div>
+        </section>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
