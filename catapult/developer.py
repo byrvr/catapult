@@ -251,11 +251,32 @@ class DeveloperServices:
 
         profile = data.get("provisioningProfile", {})
         encoded = profile.get("encodedProfile", b"")
-        if not encoded:
-            raise DeveloperServicesError("Apple did not return a provisioning profile")
+        if encoded:
+            logger.info("Provisioning profile created (uuid: %s)", profile.get("UUID", "?"))
+            return encoded
 
-        logger.info("Provisioning profile created (uuid: %s)", profile.get("UUID", "?"))
-        return encoded
+        # Profile already existed — download it
+        logger.info("Profile not in create response, downloading existing profile")
+        return await self._download_profile_for_app(session, team_id, app_id_id)
+
+    async def _download_profile_for_app(self, session: AuthSession, team_id: str, app_id_id: str) -> bytes:
+        """Download an existing provisioning profile matching an app ID."""
+        data = await self._request(session, "ios/listProvisioningProfiles", {
+            "teamId": team_id,
+            "includeInactiveProfiles": True,
+        })
+        for p in data.get("provisioningProfiles", []):
+            if p.get("appIdId") == app_id_id:
+                pid = p.get("provisioningProfileId")
+                logger.info("Downloading profile %s", pid)
+                dl = await self._request(session, "ios/downloadProvisioningProfile", {
+                    "teamId": team_id,
+                    "provisioningProfileId": pid,
+                })
+                encoded = dl.get("provisioningProfile", {}).get("encodedProfile", b"")
+                if encoded:
+                    return encoded
+        raise DeveloperServicesError("Could not find or download provisioning profile")
 
     async def _delete_profiles_for_app(self, session: AuthSession, team_id: str, app_id_id: str):
         """Delete existing provisioning profiles for an app ID so we can create a fresh one."""
