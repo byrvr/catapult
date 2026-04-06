@@ -324,11 +324,21 @@ class AppleAuthClient:
         if not self.session or not self.session.identity_token:
             return {"status": "error", "message": "No pending auth session"}
 
+        try:
+            anisette = get_anisette_http_headers()
+        except Exception:
+            anisette = {}
+
+        # Must use same headers as 2FA trigger — consistent device identity
         headers = {
-            **HEADERS,
-            "X-Apple-Identity-Token": self.session.identity_token,
+            "Content-Type": "text/x-xml-plist",
+            "Accept": "text/x-xml-plist",
+            "User-Agent": "Xcode",
+            "X-Xcode-Version": "11.2 (11B41)",
             "X-Apple-App-Info": "com.apple.gs.xcode.auth",
+            "X-Apple-Identity-Token": self.session.identity_token,
             "security-code": code,
+            **anisette,
         }
 
         logger.info("Submitting 2FA code via GSA validate")
@@ -336,7 +346,7 @@ class AppleAuthClient:
             f"{GSA_AUTH_ENDPOINT}/grandslam/GsService2/validate",
             headers=headers,
         )
-        logger.info("2FA validate: HTTP %d", resp.status_code)
+        logger.info("2FA validate: HTTP %d, body=%s", resp.status_code, resp.text[:200] if resp.text else "empty")
 
         if resp.status_code != 200:
             return {"status": "error", "message": f"2FA validation failed (HTTP {resp.status_code})"}
