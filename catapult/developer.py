@@ -111,7 +111,7 @@ class DeveloperServices:
         logger.info("Submitting CSR to Apple")
         data = await self._request(
             session,
-            "submitDevelopmentCSR",
+            "ios/submitDevelopmentCSR",
             {"teamId": team_id, "csrContent": csr_pem, "machineId": "catapult-local"},
         )
 
@@ -135,7 +135,7 @@ class DeveloperServices:
     async def _cleanup_old_certs(self, session: AuthSession, team_id: str):
         """Revoke any previous Catapult certs to avoid hitting the 2-cert limit on free accounts."""
         try:
-            data = await self._request(session, "listAllDevelopmentCerts", {"teamId": team_id})
+            data = await self._request(session, "ios/listAllDevelopmentCerts", {"teamId": team_id})
             for cert in data.get("certificates", []):
                 name = cert.get("machineName", "")
                 if name == "catapult-local":
@@ -143,7 +143,7 @@ class DeveloperServices:
                     logger.info("Revoking old Catapult cert %s", cid)
                     await self._request(
                         session,
-                        "revokeDevelopmentCert",
+                        "ios/revokeDevelopmentCert",
                         {"teamId": team_id, "certificateId": cid, "serialNumber": cert.get("serialNumber", "")},
                     )
         except Exception as e:
@@ -153,7 +153,7 @@ class DeveloperServices:
         logger.info("Registering device %s (%s)", name, udid)
         return await self._request(
             session,
-            "addDevice",
+            "ios/addDevice",
             {"teamId": team_id, "deviceNumber": udid, "name": name or "Catapult Device"},
         )
 
@@ -161,7 +161,7 @@ class DeveloperServices:
         logger.info("Registering app ID %s", bundle_id)
         data = await self._request(
             session,
-            "addAppId",
+            "ios/addAppId",
             {
                 "teamId": team_id,
                 "identifier": bundle_id,
@@ -186,7 +186,7 @@ class DeveloperServices:
         logger.info("Creating provisioning profile (app=%s, cert=%s)", app_id_id, self._cert_id)
         data = await self._request(
             session,
-            "createProvisioningProfile",
+            "ios/createProvisioningProfile",
             {
                 "teamId": team_id,
                 "appIdId": app_id_id,
