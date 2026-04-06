@@ -96,8 +96,6 @@ class DeveloperServices:
 
     async def get_or_create_cert(self, session: AuthSession, team_id: str) -> tuple[bytes, rsa.RSAPrivateKey]:
         """Generate a new signing key + CSR and submit to Apple. Returns (cert_pem, private_key)."""
-        # Revoke old Catapult certs to stay under the free-account limit
-        await self._cleanup_old_certs(session, team_id)
 
         # Generate fresh keypair
         self._private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -109,11 +107,23 @@ class DeveloperServices:
         csr_pem = csr.public_bytes(serialization.Encoding.PEM).decode()
 
         logger.info("Submitting CSR to Apple")
-        data = await self._request(
-            session,
-            "ios/submitDevelopmentCSR",
-            {"teamId": team_id, "csrContent": csr_pem, "machineId": "catapult-local"},
-        )
+        try:
+            data = await self._request(
+                session,
+                "ios/submitDevelopmentCSR",
+                {"teamId": team_id, "csrContent": csr_pem, "machineId": "catapult-local"},
+            )
+        except DeveloperServicesError as e:
+            if "already have" in str(e).lower():
+                logger.info("Cert limit reached, revoking existing certs and retrying")
+                await self._revoke_certs(session, team_id)
+                data = await self._request(
+                    session,
+                    "ios/submitDevelopmentCSR",
+                    {"teamId": team_id, "csrContent": csr_pem, "machineId": "catapult-local"},
+                )
+            else:
+                raise
 
         logger.info("CSR response keys: %s", list(data.keys()))
         cert_info = data.get("certRequest") or data.get("certificate") or data
@@ -144,22 +154,26 @@ class DeveloperServices:
         logger.info("Signing certificate issued (id: %s)", self._cert_id)
         return cert_pem, self._private_key
 
-    async def _cleanup_old_certs(self, session: AuthSession, team_id: str):
-        """Revoke any previous Catapult certs to avoid hitting the 2-cert limit on free accounts."""
+    async def _revoke_certs(self, session: AuthSession, team_id: str):
+        """Revoke development certs to make room for a new one."""
         try:
             data = await self._request(session, "ios/listAllDevelopmentCerts", {"teamId": team_id})
-            for cert in data.get("certificates", []):
-                name = cert.get("machineName", "")
-                if name == "catapult-local":
-                    cid = cert.get("certificateId")
-                    logger.info("Revoking old Catapult cert %s", cid)
+            certs = data.get("certificates", [])
+            logger.info("Found %d existing dev cert(s)", len(certs))
+            for cert in certs:
+                cid = cert.get("certificateId")
+                name = cert.get("machineName", "?")
+                logger.info("Revoking cert %s (%s)", cid, name)
+                try:
                     await self._request(
                         session,
                         "ios/revokeDevelopmentCert",
                         {"teamId": team_id, "certificateId": cid, "serialNumber": cert.get("serialNumber", "")},
                     )
+                except Exception as e:
+                    logger.warning("Failed to revoke cert %s: %s", cid, e)
         except Exception as e:
-            logger.debug("Cert cleanup skipped: %s", e)
+            logger.debug("Cert list/revoke failed: %s", e)
 
     async def register_device(self, session: AuthSession, team_id: str, udid: str, name: str) -> dict:
         logger.info("Registering device %s (%s)", name, udid)
