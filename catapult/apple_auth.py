@@ -45,6 +45,7 @@ HEADERS = {
 class AuthSession:
     apple_id: str = ""
     adsid: str = ""
+    dsprsid: str = ""
     idms_token: str = ""
     session_token: str = ""
     cookies: dict = field(default_factory=dict)
@@ -52,8 +53,10 @@ class AuthSession:
 
     @property
     def identity_token(self) -> str:
-        if self.adsid and self.idms_token:
-            return base64.b64encode(f"{self.adsid}:{self.idms_token}".encode()).decode()
+        """base64(dsid:GsIdmsToken) — try DsPrsId first, then adsid."""
+        dsid = self.dsprsid or self.adsid
+        if dsid and self.idms_token:
+            return base64.b64encode(f"{dsid}:{self.idms_token}".encode()).decode()
         return ""
 
 
@@ -231,11 +234,20 @@ class AppleAuthClient:
             try:
                 decrypted = _decrypt_spd(session_key, spd)
                 logger.info("spd keys: %s", list(decrypted.keys()))
-                self.session.adsid = decrypted.get("adsid", "")
-                self.session.idms_token = decrypted.get("GsIdmsToken", "")
-                logger.info("adsid=%s, idms_token=%s",
-                            self.session.adsid[:12] if self.session.adsid else "EMPTY",
-                            f"{len(self.session.idms_token)} chars" if self.session.idms_token else "EMPTY")
+
+                raw_adsid = decrypted.get("adsid", "")
+                raw_token = decrypted.get("GsIdmsToken", "")
+                raw_dsprsid = decrypted.get("DsPrsId", "")
+
+                # Ensure string types (plistlib may return bytes for <data> elements)
+                self.session.adsid = raw_adsid.decode() if isinstance(raw_adsid, bytes) else str(raw_adsid)
+                self.session.idms_token = raw_token.decode() if isinstance(raw_token, bytes) else str(raw_token)
+                self.session.dsprsid = raw_dsprsid.decode() if isinstance(raw_dsprsid, bytes) else str(raw_dsprsid)
+
+                logger.info("adsid=%s (type=%s), DsPrsId=%s, idms_token=%s (type=%s)",
+                            self.session.adsid[:16], type(raw_adsid).__name__,
+                            self.session.dsprsid[:16] if self.session.dsprsid else "EMPTY",
+                            f"{len(self.session.idms_token)} chars", type(raw_token).__name__)
             except Exception as e:
                 logger.error("Failed to decrypt spd: %s", e)
                 return {"status": "error", "message": f"Session decryption failed: {e}"}
