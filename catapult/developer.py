@@ -218,6 +218,9 @@ class DeveloperServices:
         app_id_id = app_id.get("appIdId", "")
         cert_ids = [self._cert_id] if self._cert_id else []
 
+        # Delete existing profile for this app to ensure fresh cert/device
+        await self._delete_profiles_for_app(session, team_id, app_id_id)
+
         logger.info("Creating provisioning profile (app=%s, cert=%s)", app_id_id, self._cert_id)
         data = await self._request(
             session,
@@ -239,3 +242,21 @@ class DeveloperServices:
 
         logger.info("Provisioning profile created (uuid: %s)", profile.get("UUID", "?"))
         return encoded
+
+    async def _delete_profiles_for_app(self, session: AuthSession, team_id: str, app_id_id: str):
+        """Delete existing provisioning profiles for an app ID so we can create a fresh one."""
+        try:
+            data = await self._request(session, "ios/listProvisioningProfiles", {
+                "teamId": team_id,
+                "includeInactiveProfiles": True,
+            })
+            for p in data.get("provisioningProfiles", []):
+                if p.get("appIdId") == app_id_id:
+                    pid = p.get("provisioningProfileId")
+                    logger.info("Deleting old profile %s", pid)
+                    await self._request(session, "ios/deleteProvisioningProfile", {
+                        "teamId": team_id,
+                        "provisioningProfileId": pid,
+                    })
+        except Exception as e:
+            logger.debug("Profile cleanup skipped: %s", e)
