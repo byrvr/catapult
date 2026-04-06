@@ -263,23 +263,41 @@ class AppleAuthClient:
         except Exception:
             anisette = {}
 
+        identity_token = self.session.identity_token
+        logger.info("2FA identity token: %s...(%d chars)", identity_token[:30], len(identity_token))
+
         headers = {
             "Content-Type": "text/x-xml-plist",
             "Accept": "text/x-xml-plist",
             "User-Agent": "akd/1.0 CFNetwork/1568.200.51 Darwin/24.1.0",
-            "X-MMe-Client-Info": anisette.get("X-MMe-Client-Info",
-                "<MacBookPro18,3> <Mac OS X;13.4.1;22F8> "
-                "<com.apple.AOSKit/282 (com.apple.dt.Xcode/3594.4.19)>"),
-            "X-Apple-Identity-Token": self.session.identity_token,
+            "X-Apple-Identity-Token": identity_token,
+            "X-Apple-ADSID": self.session.adsid,
             **anisette,
         }
 
         url = f"{GSA_AUTH_ENDPOINT}/auth/verify/trusteddevice"
         try:
             resp = await self._client.get(url, headers=headers)
-            logger.info("2FA trigger: HTTP %d, body=%s", resp.status_code, resp.text[:200] if resp.text else "empty")
+            logger.info("2FA trigger: HTTP %d, headers=%s, body=%s",
+                        resp.status_code,
+                        {k: v for k, v in resp.headers.items() if 'apple' in k.lower() or 'x-' in k.lower()},
+                        resp.text[:300] if resp.text else "empty")
         except Exception as e:
             logger.warning("2FA trigger failed: %s", e)
+
+        # Also try requesting SMS as fallback
+        try:
+            sms_headers = dict(headers)
+            sms_headers["Content-Type"] = "application/json"
+            sms_headers["Accept"] = "application/json"
+            sms_resp = await self._client.put(
+                f"{GSA_AUTH_ENDPOINT}/auth/verify/phone",
+                json={"phoneNumber": {"id": 1}, "mode": "sms"},
+                headers=sms_headers,
+            )
+            logger.info("2FA SMS trigger: HTTP %d, body=%s", sms_resp.status_code, sms_resp.text[:200] if sms_resp.text else "empty")
+        except Exception as e:
+            logger.debug("SMS fallback failed: %s", e)
 
     async def submit_2fa(self, code: str) -> dict:
         if not self.session or not self.session.identity_token:
