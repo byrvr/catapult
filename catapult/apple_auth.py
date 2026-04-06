@@ -5,6 +5,7 @@ This module uses the native GSA protocol (gsa.apple.com/grandslam/GsService2)
 which is the same auth path used by macOS, Xcode, and AltServer.
 """
 
+import asyncio
 import base64
 import hashlib
 import hmac as hmac_mod
