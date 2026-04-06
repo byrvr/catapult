@@ -166,37 +166,43 @@ class AppleAuthClient:
             "u": apple_id,
         })
 
-        logger.info("GSA complete response: %s", {
-            k: (v if k == "Status" else f"<{type(v).__name__}>")
-            for k, v in complete_resp.items()
-        })
+        # Status can be top-level or nested in Header
+        comp_status = complete_resp.get("Status") or complete_resp.get("Header", {}).get("Status", {})
+        comp_data = complete_resp.get("Response", {})
 
-        comp_status = complete_resp.get("Status", {})
-        ec = comp_status.get("ec")
+        logger.info("GSA complete keys: top=%s, response_keys=%s, status=%s",
+                     list(complete_resp.keys()), list(comp_data.keys()), comp_status)
+
+        ec = comp_status.get("ec") if isinstance(comp_status, dict) else None
         if ec is not None and ec != 0:
             msg = comp_status.get("em", f"GSA error {ec}")
             if ec == 5000:
                 msg = "Incorrect Apple ID or password"
             logger.error("GSA complete failed: %s (ec=%s)", msg, ec)
             return {"status": "error", "message": msg}
-        if ec is None and not complete_resp.get("Response"):
-            logger.error("GSA complete: unexpected response: %s", complete_resp)
-            return {"status": "error", "message": "Unexpected response from Apple"}
-
-        comp_data = complete_resp.get("Response", {})
 
         # Verify server proof
         M2 = comp_data.get("M2")
         if M2:
             usr.verify_session(M2)
             if not usr.authenticated():
+                logger.error("SRP server proof verification failed")
                 return {"status": "error", "message": "Server verification failed"}
+            logger.info("SRP server proof verified")
+        else:
+            logger.warning("No M2 in response — server proof not verified")
 
         # Get session key for decryption
         session_key = usr.get_session_key()
 
         # Decrypt session data
         spd = comp_data.get("spd")
+        np = comp_data.get("np")
+        logger.info("GSA complete: spd=%s, np=%s, M2=%s, token=%s",
+                     f"{len(spd)}b" if spd else "missing",
+                     f"{len(np)}b" if np else "missing",
+                     f"{len(M2)}b" if M2 else "missing",
+                     "present" if comp_data.get("tk") else "missing")
         if spd:
             try:
                 decrypted = _decrypt_spd(session_key, spd)
