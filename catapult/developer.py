@@ -125,24 +125,14 @@ class DeveloperServices:
             else:
                 raise
 
-        logger.info("CSR response keys: %s", list(data.keys()))
-        cert_info = data.get("certRequest") or data.get("certificate") or data
-        if isinstance(cert_info, dict):
-            logger.info("cert_info keys: %s", list(cert_info.keys()))
-        cert_content = None
-        for key in ("certContent", "certificate", "_certContent"):
-            if key in cert_info:
-                val = cert_info[key]
-                if isinstance(val, dict):
-                    cert_content = val.get("certContent")
-                else:
-                    cert_content = val
-                break
-        if not cert_content:
-            logger.error("No cert found in response: %s", {k: type(v).__name__ for k, v in data.items()})
-            raise DeveloperServicesError("Apple did not return a certificate")
+        cert_req = data.get("certRequest", {})
+        self._cert_id = cert_req.get("certificateId", "")
+        logger.info("CSR accepted, certificateId=%s", self._cert_id)
 
-        self._cert_id = cert_info.get("certificateId") or cert_info.get("certificate", {}).get("certificateId")
+        # The CSR response doesn't include cert content — fetch it from cert list
+        cert_content = await self._download_cert(session, team_id, self._cert_id)
+        if not cert_content:
+            raise DeveloperServicesError("Apple accepted CSR but certificate content not available")
 
         # certContent is DER-encoded; convert to PEM for codesign tooling
         if isinstance(cert_content, bytes) and not cert_content.startswith(b"-----"):
@@ -153,6 +143,18 @@ class DeveloperServices:
 
         logger.info("Signing certificate issued (id: %s)", self._cert_id)
         return cert_pem, self._private_key
+
+    async def _download_cert(self, session: AuthSession, team_id: str, cert_id: str) -> bytes | None:
+        """Fetch cert content by listing all certs and finding by ID."""
+        data = await self._request(session, "ios/listAllDevelopmentCerts", {"teamId": team_id})
+        for cert in data.get("certificates", []):
+            if cert.get("certificateId") == cert_id:
+                content = cert.get("certContent")
+                if content:
+                    logger.info("Downloaded cert %s (%d bytes)", cert_id, len(content))
+                    return content
+        logger.warning("Cert %s not found in list (%d certs)", cert_id, len(data.get("certificates", [])))
+        return None
 
     async def _revoke_certs(self, session: AuthSession, team_id: str):
         """Revoke development certs to make room for a new one."""

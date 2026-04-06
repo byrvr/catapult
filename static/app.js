@@ -309,5 +309,16 @@ $("#installBtn").addEventListener("click", () => {
 
 // ── Init ──
 
+async function checkExistingSession() {
+    try {
+        const resp = await fetch("/api/auth/status");
+        const data = await resp.json();
+        if (data.authenticated) {
+            onAuthSuccess();
+        }
+    } catch {}
+}
+
 refreshDevices();
+checkExistingSession();
 $("#refreshDevices").addEventListener("click", refreshDevices);

@@ -48,6 +48,14 @@ async def list_devices():
         return JSONResponse({"devices": [], "error": str(e)}, status_code=500)
 
 
+@app.get("/api/auth/status")
+async def auth_status():
+    """Check if there's an active authenticated session."""
+    if auth_client.session and auth_client.session.authenticated:
+        return {"authenticated": True, "apple_id": auth_client.session.apple_id}
+    return {"authenticated": False}
+
+
 @app.post("/api/auth/login")
 async def login(payload: dict):
     apple_id = payload.get("apple_id", "")
