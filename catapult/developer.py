@@ -3,6 +3,7 @@
 import logging
 import plistlib
 import ssl
+import uuid
 
 import httpx
 import truststore
@@ -56,21 +57,20 @@ class DeveloperServices:
         payload = {
             "clientId": "XABBG36SBA",
             "protocolVersion": "QH65B2",
-            "requestId": endpoint,
+            "requestId": str(uuid.uuid4()).upper(),
         }
         if fields:
             payload.update(fields)
 
         body = plistlib.dumps(payload)
-        resp = await self._client.post(
-            f"{DEV_SERVICES}/{endpoint}",
-            content=body,
-            headers=self._auth_headers(session),
-        )
+        url = f"{DEV_SERVICES}/{endpoint}.action?clientId=XABBG36SBA"
+        resp = await self._client.post(url, content=body, headers=self._auth_headers(session))
+        logger.debug("%s: HTTP %d (%d bytes)", endpoint, resp.status_code, len(resp.content))
 
         try:
             data = plistlib.loads(resp.content)
         except Exception:
+            logger.error("%s: non-plist response: %s", endpoint, resp.text[:300])
             raise DeveloperServicesError(f"{endpoint}: invalid response (HTTP {resp.status_code})")
 
         # Check for API-level errors

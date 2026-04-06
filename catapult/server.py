@@ -54,7 +54,10 @@ async def login(payload: dict):
     password = payload.get("password", "")
     if not apple_id or not password:
         return JSONResponse({"status": "error", "message": "Apple ID and password are required"}, status_code=400)
-    return await auth_client.authenticate(apple_id, password)
+    result = await auth_client.authenticate(apple_id, password)
+    if result.get("status") == "ok":
+        return await _fetch_team(result)
+    return result
 
 
 @app.post("/api/auth/2fa")
@@ -62,7 +65,22 @@ async def verify_2fa(payload: dict):
     code = payload.get("code", "")
     if not code:
         return JSONResponse({"status": "error", "message": "Code is required"}, status_code=400)
-    return await auth_client.submit_2fa(code)
+    result = await auth_client.submit_2fa(code)
+    if result.get("status") == "ok":
+        return await _fetch_team(result)
+    return result
+
+
+async def _fetch_team(auth_result: dict) -> dict:
+    """Fetch development team right after successful auth."""
+    try:
+        session = auth_client.session
+        team = await dev_services.get_team(session)
+        logger.info("Team: %s (%s)", team.get("name"), team.get("teamId"))
+        return auth_result
+    except Exception as e:
+        logger.error("Team fetch failed: %s", e)
+        return {"status": "error", "message": f"Signed in but team fetch failed: {e}"}
 
 
 @app.post("/api/upload")
