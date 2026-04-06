@@ -1,19 +1,15 @@
-"""Apple ID authentication with 2FA and Anisette support."""
+"""Apple ID authentication with 2FA support."""
 
 import logging
 from dataclasses import dataclass, field
 
 import httpx
 
-from catapult.anisette import get_anisette_headers
-
 logger = logging.getLogger(__name__)
 
 AUTH_ENDPOINT = "https://idmsa.apple.com/appleauth/auth"
+AUTH_INIT_URL = "https://idmsa.apple.com/appleauth/auth/authorize/signin"
 AUTH_CONFIG_URL = "https://appstoreconnect.apple.com/olympus/v1/app/config?hostname=itunesconnect.apple.com"
-
-# Apple OAuth client ID used by the developer portal / Xcode
-OAUTH_CLIENT_ID = "XABBG36SBA"
 
 
 @dataclass
@@ -32,58 +28,88 @@ class AppleAuthClient:
     def __init__(self):
         self.session: AuthSession | None = None
         self._widget_key: str | None = None
+        # Use a plain client (no http2) — Apple's idmsa CDN is picky
         self._client = httpx.AsyncClient(
             timeout=30,
             follow_redirects=True,
         )
+        self._session_initialized = False
 
     async def _get_widget_key(self) -> str:
-        """Fetch Apple's auth service key (widget key) from the config endpoint."""
         if self._widget_key:
             return self._widget_key
 
         logger.info("Fetching auth service key from Apple")
         try:
-            resp = await self._client.get(AUTH_CONFIG_URL, headers={
-                "User-Agent": "Xcode",
-            })
+            resp = await self._client.get(AUTH_CONFIG_URL, headers={"User-Agent": "Xcode"})
             if resp.status_code == 200:
                 data = resp.json()
-                self._widget_key = data.get("authServiceKey", "")
-                if self._widget_key:
-                    logger.info("Got widget key: %s...", self._widget_key[:12])
-                    return self._widget_key
+                key = data.get("authServiceKey", "")
+                if key:
+                    self._widget_key = key
+                    logger.info("Got widget key: %s...", key[:12])
+                    return key
         except Exception as e:
-            logger.warning("Failed to fetch widget key: %s", e)
+            logger.warning("Config fetch failed: %s", e)
 
-        # Hardcoded fallback — this is the publicly-known Xcode auth key.
-        # It rotates occasionally; the config endpoint above is the canonical source.
         self._widget_key = "e0b80c3bf78523bfe80e1b01571ca94d63c63c2dabc2cb4a7dbb0e17aa7f5e85"
         logger.info("Using fallback widget key")
         return self._widget_key
 
-    async def _common_headers(self) -> dict:
+    async def _init_session(self):
+        """Hit the auth page to establish session cookies before signin."""
+        if self._session_initialized:
+            return
+
         widget_key = await self._get_widget_key()
-        headers = {
+        logger.info("Initializing auth session")
+
+        # Visit the sign-in page to get JSESSIONID and other cookies
+        try:
+            resp = await self._client.get(
+                AUTH_INIT_URL,
+                params={
+                    "appIdKey": widget_key,
+                    "path": "/account/",
+                    "directSignIn": "true",
+                },
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                                  "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+                                  "Version/17.0 Safari/605.1.15",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                },
+            )
+            # Capture any cookies Apple set
+            for cookie in resp.cookies.jar:
+                self._client.cookies.set(cookie.name, cookie.value, domain=cookie.domain)
+            logger.info("Session init: HTTP %d, captured cookies", resp.status_code)
+            self._session_initialized = True
+        except Exception as e:
+            logger.warning("Session init failed: %s (continuing anyway)", e)
+
+    async def _auth_headers(self) -> dict:
+        widget_key = await self._get_widget_key()
+        return {
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "User-Agent": "Xcode",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                          "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+                          "Version/17.0 Safari/605.1.15",
             "X-Requested-With": "XMLHttpRequest",
             "X-Apple-Widget-Key": widget_key,
-            "X-Apple-OAuth-Client-Id": OAUTH_CLIENT_ID,
+            "X-Apple-OAuth-Client-Id": widget_key,
             "X-Apple-OAuth-Client-Type": "firstPartyAuth",
-            "X-Apple-OAuth-Redirect-URI": "https://developer.apple.com",
+            "X-Apple-OAuth-Redirect-URI": "https://appstoreconnect.apple.com",
             "X-Apple-OAuth-Response-Mode": "web_message",
             "X-Apple-OAuth-Response-Type": "code",
-            "Origin": "https://developer.apple.com",
-            "Referer": "https://developer.apple.com/",
+            "X-Apple-OAuth-State": '{"appId":"XABBG36SBA"}',
+            "Origin": "https://idmsa.apple.com",
+            "Referer": "https://idmsa.apple.com/",
         }
-        headers.update(get_anisette_headers())
-        return headers
 
     async def _session_headers(self) -> dict:
-        """Common headers plus session identifiers for follow-up requests."""
-        headers = await self._common_headers()
+        headers = await self._auth_headers()
         if self.session:
             if self.session.scnt:
                 headers["scnt"] = self.session.scnt
@@ -94,15 +120,20 @@ class AppleAuthClient:
     async def authenticate(self, apple_id: str, password: str) -> dict:
         self.session = AuthSession(apple_id=apple_id)
 
-        headers = await self._common_headers()
+        # Phase 1: establish session cookies
+        await self._init_session()
+
+        # Phase 2: actual sign-in
+        headers = await self._auth_headers()
         body = {
             "accountName": apple_id,
             "password": password,
             "rememberMe": False,
         }
 
-        logger.info("Authenticating %s with Apple ID", apple_id)
+        logger.info("Authenticating %s", apple_id)
         resp = await self._client.post(f"{AUTH_ENDPOINT}/signin", json=body, headers=headers)
+        logger.info("Signin response: HTTP %d", resp.status_code)
 
         if resp.status_code == 200:
             self._capture_session(resp)
@@ -145,7 +176,6 @@ class AppleAuthClient:
             logger.error("2FA failed: %s", msg)
             return {"status": "error", "message": msg}
 
-        # Trust this session so future requests don't need 2FA
         trust_headers = await self._session_headers()
         trust_resp = await self._client.get(f"{AUTH_ENDPOINT}/2sv/trust", headers=trust_headers)
         self._capture_session(trust_resp)
@@ -161,6 +191,9 @@ class AppleAuthClient:
         if "X-Apple-Session-Token" in resp.headers:
             self.session.session_token = resp.headers["X-Apple-Session-Token"]
         for cookie in resp.cookies.jar:
+            self.session.cookies[cookie.name] = cookie.value
+        # Also grab from the client's cookie jar
+        for cookie in self._client.cookies.jar:
             self.session.cookies[cookie.name] = cookie.value
 
     def _extract_error(self, resp: httpx.Response) -> str:
