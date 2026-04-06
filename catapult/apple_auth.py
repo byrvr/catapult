@@ -69,13 +69,21 @@ def _decrypt_spd(session_key: bytes, data: bytes) -> dict:
     dk = hmac_mod.new(session_key, b"extra data key:", hashlib.sha256).digest()
     iv = hmac_mod.new(session_key, b"extra data iv:", hashlib.sha256).digest()[:16]
 
+    logger.debug("spd decrypt: key=%d bytes, iv=%d bytes, data=%d bytes", len(dk), len(iv), len(data))
+
     cipher = Cipher(algorithms.AES(dk), modes.CBC(iv))
     decryptor = cipher.decryptor()
     decrypted = decryptor.update(data) + decryptor.finalize()
 
-    unpadder = PKCS7(128).unpadder()
-    decrypted = unpadder.update(decrypted) + unpadder.finalize()
+    # Remove PKCS7 padding — but if it fails, try without (Apple sometimes omits padding)
+    try:
+        unpadder = PKCS7(128).unpadder()
+        decrypted = unpadder.update(decrypted) + unpadder.finalize()
+    except ValueError:
+        # Try stripping null bytes instead
+        decrypted = decrypted.rstrip(b"\x00")
 
+    logger.debug("spd decrypted: %d bytes, starts with: %s", len(decrypted), decrypted[:40])
     return plistlib.loads(decrypted)
 
 
@@ -171,12 +179,14 @@ class AppleAuthClient:
             "u": apple_id,
         })
 
-        # Status can be top-level or nested in Header
-        comp_status = complete_resp.get("Status") or complete_resp.get("Header", {}).get("Status", {})
         comp_data = complete_resp.get("Response", {})
+        # Status can be at top level, inside Header, or inside Response
+        comp_status = (complete_resp.get("Status")
+                       or complete_resp.get("Header", {}).get("Status")
+                       or comp_data.get("Status")
+                       or {})
 
-        logger.info("GSA complete keys: top=%s, response_keys=%s, status=%s",
-                     list(complete_resp.keys()), list(comp_data.keys()), comp_status)
+        logger.info("GSA complete: response_keys=%s, status=%s", list(comp_data.keys()), comp_status)
 
         ec = comp_status.get("ec") if isinstance(comp_status, dict) else None
         if ec is not None and ec != 0:
