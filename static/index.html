@@ -17,6 +17,7 @@
                     <path d="M5 12c0 4 3 8 8 8"/>
                 </svg>
                 <h1>Catapult</h1>
+                <span class="version">v0.1.0</span>
             </div>
             <button class="btn-icon" id="refreshDevices" title="Refresh devices">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -26,7 +27,7 @@
             </button>
         </header>
 
-        <!-- Step 1: Device selection -->
+        <!-- Device selection -->
         <section class="card" id="deviceSection">
             <h2>Device</h2>
             <div class="device-list" id="deviceList">
@@ -34,7 +35,7 @@
             </div>
         </section>
 
-        <!-- Step 2: IPA selection -->
+        <!-- IPA selection -->
         <section class="card" id="ipaSection">
             <h2>Application</h2>
             <div class="drop-zone" id="dropZone">
@@ -48,15 +49,18 @@
             <div class="ipa-info" id="ipaInfo" hidden>
                 <div class="ipa-icon">IPA</div>
                 <div class="ipa-meta">
-                    <strong id="ipaName">—</strong>
-                    <span id="ipaBundle">—</span>
-                    <span id="ipaVersion">—</span>
+                    <strong id="ipaName"></strong>
+                    <span id="ipaBundle"></span>
+                    <div class="ipa-tags">
+                        <span class="tag" id="ipaVersion"></span>
+                        <span class="tag" id="ipaMinOS"></span>
+                    </div>
                 </div>
-                <button class="btn-icon" id="clearIpa" title="Remove">&times;</button>
+                <button class="btn-icon btn-sm" id="clearIpa" title="Remove">&times;</button>
             </div>
         </section>
 
-        <!-- Step 3: Apple ID -->
+        <!-- Apple ID -->
         <section class="card" id="authSection">
             <h2>Apple ID</h2>
             <form id="authForm" autocomplete="off">
@@ -67,14 +71,14 @@
             <div id="tfaSection" hidden>
                 <p class="hint">Enter the 2FA code sent to your devices</p>
                 <div class="tfa-inputs">
-                    <input type="text" id="tfaCode" maxlength="6" placeholder="000000" inputmode="numeric" pattern="[0-9]*">
+                    <input type="text" id="tfaCode" maxlength="6" placeholder="000000" inputmode="numeric" pattern="[0-9]*" autocomplete="one-time-code">
                     <button class="btn-primary" id="tfaBtn">Verify</button>
                 </div>
             </div>
             <div class="auth-status" id="authStatus"></div>
         </section>
 
-        <!-- Install button + progress -->
+        <!-- Install -->
         <section class="card" id="installSection">
             <button class="btn-launch" id="installBtn" disabled>
                 <span>Install</span>
