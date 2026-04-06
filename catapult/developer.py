@@ -36,13 +36,13 @@ class DeveloperServices:
             "Accept": "text/x-xml-plist",
             "User-Agent": "Xcode",
             "X-Xcode-Version": "15.0 (15A240d)",
+            "X-Apple-App-Info": "com.apple.gs.xcode.auth",
         }
-        # GSA auth provides an identity token
+        # Identity token goes as BOTH header and cookie (AltSign does both)
         if session.identity_token:
             headers["X-Apple-Identity-Token"] = session.identity_token
-        if session.cookies:
-            headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in session.cookies.items())
-        # Anisette headers are required for developer services
+            headers["Cookie"] = f"myacinfo={session.identity_token}"
+        # Anisette headers with consistent device identity
         try:
             headers.update(get_anisette_http_headers())
         except Exception as e:
