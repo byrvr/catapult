@@ -320,20 +320,18 @@ class AppleAuthClient:
             logger.error("App token request failed: %s", msg)
             return {"status": "error", "message": msg}
 
-        # Decrypt the encrypted token (et) using AES-GCM with sk
-        et = resp_data.get("et", {}).get(app_id)
-        if not et:
-            # Try nested structure
-            t_data = resp_data.get("t", {})
-            if isinstance(t_data, dict):
-                et = t_data.get(app_id, {}).get("token")
-                if et and isinstance(et, str):
-                    # Already decrypted string token
-                    self.session.gs_token = et
-                    logger.info("Got app token directly (no decryption needed)")
-                    return {"status": "ok"}
+        # Find the encrypted token — can be raw bytes or nested in a dict
+        et_raw = resp_data.get("et")
+        if isinstance(et_raw, dict):
+            et = et_raw.get(app_id)
+        elif isinstance(et_raw, bytes):
+            et = et_raw
+        else:
+            et = None
 
-            logger.error("No encrypted token in response. Keys: %s", list(resp_data.keys()))
+        if not et:
+            logger.error("No encrypted token in response. Keys=%s, et type=%s",
+                         list(resp_data.keys()), type(et_raw).__name__)
             return {"status": "error", "message": "No app token in Apple response"}
 
         try:
