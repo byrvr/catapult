@@ -34,14 +34,17 @@ class DeveloperServices:
         headers = {
             "Content-Type": "text/x-xml-plist",
             "Accept": "text/x-xml-plist",
+            "Accept-Language": "en-us",
             "User-Agent": "Xcode",
-            "X-Xcode-Version": "15.0 (15A240d)",
+            "X-Xcode-Version": "11.2 (11B41)",
             "X-Apple-App-Info": "com.apple.gs.xcode.auth",
         }
-        # Identity token goes as BOTH header and cookie (AltSign does both)
-        if session.identity_token:
-            headers["X-Apple-Identity-Token"] = session.identity_token
-            headers["Cookie"] = f"myacinfo={session.identity_token}"
+        # Developer services uses X-Apple-I-Identity-Id + X-Apple-GS-Token
+        # NOT X-Apple-Identity-Token or myacinfo cookies
+        if session.adsid:
+            headers["X-Apple-I-Identity-Id"] = session.adsid
+        if session.gs_token:
+            headers["X-Apple-GS-Token"] = session.gs_token
         # Anisette headers with consistent device identity
         try:
             headers.update(get_anisette_http_headers())

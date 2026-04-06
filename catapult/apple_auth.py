@@ -19,6 +19,7 @@ import httpx
 import srp._pysrp as srp
 import truststore
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.padding import PKCS7
 
 from catapult.anisette import get_anisette_headers, get_anisette_http_headers, AnisetteError
@@ -47,13 +48,16 @@ class AuthSession:
     adsid: str = ""
     dsprsid: str = ""
     idms_token: str = ""
+    gs_token: str = ""  # App-specific token from step 3 (apptokens)
+    sk: bytes = b""  # Session key from spd (for token decryption)
+    c: bytes = b""  # Cookie from spd (for apptokens request)
     session_token: str = ""
     cookies: dict = field(default_factory=dict)
     authenticated: bool = False
 
     @property
     def identity_token(self) -> str:
-        """base64(adsid:GsIdmsToken) — matches AltSign format."""
+        """base64(adsid:GsIdmsToken) — for 2FA endpoints only."""
         if self.adsid and self.idms_token:
             return base64.b64encode(f"{self.adsid}:{self.idms_token}".encode()).decode()
         return ""
@@ -243,10 +247,17 @@ class AppleAuthClient:
                 self.session.idms_token = raw_token.decode() if isinstance(raw_token, bytes) else str(raw_token)
                 self.session.dsprsid = raw_dsprsid.decode() if isinstance(raw_dsprsid, bytes) else str(raw_dsprsid)
 
-                logger.info("adsid=%s (type=%s), DsPrsId=%s, idms_token=%s (type=%s)",
-                            self.session.adsid[:16], type(raw_adsid).__name__,
-                            self.session.dsprsid[:16] if self.session.dsprsid else "EMPTY",
-                            f"{len(self.session.idms_token)} chars", type(raw_token).__name__)
+                # Save sk (session key) and c (cookie) for step 3 (apptokens)
+                raw_sk = decrypted.get("sk", b"")
+                raw_c = decrypted.get("c", b"")
+                self.session.sk = raw_sk if isinstance(raw_sk, bytes) else raw_sk.encode()
+                self.session.c = raw_c if isinstance(raw_c, bytes) else raw_c.encode()
+
+                logger.info("adsid=%s, idms_token=%d chars, sk=%d bytes, c=%d bytes",
+                            self.session.adsid[:16],
+                            len(self.session.idms_token),
+                            len(self.session.sk),
+                            len(self.session.c))
             except Exception as e:
                 logger.error("Failed to decrypt spd: %s", e)
                 return {"status": "error", "message": f"Session decryption failed: {e}"}
@@ -260,9 +271,94 @@ class AppleAuthClient:
             await self._trigger_2fa()
             return {"status": "2fa_required", "auth_type": au}
 
+        # ── Phase 3: Get app-specific token ──
+        token_result = await self._get_app_token()
+        if token_result.get("status") == "error":
+            return token_result
+
         self.session.authenticated = True
-        logger.info("Auth succeeded (no 2FA), adsid=%s", self.session.adsid[:8] if self.session.adsid else "?")
+        logger.info("Auth complete, adsid=%s, gs_token=%d chars",
+                    self.session.adsid[:8] if self.session.adsid else "?",
+                    len(self.session.gs_token))
         return {"status": "ok"}
+
+    async def _get_app_token(self) -> dict:
+        """Step 3: Exchange GsIdmsToken for an app-specific GS token."""
+        if not self.session or not self.session.sk:
+            return {"status": "error", "message": "Missing session key (sk) from auth"}
+
+        app_id = "com.apple.gs.xcode.auth"
+
+        # Compute HMAC checksum: HMAC-SHA256(sk, "apptokens" + adsid + app_id)
+        h = hmac_mod.new(self.session.sk, digestmod=hashlib.sha256)
+        h.update(b"apptokens")
+        h.update(self.session.adsid.encode("utf-8"))
+        h.update(app_id.encode("utf-8"))
+        checksum = h.digest()
+
+        try:
+            cpd = get_anisette_headers()
+        except AnisetteError as e:
+            return {"status": "error", "message": str(e)}
+
+        logger.info("Requesting app token (step 3)")
+        resp = await self._gsa_request({
+            "u": self.session.adsid,
+            "app": [app_id],
+            "c": self.session.c,
+            "t": self.session.idms_token,
+            "checksum": checksum,
+            "cpd": cpd,
+            "o": "apptokens",
+        })
+
+        resp_data = resp.get("Response", {})
+        status = resp.get("Status") or resp_data.get("Status") or {}
+        ec = status.get("ec") if isinstance(status, dict) else None
+        if ec is not None and ec != 0:
+            msg = status.get("em", f"apptokens error {ec}")
+            logger.error("App token request failed: %s", msg)
+            return {"status": "error", "message": msg}
+
+        # Decrypt the encrypted token (et) using AES-GCM with sk
+        et = resp_data.get("et", {}).get(app_id)
+        if not et:
+            # Try nested structure
+            t_data = resp_data.get("t", {})
+            if isinstance(t_data, dict):
+                et = t_data.get(app_id, {}).get("token")
+                if et and isinstance(et, str):
+                    # Already decrypted string token
+                    self.session.gs_token = et
+                    logger.info("Got app token directly (no decryption needed)")
+                    return {"status": "ok"}
+
+            logger.error("No encrypted token in response. Keys: %s", list(resp_data.keys()))
+            return {"status": "error", "message": "No app token in Apple response"}
+
+        try:
+            token_data = self._decrypt_gcm(self.session.sk, et)
+            token_plist = plistlib.loads(token_data)
+            app_entry = token_plist.get("t", {}).get(app_id, {})
+            self.session.gs_token = app_entry.get("token", "")
+            if not self.session.gs_token:
+                logger.error("Decrypted token plist has no token: %s", list(token_plist.keys()))
+                return {"status": "error", "message": "Empty token after decryption"}
+            logger.info("Got app token (%d chars)", len(self.session.gs_token))
+            return {"status": "ok"}
+        except Exception as e:
+            logger.error("Token decryption failed: %s", e)
+            return {"status": "error", "message": f"Token decryption failed: {e}"}
+
+    def _decrypt_gcm(self, sk: bytes, encrypted_data: bytes) -> bytes:
+        """Decrypt AES-256-GCM encrypted app token. Format: XYZ + 16b IV + ciphertext + 16b tag."""
+        if encrypted_data[:3] != b"XYZ":
+            raise ValueError(f"Wrong token header: {encrypted_data[:3]!r}")
+        nonce = encrypted_data[3:19]
+        tag = encrypted_data[-16:]
+        ciphertext = encrypted_data[19:-16]
+        gcm = AESGCM(sk)
+        return gcm.decrypt(nonce, ciphertext + tag, encrypted_data[:3])
 
     async def _trigger_2fa(self):
         """Request Apple to push 2FA code to trusted devices."""
