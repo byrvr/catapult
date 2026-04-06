@@ -229,8 +229,12 @@ class AppleAuthClient:
         if spd:
             try:
                 decrypted = _decrypt_spd(session_key, spd)
+                logger.info("spd keys: %s", list(decrypted.keys()))
                 self.session.adsid = decrypted.get("adsid", "")
                 self.session.idms_token = decrypted.get("GsIdmsToken", "")
+                logger.info("adsid=%s, idms_token=%s",
+                            self.session.adsid[:12] if self.session.adsid else "EMPTY",
+                            f"{len(self.session.idms_token)} chars" if self.session.idms_token else "EMPTY")
             except Exception as e:
                 logger.error("Failed to decrypt spd: %s", e)
                 return {"status": "error", "message": f"Session decryption failed: {e}"}
