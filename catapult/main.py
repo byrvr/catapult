@@ -19,7 +19,7 @@ def _configure_logging(verbose: bool = False):
         format=LOG_FORMAT,
         stream=sys.stderr,
     )
-    for lib in ("httpx", "httpcore", "zeroconf", "hpack", "h2"):
+    for lib in ("httpx", "httpcore", "zeroconf", "hpack", "h2", "python_multipart"):
         logging.getLogger(lib).setLevel(logging.WARNING)
 
 
