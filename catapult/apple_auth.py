@@ -275,29 +275,41 @@ class AppleAuthClient:
             **anisette,
         }
 
+        # Use curl to bypass any httpx quirks — native macOS TLS
         url = f"{GSA_AUTH_ENDPOINT}/auth/verify/trusteddevice"
-        try:
-            resp = await self._client.get(url, headers=headers)
-            logger.info("2FA trigger: HTTP %d, headers=%s, body=%s",
-                        resp.status_code,
-                        {k: v for k, v in resp.headers.items() if 'apple' in k.lower() or 'x-' in k.lower()},
-                        resp.text[:300] if resp.text else "empty")
-        except Exception as e:
-            logger.warning("2FA trigger failed: %s", e)
+        cmd = ["curl", "-s", "-w", "\n%{http_code}", "-D", "-"]
+        for k, v in headers.items():
+            cmd += ["-H", f"{k}: {v}"]
+        cmd.append(url)
 
-        # Also try requesting SMS as fallback
-        try:
-            sms_headers = dict(headers)
-            sms_headers["Content-Type"] = "application/json"
-            sms_headers["Accept"] = "application/json"
-            sms_resp = await self._client.put(
-                f"{GSA_AUTH_ENDPOINT}/auth/verify/phone",
-                json={"phoneNumber": {"id": 1}, "mode": "sms"},
-                headers=sms_headers,
-            )
-            logger.info("2FA SMS trigger: HTTP %d, body=%s", sms_resp.status_code, sms_resp.text[:200] if sms_resp.text else "empty")
-        except Exception as e:
-            logger.debug("SMS fallback failed: %s", e)
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        raw = stdout.decode("utf-8", errors="replace")
+        logger.info("2FA trigger (curl): %s", raw[-50:].strip())
+
+        # Also try SMS via curl
+        sms_url = f"{GSA_AUTH_ENDPOINT}/auth/verify/phone"
+        sms_cmd = ["curl", "-s", "-w", "\n%{http_code}", "-X", "PUT",
+                    "-H", "Content-Type: application/json",
+                    "-H", "Accept: application/json",
+                    "-H", f"X-Apple-Identity-Token: {identity_token}",
+                    "-H", f"X-Apple-ADSID: {self.session.adsid}"]
+        for k, v in anisette.items():
+            sms_cmd += ["-H", f"{k}: {v}"]
+        sms_cmd += ["-d", '{"phoneNumber":{"id":1},"mode":"sms"}', sms_url]
+
+        proc2 = await asyncio.create_subprocess_exec(
+            *sms_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout2, _ = await proc2.communicate()
+        raw2 = stdout2.decode("utf-8", errors="replace")
+        logger.info("2FA SMS trigger (curl): %s", raw2[-100:].strip())
 
     async def submit_2fa(self, code: str) -> dict:
         if not self.session or not self.session.identity_token:
