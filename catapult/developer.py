@@ -194,18 +194,32 @@ class DeveloperServices:
     async def register_app_id(self, session: AuthSession, team_id: str, bundle_id: str) -> dict:
         sideload_id = self.sideload_bundle_id(team_id, bundle_id)
         logger.info("Registering app ID %s (original: %s)", sideload_id, bundle_id)
-        data = await self._request(
-            session,
-            "ios/addAppId",
-            {
-                "teamId": team_id,
-                "identifier": sideload_id,
-                "name": f"Catapult {bundle_id.rsplit('.', 1)[-1]}",
-                "enabledFeatures": {},
+        try:
+            data = await self._request(
+                session,
+                "ios/addAppId",
+                {
+                    "teamId": team_id,
+                    "identifier": sideload_id,
+                    "name": f"Catapult {bundle_id.rsplit('.', 1)[-1]}",
+                    "enabledFeatures": {},
                 "entitlements": {},
             },
         )
-        return data.get("appId", data)
+            return data.get("appId", data)
+        except DeveloperServicesError as e:
+            if "not available" in str(e).lower():
+                logger.info("App ID already exists, looking it up")
+                return await self._find_app_id(session, team_id, sideload_id)
+            raise
+
+    async def _find_app_id(self, session: AuthSession, team_id: str, identifier: str) -> dict:
+        data = await self._request(session, "ios/listAppIds", {"teamId": team_id})
+        for app in data.get("appIds", []):
+            if app.get("identifier") == identifier:
+                logger.info("Found existing app ID: %s", app.get("appIdId"))
+                return app
+        raise DeveloperServicesError(f"App ID {identifier} not found in list")
 
     async def create_profile(
         self,
