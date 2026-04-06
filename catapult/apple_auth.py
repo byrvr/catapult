@@ -264,26 +264,22 @@ class AppleAuthClient:
             anisette = {}
 
         headers = {
+            "Content-Type": "text/x-xml-plist",
+            "Accept": "text/x-xml-plist",
             "User-Agent": "akd/1.0 CFNetwork/1568.200.51 Darwin/24.1.0",
+            "X-MMe-Client-Info": anisette.get("X-MMe-Client-Info",
+                "<MacBookPro18,3> <Mac OS X;13.4.1;22F8> "
+                "<com.apple.AOSKit/282 (com.apple.dt.Xcode/3594.4.19)>"),
             "X-Apple-Identity-Token": self.session.identity_token,
-            "X-Apple-App-Info": "com.apple.gs.xcode.auth",
-            "Accept": "application/json",
             **anisette,
         }
 
-        # Try multiple endpoints — Apple has moved this around
-        endpoints = [
-            f"{GSA_AUTH_ENDPOINT}/auth/verify/trusteddevice",
-            f"{GSA_AUTH_ENDPOINT}/auth",
-        ]
-        for url in endpoints:
-            try:
-                resp = await self._client.get(url, headers=headers)
-                logger.info("2FA trigger %s: HTTP %d", url, resp.status_code)
-                if resp.status_code == 200:
-                    return
-            except Exception as e:
-                logger.warning("2FA trigger %s failed: %s", url, e)
+        url = f"{GSA_AUTH_ENDPOINT}/auth/verify/trusteddevice"
+        try:
+            resp = await self._client.get(url, headers=headers)
+            logger.info("2FA trigger: HTTP %d, body=%s", resp.status_code, resp.text[:200] if resp.text else "empty")
+        except Exception as e:
+            logger.warning("2FA trigger failed: %s", e)
 
     async def submit_2fa(self, code: str) -> dict:
         if not self.session or not self.session.identity_token:
