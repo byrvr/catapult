@@ -142,10 +142,15 @@ class AppleAuthClient:
         # Derive password using server-provided salt/iterations/protocol
         derived_pw = _derive_password(password, salt, iterations, protocol)
 
-        # New SRP user with derived password — generates new A, which is fine:
-        # Apple's GSA only verifies M1 against the password, not against init's A
+        # Create new SRP user with the real derived password, but we MUST
+        # reuse the same private key `a` (and thus public key `A`) from
+        # phase 1 — the server binds M1 verification to the A it received.
+        saved_a = usr.a  # private key from phase 1
         usr = srp.User(apple_id.encode(), derived_pw, hash_alg=srp.SHA256, ng_type=srp.NG_2048)
-        _, A = usr.start_authentication()
+        usr.start_authentication()
+        usr.a = saved_a
+        usr.A = pow(usr.g, saved_a, usr.N)
+
         M = usr.process_challenge(salt, B)
 
         if M is None:
