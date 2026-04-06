@@ -20,7 +20,7 @@ import truststore
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.padding import PKCS7
 
-from catapult.anisette import get_anisette_headers, AnisetteError
+from catapult.anisette import get_anisette_headers, get_anisette_http_headers, AnisetteError
 
 logger = logging.getLogger(__name__)
 
@@ -251,17 +251,35 @@ class AppleAuthClient:
     async def _trigger_2fa(self):
         """Request Apple to push 2FA code to trusted devices."""
         if not self.session or not self.session.identity_token:
+            logger.warning("Cannot trigger 2FA — no identity token")
             return
+
         try:
-            headers = {
-                **HEADERS,
-                "X-Apple-Identity-Token": self.session.identity_token,
-                "X-Apple-App-Info": "com.apple.gs.xcode.auth",
-            }
-            resp = await self._client.get(f"{GSA_AUTH_ENDPOINT}/auth/verify/trusteddevice", headers=headers)
-            logger.info("2FA push trigger: HTTP %d", resp.status_code)
-        except Exception as e:
-            logger.warning("2FA push trigger failed: %s", e)
+            anisette = get_anisette_http_headers()
+        except Exception:
+            anisette = {}
+
+        headers = {
+            "User-Agent": "akd/1.0 CFNetwork/1568.200.51 Darwin/24.1.0",
+            "X-Apple-Identity-Token": self.session.identity_token,
+            "X-Apple-App-Info": "com.apple.gs.xcode.auth",
+            "Accept": "application/json",
+            **anisette,
+        }
+
+        # Try multiple endpoints — Apple has moved this around
+        endpoints = [
+            f"{GSA_AUTH_ENDPOINT}/auth/verify/trusteddevice",
+            f"{GSA_AUTH_ENDPOINT}/auth",
+        ]
+        for url in endpoints:
+            try:
+                resp = await self._client.get(url, headers=headers)
+                logger.info("2FA trigger %s: HTTP %d", url, resp.status_code)
+                if resp.status_code == 200:
+                    return
+            except Exception as e:
+                logger.warning("2FA trigger %s failed: %s", url, e)
 
     async def submit_2fa(self, code: str) -> dict:
         if not self.session or not self.session.identity_token:
