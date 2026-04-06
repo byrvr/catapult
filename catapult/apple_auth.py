@@ -84,6 +84,14 @@ def _decrypt_spd(session_key: bytes, data: bytes) -> dict:
         decrypted = decrypted.rstrip(b"\x00")
 
     logger.debug("spd decrypted: %d bytes, starts with: %s", len(decrypted), decrypted[:40])
+
+    # Apple returns bare <dict>...</dict> without plist wrapper — add it if needed
+    if decrypted.lstrip().startswith(b"<dict>"):
+        decrypted = (
+            b'<?xml version="1.0" encoding="UTF-8"?>'
+            b'<plist version="1.0">' + decrypted + b'</plist>'
+        )
+
     return plistlib.loads(decrypted)
 
 
