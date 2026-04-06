@@ -136,14 +136,16 @@ async def install_ws(ws: WebSocket):
         # 3. App ID + provisioning profile
         await _send(ws, "signing", 40, "Registering app ID...")
         ipa_info = await ipa_processor.inspect(ipa_path)
-        app_id = await dev_services.register_app_id(session, team_id, ipa_info["bundle_id"])
+        original_bundle_id = ipa_info["bundle_id"]
+        sideload_bundle_id = dev_services.sideload_bundle_id(team_id, original_bundle_id)
+        app_id = await dev_services.register_app_id(session, team_id, original_bundle_id)
 
         await _send(ws, "signing", 50, "Creating provisioning profile...")
         profile = await dev_services.create_profile(session, team_id, app_id, cert, device_udid)
 
-        # 4. Sign
+        # 4. Sign (with modified bundle ID for sideloading)
         await _send(ws, "signing", 60, "Signing IPA...")
-        signed_path = await signer.sign(ipa_path, cert, private_key, profile)
+        signed_path = await signer.sign(ipa_path, cert, private_key, profile, sideload_bundle_id)
 
         # 5. Install
         await _send(ws, "installing", 80, f"Installing to {device_info['name']}...")

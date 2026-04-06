@@ -4,6 +4,7 @@ import asyncio
 import logging
 import plistlib
 import shutil
+import plistlib
 import tempfile
 from pathlib import Path
 
@@ -25,6 +26,7 @@ class Signer:
         cert_bytes: bytes,
         private_key: rsa.RSAPrivateKey,
         profile_bytes: bytes,
+        new_bundle_id: str | None = None,
     ) -> Path:
         ipa_path = Path(ipa_path)
         work_dir = Path(tempfile.mkdtemp(prefix="catapult_sign_"))
@@ -32,6 +34,10 @@ class Signer:
         try:
             app_dir = await self._ipa.extract(ipa_path, work_dir)
             logger.info("Extracted %s to %s", ipa_path.name, app_dir)
+
+            # Update bundle ID for sideloading
+            if new_bundle_id:
+                self._update_bundle_id(app_dir, new_bundle_id)
 
             # Embed provisioning profile
             (app_dir / "embedded.mobileprovision").write_bytes(profile_bytes)
@@ -186,6 +192,17 @@ class Signer:
         cmd.append(str(path))
 
         await self._run(*cmd, label=f"codesign:{path.name}")
+
+    def _update_bundle_id(self, app_dir: Path, new_id: str):
+        """Rewrite CFBundleIdentifier in Info.plist."""
+        plist_path = app_dir / "Info.plist"
+        with plist_path.open("rb") as f:
+            info = plistlib.load(f)
+        old_id = info.get("CFBundleIdentifier", "")
+        info["CFBundleIdentifier"] = new_id
+        with plist_path.open("wb") as f:
+            plistlib.dump(info, f)
+        logger.info("Bundle ID: %s → %s", old_id, new_id)
 
     async def _run(self, *cmd: str, label: str = "", check: bool = True):
         proc = await asyncio.create_subprocess_exec(

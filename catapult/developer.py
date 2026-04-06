@@ -185,14 +185,21 @@ class DeveloperServices:
             {"teamId": team_id, "deviceNumber": udid, "name": name or "Catapult Device"},
         )
 
+    @staticmethod
+    def sideload_bundle_id(team_id: str, original_bundle_id: str) -> str:
+        """Create a unique bundle ID for sideloading (free accounts can't use taken IDs)."""
+        safe = original_bundle_id.replace(".", "-")
+        return f"com.catapult.{team_id}.{safe}"
+
     async def register_app_id(self, session: AuthSession, team_id: str, bundle_id: str) -> dict:
-        logger.info("Registering app ID %s", bundle_id)
+        sideload_id = self.sideload_bundle_id(team_id, bundle_id)
+        logger.info("Registering app ID %s (original: %s)", sideload_id, bundle_id)
         data = await self._request(
             session,
             "ios/addAppId",
             {
                 "teamId": team_id,
-                "identifier": bundle_id,
+                "identifier": sideload_id,
                 "name": f"Catapult {bundle_id.rsplit('.', 1)[-1]}",
                 "enabledFeatures": {},
                 "entitlements": {},
