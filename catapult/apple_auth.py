@@ -278,12 +278,14 @@ class AppleAuthClient:
         identity_token = self.session.identity_token
         logger.info("2FA identity token: %s...(%d chars)", identity_token[:30], len(identity_token))
 
-        # Match AltSign's exact headers for 2FA trigger
+        # Headers must match what every working implementation sends
         headers = {
             "Content-Type": "text/x-xml-plist",
             "Accept": "text/x-xml-plist",
+            "Accept-Language": "en-us",
             "User-Agent": "Xcode",
-            "X-Xcode-Version": "15.0 (15A240d)",
+            "X-Xcode-Version": "11.2 (11B41)",
+            "X-Apple-App-Info": "com.apple.gs.xcode.auth",
             "X-Apple-Identity-Token": identity_token,
             **anisette,
         }
@@ -304,12 +306,13 @@ class AppleAuthClient:
                 "Content-Type": "application/json",
                 "Accept": "application/json",
                 "User-Agent": "Xcode",
-                "X-Xcode-Version": "15.0 (15A240d)",
+                "X-Xcode-Version": "11.2 (11B41)",
+                "X-Apple-App-Info": "com.apple.gs.xcode.auth",
                 "X-Apple-Identity-Token": identity_token,
                 **anisette,
             }
             sms_resp = await self._client.put(
-                f"{GSA_AUTH_ENDPOINT}/auth/verify/phone",
+                f"{GSA_AUTH_ENDPOINT}/auth/verify/phone/",
                 json={"phoneNumber": {"id": 1}, "mode": "sms"},
                 headers=sms_headers,
             )
