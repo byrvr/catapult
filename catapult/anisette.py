@@ -71,25 +71,33 @@ def _try_omnisette_server() -> dict | None:
     return None
 
 
-def get_anisette_headers() -> dict:
-    """
-    Return Anisette headers for Apple GSA auth.
-
-    Tries native macOS → omnisette-server → raises error.
-    """
+def _fetch_raw() -> dict:
+    """Get raw Anisette key-value pairs from any available source."""
     native = _try_native_macos()
     if native:
-        return _build_cpd(native)
+        return native
 
     omnisette = _try_omnisette_server()
     if omnisette:
-        return _build_cpd(omnisette)
+        return omnisette
 
     raise AnisetteError(
         "Could not obtain Anisette data. Options:\n"
         "  1. Run omnisette-server: docker run -d -p 6969:80 ghcr.io/sidestore/omnisette-server:latest\n"
         "  2. On macOS, ensure SIP allows access to private frameworks"
     )
+
+
+def get_anisette_headers() -> dict:
+    """Return Anisette cpd dict for GSA requests."""
+    return _build_cpd(_fetch_raw())
+
+
+def get_anisette_http_headers() -> dict:
+    """Return Anisette as HTTP headers for developer services / API requests."""
+    raw = _fetch_raw()
+    # Only include keys that are actual HTTP headers (start with X-)
+    return {k: str(v) for k, v in raw.items() if k.startswith("X-")}
 
 
 class AnisetteError(RuntimeError):

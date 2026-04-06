@@ -2,14 +2,16 @@
 
 import logging
 import plistlib
+import ssl
 
 import httpx
+import truststore
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
-from catapult.anisette import get_anisette_headers
+from catapult.anisette import get_anisette_http_headers
 from catapult.apple_auth import AuthSession
 
 logger = logging.getLogger(__name__)
@@ -23,7 +25,8 @@ class DeveloperServicesError(RuntimeError):
 
 class DeveloperServices:
     def __init__(self):
-        self._client = httpx.AsyncClient(timeout=30, follow_redirects=True)
+        ctx = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        self._client = httpx.AsyncClient(timeout=30, follow_redirects=True, verify=ctx)
         self._private_key: rsa.RSAPrivateKey | None = None
         self._cert_id: str | None = None
 
@@ -34,11 +37,16 @@ class DeveloperServices:
             "User-Agent": "Xcode",
             "X-Xcode-Version": "15.0 (15A240d)",
         }
-        # GSA auth provides an identity token; web auth uses cookies
+        # GSA auth provides an identity token
         if session.identity_token:
             headers["X-Apple-Identity-Token"] = session.identity_token
         if session.cookies:
             headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in session.cookies.items())
+        # Anisette headers are required for developer services
+        try:
+            headers.update(get_anisette_http_headers())
+        except Exception as e:
+            logger.warning("Could not fetch Anisette for dev services: %s", e)
         return headers
 
     async def _request(self, session: AuthSession, endpoint: str, fields: dict | None = None) -> dict:
