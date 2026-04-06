@@ -53,10 +53,9 @@ class AuthSession:
 
     @property
     def identity_token(self) -> str:
-        """base64(dsid:GsIdmsToken) — try DsPrsId first, then adsid."""
-        dsid = self.dsprsid or self.adsid
-        if dsid and self.idms_token:
-            return base64.b64encode(f"{dsid}:{self.idms_token}".encode()).decode()
+        """base64(adsid:GsIdmsToken) — matches AltSign format."""
+        if self.adsid and self.idms_token:
+            return base64.b64encode(f"{self.adsid}:{self.idms_token}".encode()).decode()
         return ""
 
 
@@ -279,50 +278,44 @@ class AppleAuthClient:
         identity_token = self.session.identity_token
         logger.info("2FA identity token: %s...(%d chars)", identity_token[:30], len(identity_token))
 
+        # Match AltSign's exact headers for 2FA trigger
         headers = {
             "Content-Type": "text/x-xml-plist",
             "Accept": "text/x-xml-plist",
-            "User-Agent": "akd/1.0 CFNetwork/1568.200.51 Darwin/24.1.0",
+            "User-Agent": "Xcode",
+            "X-Xcode-Version": "15.0 (15A240d)",
             "X-Apple-Identity-Token": identity_token,
-            "X-Apple-ADSID": self.session.adsid,
             **anisette,
         }
 
-        # Use curl to bypass any httpx quirks — native macOS TLS
         url = f"{GSA_AUTH_ENDPOINT}/auth/verify/trusteddevice"
-        cmd = ["curl", "-s", "-w", "\n%{http_code}", "-D", "-"]
-        for k, v in headers.items():
-            cmd += ["-H", f"{k}: {v}"]
-        cmd.append(url)
+        try:
+            # httpx client shares cookie jar from GSA session
+            resp = await self._client.get(url, headers=headers)
+            logger.info("2FA trigger: HTTP %d, body=%s", resp.status_code, resp.text[:200] if resp.text else "empty")
+            if resp.status_code == 200:
+                return
+        except Exception as e:
+            logger.warning("2FA trigger failed: %s", e)
 
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await proc.communicate()
-        raw = stdout.decode("utf-8", errors="replace")
-        logger.info("2FA trigger (curl): %s", raw[-50:].strip())
-
-        # Also try SMS via curl
-        sms_url = f"{GSA_AUTH_ENDPOINT}/auth/verify/phone"
-        sms_cmd = ["curl", "-s", "-w", "\n%{http_code}", "-X", "PUT",
-                    "-H", "Content-Type: application/json",
-                    "-H", "Accept: application/json",
-                    "-H", f"X-Apple-Identity-Token: {identity_token}",
-                    "-H", f"X-Apple-ADSID: {self.session.adsid}"]
-        for k, v in anisette.items():
-            sms_cmd += ["-H", f"{k}: {v}"]
-        sms_cmd += ["-d", '{"phoneNumber":{"id":1},"mode":"sms"}', sms_url]
-
-        proc2 = await asyncio.create_subprocess_exec(
-            *sms_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout2, _ = await proc2.communicate()
-        raw2 = stdout2.decode("utf-8", errors="replace")
-        logger.info("2FA SMS trigger (curl): %s", raw2[-100:].strip())
+        # If trusted device trigger failed, try requesting SMS
+        try:
+            sms_headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": "Xcode",
+                "X-Xcode-Version": "15.0 (15A240d)",
+                "X-Apple-Identity-Token": identity_token,
+                **anisette,
+            }
+            sms_resp = await self._client.put(
+                f"{GSA_AUTH_ENDPOINT}/auth/verify/phone",
+                json={"phoneNumber": {"id": 1}, "mode": "sms"},
+                headers=sms_headers,
+            )
+            logger.info("2FA SMS: HTTP %d, body=%s", sms_resp.status_code, sms_resp.text[:200] if sms_resp.text else "empty")
+        except Exception as e:
+            logger.debug("SMS fallback failed: %s", e)
 
     async def submit_2fa(self, code: str) -> dict:
         if not self.session or not self.session.identity_token:
