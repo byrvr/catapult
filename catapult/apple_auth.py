@@ -336,6 +336,8 @@ class AppleAuthClient:
 
         try:
             token_data = self._decrypt_gcm(self.session.sk, et)
+            if token_data.lstrip().startswith(b"<dict>"):
+                token_data = b'<?xml version="1.0" encoding="UTF-8"?><plist version="1.0">' + token_data + b'</plist>'
             token_plist = plistlib.loads(token_data)
             app_entry = token_plist.get("t", {}).get(app_id, {})
             self.session.gs_token = app_entry.get("token", "")
