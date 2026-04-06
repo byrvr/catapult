@@ -1,221 +1,246 @@
-"""Apple ID authentication with 2FA support.
+"""Apple ID authentication via GSA (Grand Slam Authentication) using SRP-6a.
 
-Uses curl for HTTP requests to bypass TLS fingerprinting — Apple's CDN
-rejects Python's TLS stack (httpx/requests) with 503. macOS curl uses
-SecureTransport which Apple recognizes as legitimate.
+The web-based idmsa.apple.com flow is blocked for non-browser clients.
+This module uses the native GSA protocol (gsa.apple.com/grandslam/GsService2)
+which is the same auth path used by macOS, Xcode, and AltServer.
 """
 
-import asyncio
-import json
+import base64
+import hashlib
+import hmac as hmac_mod
 import logging
-import tempfile
+import plistlib
 from dataclasses import dataclass, field
-from pathlib import Path
+
+import ssl
+
+import httpx
+import srp._pysrp as srp
+import truststore
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.padding import PKCS7
+
+from catapult.anisette import get_anisette_headers, AnisetteError
 
 logger = logging.getLogger(__name__)
 
-AUTH_ENDPOINT = "https://idmsa.apple.com/appleauth/auth"
-AUTH_CONFIG_URL = "https://appstoreconnect.apple.com/olympus/v1/app/config?hostname=itunesconnect.apple.com"
+# Configure SRP for Apple's variant
+srp.rfc5054_enable()
+srp.no_username_in_x()
+
+GSA_ENDPOINT = "https://gsa.apple.com/grandslam/GsService2"
+GSA_AUTH_ENDPOINT = "https://gsa.apple.com"
+
+HEADERS = {
+    "Content-Type": "text/x-xml-plist",
+    "Accept": "*/*",
+    "User-Agent": "akd/1.0 CFNetwork/1568.200.51 Darwin/24.1.0",
+    "X-MMe-Client-Info": "<MacBookPro18,3> <Mac OS X;13.4.1;22F8> "
+                         "<com.apple.AOSKit/282 (com.apple.dt.Xcode/3594.4.19)>",
+}
 
 
 @dataclass
 class AuthSession:
     apple_id: str = ""
+    adsid: str = ""
+    idms_token: str = ""
     session_token: str = ""
-    scnt: str = ""
-    session_id: str = ""
-    auth_type: str = ""
-    headers: dict = field(default_factory=dict)
     cookies: dict = field(default_factory=dict)
     authenticated: bool = False
+
+    @property
+    def identity_token(self) -> str:
+        if self.adsid and self.idms_token:
+            return base64.b64encode(f"{self.adsid}:{self.idms_token}".encode()).decode()
+        return ""
+
+
+def _derive_password(password: str, salt: bytes, iterations: int, protocol: str) -> bytes:
+    """Derive SRP password using Apple's s2k / s2k_fo scheme."""
+    p = hashlib.sha256(password.encode("utf-8")).digest()
+    if protocol == "s2k_fo":
+        p = p.hex().encode("utf-8")
+    return hashlib.pbkdf2_hmac("sha256", p, salt, iterations, dklen=32)
+
+
+def _decrypt_spd(session_key: bytes, data: bytes) -> dict:
+    """Decrypt the session data blob returned by GSA after SRP."""
+    dk = hmac_mod.new(session_key, b"extra data key:", hashlib.sha256).digest()
+    iv = hmac_mod.new(session_key, b"extra data iv:", hashlib.sha256).digest()[:16]
+
+    cipher = Cipher(algorithms.AES(dk), modes.CBC(iv))
+    decryptor = cipher.decryptor()
+    decrypted = decryptor.update(data) + decryptor.finalize()
+
+    unpadder = PKCS7(128).unpadder()
+    decrypted = unpadder.update(decrypted) + unpadder.finalize()
+
+    return plistlib.loads(decrypted)
 
 
 class AppleAuthClient:
     def __init__(self):
         self.session: AuthSession | None = None
-        self._widget_key: str | None = None
-        self._cookie_jar = Path(tempfile.mkdtemp(prefix="catapult_")) / "cookies.txt"
+        # Use macOS system trust store so Apple's CA is trusted
+        ctx = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        self._client = httpx.AsyncClient(timeout=30, verify=ctx)
+        self._last_password: str = ""
 
-    async def _curl(self, method: str, url: str, headers: dict | None = None,
-                    json_body: dict | None = None, include_headers: bool = True) -> tuple[int, dict, str]:
-        """Run a curl request, return (status_code, response_headers, body)."""
-        cmd = [
-            "curl", "-s", "-S",
-            "-X", method,
-            "-b", str(self._cookie_jar),
-            "-c", str(self._cookie_jar),
-            "-L",  # follow redirects
-            "-w", "\n%{http_code}",  # append status code
-        ]
-
-        if include_headers:
-            cmd += ["-D", "-"]  # dump response headers to stdout
-
-        if headers:
-            for k, v in headers.items():
-                cmd += ["-H", f"{k}: {v}"]
-
-        if json_body is not None:
-            cmd += ["-d", json.dumps(json_body)]
-
-        cmd.append(url)
-
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await proc.communicate()
-
-        if stderr:
-            logger.debug("curl stderr: %s", stderr.decode().strip())
-
-        raw = stdout.decode("utf-8", errors="replace")
-
-        # Parse: headers are separated from body by \r\n\r\n, status code is last line
-        lines = raw.rstrip().rsplit("\n", 1)
-        status_code = int(lines[-1]) if lines[-1].isdigit() else 0
-        content = lines[0] if len(lines) > 1 else ""
-
-        resp_headers = {}
-        body = content
-        if include_headers and "\r\n\r\n" in content:
-            # May have multiple header blocks (redirects)
-            parts = content.split("\r\n\r\n")
-            body = parts[-1]
-            # Parse last header block before body
-            if len(parts) >= 2:
-                for line in parts[-2].splitlines():
-                    if ": " in line:
-                        k, v = line.split(": ", 1)
-                        resp_headers[k.strip()] = v.strip()
-
-        return status_code, resp_headers, body
-
-    async def _get_widget_key(self) -> str:
-        if self._widget_key:
-            return self._widget_key
-
-        logger.info("Fetching auth service key from Apple")
-        status, _, body = await self._curl("GET", AUTH_CONFIG_URL, include_headers=False)
-        if status == 200:
-            try:
-                data = json.loads(body)
-                key = data.get("authServiceKey", "")
-                if key:
-                    self._widget_key = key
-                    logger.info("Got widget key: %s...", key[:12])
-                    return key
-            except json.JSONDecodeError:
-                pass
-
-        self._widget_key = "e0b80c3bf78523bfe80e1b01571ca94d63c63c2dabc2cb4a7dbb0e17aa7f5e85"
-        logger.info("Using fallback widget key")
-        return self._widget_key
-
-    async def _auth_headers(self) -> dict:
-        widget_key = await self._get_widget_key()
-        return {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "X-Requested-With": "XMLHttpRequest",
-            "X-Apple-Widget-Key": widget_key,
-            "X-Apple-OAuth-Client-Id": widget_key,
-            "X-Apple-OAuth-Client-Type": "firstPartyAuth",
-            "X-Apple-OAuth-Redirect-URI": "https://appstoreconnect.apple.com",
-            "X-Apple-OAuth-Response-Mode": "web_message",
-            "X-Apple-OAuth-Response-Type": "code",
-            "Origin": "https://idmsa.apple.com",
-            "Referer": "https://idmsa.apple.com/",
-        }
+    async def _gsa_request(self, request_body: dict) -> dict:
+        body = plistlib.dumps({"Header": {"Version": "1.0.1"}, "Request": request_body})
+        resp = await self._client.post(GSA_ENDPOINT, content=body, headers=HEADERS)
+        logger.debug("GSA HTTP %d (%d bytes)", resp.status_code, len(resp.content))
+        return plistlib.loads(resp.content)
 
     async def authenticate(self, apple_id: str, password: str) -> dict:
+        self._last_password = password
+        return await self._gsa_authenticate(apple_id, password)
+
+    async def _gsa_authenticate(self, apple_id: str, password: str) -> dict:
         self.session = AuthSession(apple_id=apple_id)
 
-        headers = await self._auth_headers()
-        body = {
-            "accountName": apple_id,
-            "password": password,
-            "rememberMe": False,
-        }
+        try:
+            cpd = get_anisette_headers()
+        except AnisetteError as e:
+            return {"status": "error", "message": str(e)}
 
-        logger.info("Authenticating %s", apple_id)
-        status, resp_headers, resp_body = await self._curl(
-            "POST", f"{AUTH_ENDPOINT}/signin", headers=headers, json_body=body,
-        )
-        logger.info("Signin response: HTTP %d", status)
+        # ── Phase 1: SRP init ──
+        logger.info("GSA init for %s", apple_id)
+        usr = srp.User(apple_id.encode(), b"", hash_alg=srp.SHA256, ng_type=srp.NG_2048)
+        _, A = usr.start_authentication()
 
-        self._capture_headers(resp_headers)
+        init_resp = await self._gsa_request({
+            "A2k": A,
+            "cpd": cpd,
+            "o": "init",
+            "ps": ["s2k", "s2k_fo"],
+            "u": apple_id,
+        })
 
-        if status == 200:
-            self.session.authenticated = True
-            logger.info("Auth succeeded (no 2FA)")
-            return {"status": "ok"}
-
-        if status == 409:
-            self.session.auth_type = resp_headers.get("X-Apple-Auth-Type", "")
-            logger.info("2FA required (type: %s)", self.session.auth_type)
-            return {"status": "2fa_required", "auth_type": self.session.auth_type}
-
-        if status == 401:
-            return {"status": "error", "message": "Incorrect Apple ID or password"}
-
-        if status == 403:
-            return {"status": "error", "message": "Account locked or requires verification at appleid.apple.com"}
-
-        msg = self._extract_error(status, resp_body)
-        logger.error("Auth failed (%d): %s", status, msg)
-        return {"status": "error", "message": msg}
-
-    async def submit_2fa(self, code: str) -> dict:
-        if not self.session:
-            return {"status": "error", "message": "No pending auth session"}
-
-        headers = await self._auth_headers()
-        if self.session.scnt:
-            headers["scnt"] = self.session.scnt
-        if self.session.session_id:
-            headers["X-Apple-ID-Session-Id"] = self.session.session_id
-
-        body = {"securityCode": {"code": code}}
-
-        logger.info("Submitting 2FA code")
-        status, resp_headers, resp_body = await self._curl(
-            "POST",
-            f"{AUTH_ENDPOINT}/verify/trusteddevice/securitycode",
-            headers=headers,
-            json_body=body,
-        )
-
-        if status not in (200, 204):
-            msg = self._extract_error(status, resp_body)
-            logger.error("2FA failed: %s", msg)
+        status = init_resp.get("Status", {})
+        if status.get("ec", 0) != 0:
+            msg = status.get("em", f"GSA error {status.get('ec')}")
+            logger.error("GSA init failed: %s", msg)
             return {"status": "error", "message": msg}
 
-        # Trust the session
-        trust_headers = dict(headers)
-        status, resp_headers, _ = await self._curl(
-            "GET", f"{AUTH_ENDPOINT}/2sv/trust", headers=trust_headers,
-        )
-        self._capture_headers(resp_headers)
+        resp_data = init_resp.get("Response", {})
+        salt = resp_data.get("s")
+        B = resp_data.get("B")
+        iterations = resp_data.get("i", 0)
+        cookie = resp_data.get("c", "")
+        protocol = resp_data.get("sp", "s2k")
+
+        if not salt or not B:
+            return {"status": "error", "message": "Unexpected response from Apple (missing SRP params)"}
+
+        logger.info("GSA init ok: protocol=%s iterations=%d", protocol, iterations)
+
+        # ── Phase 2: SRP complete ──
+        derived_pw = _derive_password(password, salt, iterations, protocol)
+
+        usr = srp.User(apple_id.encode(), derived_pw, hash_alg=srp.SHA256, ng_type=srp.NG_2048)
+        _, A = usr.start_authentication()
+        M = usr.process_challenge(salt, B)
+
+        if M is None:
+            return {"status": "error", "message": "SRP verification failed — incorrect password?"}
+
+        logger.info("GSA complete (sending proof)")
+        complete_resp = await self._gsa_request({
+            "M1": M,
+            "c": cookie,
+            "cpd": cpd,
+            "o": "complete",
+            "u": apple_id,
+        })
+
+        comp_status = complete_resp.get("Status", {})
+        ec = comp_status.get("ec", -1)
+        if ec != 0:
+            msg = comp_status.get("em", f"GSA error {ec}")
+            if ec == 5000:
+                msg = "Incorrect Apple ID or password"
+            logger.error("GSA complete failed: %s (ec=%d)", msg, ec)
+            return {"status": "error", "message": msg}
+
+        comp_data = complete_resp.get("Response", {})
+
+        # Verify server proof
+        M2 = comp_data.get("M2")
+        if M2:
+            usr.verify_session(M2)
+            if not usr.authenticated():
+                return {"status": "error", "message": "Server verification failed"}
+
+        # Get session key for decryption
+        session_key = usr.get_session_key()
+
+        # Decrypt session data
+        spd = comp_data.get("spd")
+        if spd:
+            try:
+                decrypted = _decrypt_spd(session_key, spd)
+                self.session.adsid = decrypted.get("adsid", "")
+                self.session.idms_token = decrypted.get("GsIdmsToken", "")
+            except Exception as e:
+                logger.error("Failed to decrypt spd: %s", e)
+                return {"status": "error", "message": f"Session decryption failed: {e}"}
+
+        self.session.session_token = comp_data.get("tk", "")
+
+        # Check for 2FA
+        au = comp_status.get("au", "")
+        if au in ("trustedDeviceSecondaryAuth", "secondaryAuth"):
+            logger.info("2FA required (type: %s, adsid: %s)", au, self.session.adsid[:8] if self.session.adsid else "?")
+            await self._trigger_2fa()
+            return {"status": "2fa_required", "auth_type": au}
+
         self.session.authenticated = True
-        logger.info("2FA verified, session trusted")
+        logger.info("Auth succeeded (no 2FA), adsid=%s", self.session.adsid[:8] if self.session.adsid else "?")
         return {"status": "ok"}
 
-    def _capture_headers(self, headers: dict):
-        if "scnt" in headers:
-            self.session.scnt = headers["scnt"]
-        if "X-Apple-ID-Session-Id" in headers:
-            self.session.session_id = headers["X-Apple-ID-Session-Id"]
-        if "X-Apple-Session-Token" in headers:
-            self.session.session_token = headers["X-Apple-Session-Token"]
-
-    def _extract_error(self, status: int, body: str) -> str:
+    async def _trigger_2fa(self):
+        """Request Apple to push 2FA code to trusted devices."""
+        if not self.session or not self.session.identity_token:
+            return
         try:
-            data = json.loads(body)
-            errors = data.get("serviceErrors", [])
-            if errors:
-                return errors[0].get("message", body[:200])
-        except (json.JSONDecodeError, KeyError):
-            pass
-        return f"HTTP {status}: {body[:200]}"
+            headers = {
+                **HEADERS,
+                "X-Apple-Identity-Token": self.session.identity_token,
+                "X-Apple-App-Info": "com.apple.gs.xcode.auth",
+            }
+            resp = await self._client.get(f"{GSA_AUTH_ENDPOINT}/auth/verify/trusteddevice", headers=headers)
+            logger.info("2FA push trigger: HTTP %d", resp.status_code)
+        except Exception as e:
+            logger.warning("2FA push trigger failed: %s", e)
+
+    async def submit_2fa(self, code: str) -> dict:
+        if not self.session or not self.session.identity_token:
+            return {"status": "error", "message": "No pending auth session"}
+
+        headers = {
+            **HEADERS,
+            "X-Apple-Identity-Token": self.session.identity_token,
+            "X-Apple-App-Info": "com.apple.gs.xcode.auth",
+            "security-code": code,
+        }
+
+        logger.info("Submitting 2FA code via GSA validate")
+        resp = await self._client.get(
+            f"{GSA_AUTH_ENDPOINT}/grandslam/GsService2/validate",
+            headers=headers,
+        )
+        logger.info("2FA validate: HTTP %d", resp.status_code)
+
+        if resp.status_code != 200:
+            return {"status": "error", "message": f"2FA validation failed (HTTP {resp.status_code})"}
+
+        # Re-authenticate — should succeed without 2FA this time
+        logger.info("Re-authenticating after 2FA")
+        result = await self._gsa_authenticate(self.session.apple_id, self._last_password)
+
+        if result.get("status") == "2fa_required":
+            return {"status": "error", "message": "2FA still required — code may be incorrect"}
+
+        return result

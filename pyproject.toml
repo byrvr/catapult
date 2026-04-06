@@ -13,6 +13,8 @@ dependencies = [
     "pywebview>=5.0",
     "python-multipart>=0.0.9",
     "pyobjc-framework-Cocoa>=10.0",
+    "srp>=1.0.0",
+    "truststore>=0.9.0",
 ]
 
 [project.scripts]

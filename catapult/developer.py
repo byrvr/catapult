@@ -33,9 +33,12 @@ class DeveloperServices:
             "Accept": "text/x-xml-plist",
             "User-Agent": "Xcode",
             "X-Xcode-Version": "15.0 (15A240d)",
-            "Cookie": "; ".join(f"{k}={v}" for k, v in session.cookies.items()),
         }
-        headers.update(get_anisette_headers())
+        # GSA auth provides an identity token; web auth uses cookies
+        if session.identity_token:
+            headers["X-Apple-Identity-Token"] = session.identity_token
+        if session.cookies:
+            headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in session.cookies.items())
         return headers
 
     async def _request(self, session: AuthSession, endpoint: str, fields: dict | None = None) -> dict:
