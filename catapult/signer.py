@@ -1,4 +1,8 @@
+"""IPA signing via temporary keychain and macOS codesign."""
+
 import asyncio
+import logging
+import plistlib
 import shutil
 import tempfile
 from pathlib import Path
@@ -7,6 +11,8 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from catapult.ipa import IpaProcessor
+
+logger = logging.getLogger(__name__)
 
 
 class Signer:
@@ -25,11 +31,16 @@ class Signer:
 
         try:
             app_dir = await self._ipa.extract(ipa_path, work_dir)
+            logger.info("Extracted %s to %s", ipa_path.name, app_dir)
 
-            # Write provisioning profile
+            # Embed provisioning profile
             (app_dir / "embedded.mobileprovision").write_bytes(profile_bytes)
 
-            # Write cert and key to temp files for codesign
+            # Extract entitlements from the profile
+            entitlements_path = work_dir / "entitlements.plist"
+            self._extract_entitlements(profile_bytes, entitlements_path)
+
+            # Build p12 and set up isolated keychain
             cert_path = work_dir / "cert.pem"
             key_path = work_dir / "key.pem"
             cert_path.write_bytes(cert_bytes)
@@ -45,82 +56,144 @@ class Signer:
             await self._create_p12(cert_path, key_path, p12_path)
 
             keychain = await self._setup_keychain(work_dir, p12_path)
+            identity = await self._find_identity(keychain)
 
             try:
-                await self._codesign(app_dir, keychain)
+                await self._codesign_app(app_dir, keychain, identity, entitlements_path)
             finally:
                 await self._cleanup_keychain(keychain)
 
             signed_ipa = work_dir / f"{ipa_path.stem}_signed.ipa"
             await self._ipa.repack(app_dir, signed_ipa)
+            logger.info("Signed IPA written to %s", signed_ipa)
             return signed_ipa
         except Exception:
             shutil.rmtree(work_dir, ignore_errors=True)
             raise
 
+    def _extract_entitlements(self, profile_bytes: bytes, dest: Path):
+        """Pull entitlements dict from a provisioning profile and write as plist."""
+        # Profile is a CMS signed blob; the plist payload is between
+        # the first <?xml and </plist> tags.
+        raw = profile_bytes.decode("latin-1")
+        start = raw.find("<?xml")
+        end = raw.find("</plist>") + len("</plist>")
+        if start < 0 or end <= len("</plist>"):
+            raise RuntimeError("Could not parse provisioning profile")
+
+        plist_data = plistlib.loads(raw[start:end].encode("latin-1"))
+        entitlements = plist_data.get("Entitlements", {})
+        dest.write_bytes(plistlib.dumps(entitlements))
+        logger.info("Extracted entitlements: %s", list(entitlements.keys()))
+
     async def _create_p12(self, cert_path: Path, key_path: Path, p12_path: Path):
-        proc = await asyncio.create_subprocess_exec(
+        await self._run(
             "openssl", "pkcs12", "-export",
             "-out", str(p12_path),
             "-inkey", str(key_path),
             "-in", str(cert_path),
             "-passout", "pass:",
-            stderr=asyncio.subprocess.PIPE,
+            label="create-p12",
         )
-        _, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            raise RuntimeError(f"Failed to create p12: {stderr.decode()}")
 
     async def _setup_keychain(self, work_dir: Path, p12_path: Path) -> str:
         keychain = str(work_dir / "catapult.keychain-db")
-        password = "catapult-tmp"
+        pwd = "catapult-tmp"
 
-        cmds = [
-            ["security", "create-keychain", "-p", password, keychain],
-            ["security", "set-keychain-settings", keychain],
-            ["security", "unlock-keychain", "-p", password, keychain],
-            ["security", "import", str(p12_path), "-k", keychain, "-P", "", "-T", "/usr/bin/codesign"],
-            ["security", "set-key-partition-list", "-S", "apple-tool:,apple:", "-s", "-k", password, keychain],
-        ]
-        for cmd in cmds:
-            proc = await asyncio.create_subprocess_exec(*cmd, stderr=asyncio.subprocess.PIPE)
-            await proc.communicate()
+        await self._run("security", "create-keychain", "-p", pwd, keychain, label="create-keychain")
+        await self._run("security", "set-keychain-settings", keychain, label="set-keychain-settings")
+        await self._run("security", "unlock-keychain", "-p", pwd, keychain, label="unlock-keychain")
+        await self._run(
+            "security", "import", str(p12_path),
+            "-k", keychain, "-P", "", "-T", "/usr/bin/codesign",
+            label="import-cert",
+        )
+        await self._run(
+            "security", "set-key-partition-list",
+            "-S", "apple-tool:,apple:", "-s", "-k", pwd, keychain,
+            label="set-partition-list",
+        )
 
+        logger.info("Temporary keychain ready at %s", keychain)
         return keychain
 
+    async def _find_identity(self, keychain: str) -> str:
+        """Find the signing identity hash in the keychain."""
+        proc = await asyncio.create_subprocess_exec(
+            "security", "find-identity", "-v", "-p", "codesigning", keychain,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await proc.communicate()
+        # Output lines look like:  1) AABB1122... "iPhone Developer: ..."
+        for line in stdout.decode().splitlines():
+            line = line.strip()
+            if ")" in line and '"' in line:
+                parts = line.split(")")[1].strip().split('"')[0].strip()
+                if parts:
+                    logger.info("Found signing identity: %s", parts[:12] + "...")
+                    return parts
+        # Fallback to ad-hoc
+        logger.warning("No identity found, falling back to ad-hoc signing")
+        return "-"
+
     async def _cleanup_keychain(self, keychain: str):
-        proc = await asyncio.create_subprocess_exec(
-            "security", "delete-keychain", keychain,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        await proc.communicate()
+        await self._run("security", "delete-keychain", keychain, label="delete-keychain", check=False)
 
-    async def _codesign(self, app_dir: Path, keychain: str):
-        # Sign frameworks and dylibs first
-        frameworks = app_dir / "Frameworks"
-        if frameworks.exists():
-            for item in frameworks.iterdir():
-                await self._codesign_path(item, keychain)
+    async def _codesign_app(self, app_dir: Path, keychain: str, identity: str, entitlements: Path):
+        """Sign all signable content inside the app bundle."""
+        # Frameworks
+        frameworks_dir = app_dir / "Frameworks"
+        if frameworks_dir.exists():
+            for item in sorted(frameworks_dir.iterdir()):
+                await self._codesign_path(item, keychain, identity, entitlements=None)
 
-        # Sign plugins
-        plugins = app_dir / "PlugIns"
-        if plugins.exists():
-            for item in plugins.iterdir():
-                await self._codesign_path(item, keychain)
+        # PlugIns / app extensions
+        plugins_dir = app_dir / "PlugIns"
+        if plugins_dir.exists():
+            for item in sorted(plugins_dir.iterdir()):
+                if item.suffix == ".appex":
+                    await self._codesign_path(item, keychain, identity, entitlements)
+                else:
+                    await self._codesign_path(item, keychain, identity, entitlements=None)
 
-        # Sign the main app bundle
-        await self._codesign_path(app_dir, keychain)
+        # Watch apps
+        watch_dir = app_dir / "Watch"
+        if watch_dir.exists():
+            for item in sorted(watch_dir.rglob("*.app")):
+                await self._codesign_path(item, keychain, identity, entitlements=None)
 
-    async def _codesign_path(self, path: Path, keychain: str):
-        proc = await asyncio.create_subprocess_exec(
-            "codesign",
-            "--force", "--sign", "-",
+        # Main binary
+        await self._codesign_path(app_dir, keychain, identity, entitlements)
+        logger.info("All components signed")
+
+    async def _codesign_path(
+        self,
+        path: Path,
+        keychain: str,
+        identity: str,
+        entitlements: Path | None,
+    ):
+        cmd = [
+            "codesign", "--force", "--sign", identity,
             "--keychain", keychain,
-            "--preserve-metadata=identifier,entitlements,flags",
             "--generate-entitlement-der",
-            str(path),
+        ]
+        if entitlements:
+            cmd += ["--entitlements", str(entitlements)]
+        else:
+            cmd.append("--preserve-metadata=identifier,entitlements,flags")
+        cmd.append(str(path))
+
+        await self._run(*cmd, label=f"codesign:{path.name}")
+
+    async def _run(self, *cmd: str, label: str = "", check: bool = True):
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        _, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            raise RuntimeError(f"codesign failed for {path.name}: {stderr.decode()}")
+        stdout, stderr = await proc.communicate()
+        if check and proc.returncode != 0:
+            raise RuntimeError(f"[{label}] failed (rc={proc.returncode}): {stderr.decode().strip()}")
+        return stdout.decode()
