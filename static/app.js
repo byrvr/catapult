@@ -78,27 +78,58 @@ function renderDevices(devices) {
         if (setupBtn) {
             setupBtn.addEventListener("click", async (e) => {
                 e.stopPropagation();
-                setupBtn.textContent = "Pairing...";
+                setupBtn.textContent = "Searching...";
                 setupBtn.disabled = true;
+                const deviceName = el.querySelector(".device-name")?.textContent || "";
+
+                // Start pairing in background — it may block waiting for PIN
+                const pairPromise = fetch("/api/devices/setup", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ name: deviceName }),
+                });
+
+                // Poll for PIN request
+                const pollPin = async () => {
+                    for (let i = 0; i < 60; i++) {
+                        await new Promise(r => setTimeout(r, 1000));
+                        try {
+                            const sr = await fetch("/api/devices/pair-status");
+                            const sd = await sr.json();
+                            if (sd.state === "waiting_pin") {
+                                setupBtn.textContent = "Enter PIN";
+                                const pin = prompt("Enter the PIN shown on your Apple TV:");
+                                if (pin) {
+                                    await fetch("/api/devices/pin", {
+                                        method: "POST",
+                                        headers: { "Content-Type": "application/json" },
+                                        body: JSON.stringify({ pin }),
+                                    });
+                                    setupBtn.textContent = "Pairing...";
+                                }
+                                return;
+                            }
+                            if (sd.state === "done" || sd.state === "error") return;
+                        } catch {}
+                    }
+                };
+
+                pollPin();
+
                 try {
-                    const deviceName = el.querySelector(".device-name")?.textContent || "";
-                    const resp = await fetch("/api/devices/setup", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ name: deviceName }),
-                    });
+                    const resp = await pairPromise;
                     const data = await resp.json();
                     if (data.status === "ok") {
                         setupBtn.textContent = "Done!";
-                        setTimeout(refreshDevices, 1000);
+                        setTimeout(refreshDevices, 2000);
                     } else {
-                        setupBtn.textContent = "Failed";
                         alert(data.message || "Setup failed");
-                        setTimeout(() => { setupBtn.textContent = "Setup"; setupBtn.disabled = false; }, 2000);
+                        setupBtn.textContent = "Setup";
+                        setupBtn.disabled = false;
                     }
                 } catch {
-                    setupBtn.textContent = "Error";
-                    setTimeout(() => { setupBtn.textContent = "Setup"; setupBtn.disabled = false; }, 2000);
+                    setupBtn.textContent = "Setup";
+                    setupBtn.disabled = false;
                 }
             });
         }

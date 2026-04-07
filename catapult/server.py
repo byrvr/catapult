@@ -78,15 +78,25 @@ async def start_tunnel():
 
 @app.post("/api/devices/setup")
 async def setup_device(payload: dict = None):
-    """One-click pair + tunnel for unpaired devices."""
+    """Start pairing flow for a device."""
     name = payload.get("name") if payload else None
-    pair_result = await device_manager.pair_device(device_name=name)
-    if pair_result.get("status") != "ok":
-        return pair_result
-    tunnel_result = await device_manager.start_tunnel()
-    if tunnel_result.get("status") == "ok":
-        await device_manager.discover()
-    return tunnel_result
+    return await device_manager.pair_device(device_name=name)
+
+
+@app.post("/api/devices/pin")
+async def submit_pin(payload: dict):
+    """Submit the PIN shown on the device during pairing."""
+    pin = payload.get("pin", "")
+    if not pin:
+        return JSONResponse({"status": "error", "message": "PIN is required"}, status_code=400)
+    device_manager.submit_pin(pin)
+    return {"status": "ok"}
+
+
+@app.get("/api/devices/pair-status")
+async def pair_status():
+    """Check current pairing state."""
+    return {"state": device_manager._pairing_state}
 
 
 @app.get("/api/auth/status")

@@ -122,8 +122,12 @@ class DeviceManager:
 
     # ── Pairing + Tunnel ──
 
+    # For PIN exchange between the pairing coroutine and the web UI
+    _pin_future: asyncio.Future | None = None
+    _pairing_state: str = "idle"  # idle, waiting_pin, pairing, done, error
+
     async def pair_device(self, device_name: str | None = None) -> dict:
-        """Pair with a device using pymobiledevice3's Python API directly."""
+        """Start pairing. Returns immediately if PIN is needed (check pair_status)."""
         try:
             from pymobiledevice3.bonjour import browse_remotepairing_manual_pairing
             from pymobiledevice3.cli.remote import RemotePairingManualPairingService
@@ -131,43 +135,71 @@ class DeviceManager:
             return {"status": "error", "message": f"pymobiledevice3 remote pairing not available: {e}"}
 
         logger.info("Browsing for devices to pair with (name=%s)...", device_name)
+        self._pairing_state = "browsing"
         try:
             answers = await browse_remotepairing_manual_pairing()
         except Exception as e:
+            self._pairing_state = "error"
             return {"status": "error", "message": f"Device browse failed: {e}"}
 
-        # Find the device
         target = None
         for answer in answers:
             name = answer.properties.get("name", "")
             if device_name and name != device_name:
                 continue
             for addr in answer.addresses:
-                if not addr.full_ip.startswith("fe80"):  # Prefer non-link-local
+                if not addr.full_ip.startswith("fe80"):
                     target = (addr.full_ip, answer.port, answer.properties.get("identifier", ""))
                     break
             if target:
                 break
-            # Fallback to first address
             if answer.addresses:
                 addr = answer.addresses[0]
                 target = (addr.full_ip, answer.port, answer.properties.get("identifier", ""))
                 break
 
         if not target:
-            return {"status": "error", "message": f"No pairable device found (name={device_name}). Enable Developer Mode on the device."}
+            self._pairing_state = "error"
+            return {"status": "error", "message": "No pairable device found. Enable Developer Mode on Apple TV."}
 
         ip, port, identifier = target
-        logger.info("Pairing with %s at %s:%d (id=%s)", device_name or "device", ip, port, identifier)
+        logger.info("Pairing with %s at %s:%d", device_name or "device", ip, port)
+        self._pairing_state = "pairing"
+
+        # Monkey-patch input() to wait for PIN from web UI
+        import builtins
+        original_input = builtins.input
+        loop = asyncio.get_event_loop()
+
+        def _web_input(prompt=""):
+            logger.info("PIN requested — waiting for input from web UI")
+            self._pairing_state = "waiting_pin"
+            self._pin_future = loop.create_future()
+            # Block this thread until the PIN is provided
+            # (connect runs in the event loop, so we need a thread-safe wait)
+            pin = asyncio.run_coroutine_threadsafe(self._pin_future, loop).result(timeout=120)
+            logger.info("Got PIN from web UI")
+            return pin
 
         try:
+            builtins.input = _web_input
             async with RemotePairingManualPairingService(identifier, ip, port) as service:
                 await service.connect(autopair=True)
+            self._pairing_state = "done"
             logger.info("Pairing successful!")
             return {"status": "ok", "message": "Paired successfully"}
         except Exception as e:
+            self._pairing_state = "error"
             logger.error("Pairing failed: %s", e)
             return {"status": "error", "message": f"Pairing failed: {e}"}
+        finally:
+            builtins.input = original_input
+
+    def submit_pin(self, pin: str):
+        """Called from the web UI to provide the PIN shown on the device."""
+        if self._pin_future and not self._pin_future.done():
+            self._pin_future.set_result(pin)
+            self._pairing_state = "pairing"
 
     async def _run_privileged(self, command: str, label: str) -> dict:
         """Run a command with admin privileges via macOS password dialog."""
