@@ -15,10 +15,21 @@ from catapult.signer import Signer
 
 logger = logging.getLogger(__name__)
 
+from starlette.middleware import Middleware
+from starlette.responses import Response
+
 app = FastAPI(title="Catapult")
 
 static_dir = Path(__file__).parent.parent / "static"
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
+
+@app.middleware("http")
+async def no_cache_static(request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return response
 
 device_manager = DeviceManager()
 auth_client = AppleAuthClient()
