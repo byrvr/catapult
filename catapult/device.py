@@ -368,7 +368,6 @@ class DeviceManager:
 
     async def _install_via_rsd(self, host: str, port: int, ipa_path: Path):
         from pymobiledevice3.tunneld.api import get_tunneld_devices
-        from pymobiledevice3.lockdown import create_using_remote
         from pymobiledevice3.services.installation_proxy import InstallationProxyService
 
         rsds = await get_tunneld_devices()
@@ -376,8 +375,7 @@ class DeviceManager:
             raise RuntimeError("No tunneled devices found. Try Setup again.")
         rsd = rsds[0]
         try:
-            lockdown = await create_using_remote(rsd)
-            installer = InstallationProxyService(lockdown=lockdown)
+            installer = InstallationProxyService(lockdown=rsd)
             await installer.install_from_local(str(ipa_path))
         finally:
             await rsd.close()
