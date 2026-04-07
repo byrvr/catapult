@@ -374,11 +374,11 @@ class DeviceManager:
         rsd = RemoteServiceDiscoveryService((host, port))
         await rsd.connect()
         try:
-            lockdown = create_using_remote(rsd)
+            lockdown = await create_using_remote(rsd)
             installer = InstallationProxyService(lockdown=lockdown)
             await installer.install_from_local(str(ipa_path))
         finally:
-            rsd.close()
+            await rsd.close()
 
     async def _install_via_lockdown(self, host: str, port: int, ipa_path: Path):
         from pymobiledevice3.lockdown import create_using_tcp
