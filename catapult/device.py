@@ -247,44 +247,30 @@ class DeviceManager:
 
     _tunnel_address: str | None = None
     _tunnel_port: int | None = None
+    TUNNELD_URL = "http://127.0.0.1:49151"
 
-    async def start_tunnel(self) -> dict:
-        """Start a tunnel to paired devices via subprocess (requires admin for TUN device)."""
-        import os, tempfile, stat, re
+    async def _ensure_tunneld(self) -> bool:
+        """Check if tunneld is running, start it if not."""
+        import httpx
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(self.TUNNELD_URL, timeout=2)
+                return resp.status_code == 200
+        except Exception:
+            return False
 
-        # Already have a running tunnel
-        if self._tunnel_address and self._tunnel_port:
-            return {"status": "ok", "message": f"Tunnel already active"}
+    async def _start_tunneld(self) -> dict:
+        """Start tunneld as a background daemon with admin privileges."""
+        import os, tempfile, stat
 
         home = Path.home()
-        log_file = "/tmp/catapult_tunnel.log"
-
-        # Find the most recent pair record to use as --udid (avoids interactive prompt)
-        pair_dir = home / ".pymobiledevice3"
-        udid_flag = ""
-        if pair_dir.exists():
-            records = sorted(pair_dir.glob("remote_*.plist"), key=lambda p: p.stat().st_mtime, reverse=True)
-            if records:
-                # Extract UUID from filename: remote_{UUID}.plist
-                match = re.search(r"remote_(.+)\.plist", records[0].name)
-                if match:
-                    udid_flag = f"--udid {match.group(1)} "
-                    logger.info("Using pair record: %s", match.group(1))
-
-        # Build script: kill stale, start tunnel with --script-mode, wait for output
         command = (
-            f"pkill -f 'pymobiledevice3 remote start-tunnel' 2>/dev/null; sleep 1; "
+            f"pkill -f 'pymobiledevice3 remote tunneld' 2>/dev/null; sleep 1; "
             f"HOME={home} PYTHONUNBUFFERED=1 "
-            f"{sys.executable} -m pymobiledevice3 remote start-tunnel -t wifi {udid_flag}--script-mode "
-            f"> {log_file} 2>&1 & "
-            f"TPID=$!; "
-            # Wait up to 20s for the script-mode output line (address port)
-            f"for i in $(seq 1 20); do "
-            f"  if [ -s {log_file} ]; then cat {log_file}; exit 0; fi; "
-            f"  if ! kill -0 $TPID 2>/dev/null; then echo 'TUNNEL_DIED'; exit 1; fi; "
-            f"  sleep 1; "
-            f"done; "
-            f"echo 'TUNNEL_TIMEOUT'; exit 1"
+            f"{sys.executable} -m pymobiledevice3 remote tunneld --no-usb --no-usbmux --no-mobdev2 "
+            f"> /tmp/catapult_tunneld.log 2>&1 & "
+            f"TPID=$!; sleep 3; "
+            f"if kill -0 $TPID 2>/dev/null; then echo $TPID; else cat /tmp/catapult_tunneld.log; exit 1; fi"
         )
 
         script = tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False, prefix="catapult_")
@@ -292,7 +278,7 @@ class DeviceManager:
         script.close()
         os.chmod(script.name, stat.S_IRWXU)
 
-        logger.info("Starting tunnel (admin privileges required)...")
+        logger.info("Starting tunneld (admin privileges required)...")
         try:
             proc = await asyncio.create_subprocess_exec(
                 "osascript", "-e",
@@ -303,23 +289,52 @@ class DeviceManager:
             stdout, stderr = await proc.communicate()
             output = stdout.decode().strip()
             err = stderr.decode().strip()
-            logger.info("Tunnel output (rc=%d): stdout=%s stderr=%s", proc.returncode, output[:300], err[:300])
+            logger.info("tunneld output (rc=%d): %s %s", proc.returncode, output[:200], err[:200])
 
             if proc.returncode != 0:
-                msg = output or err or "Unknown error"
-                return {"status": "error", "message": f"Tunnel failed: {msg[:200]}"}
-
-            # Parse script-mode output: "address port"
-            parts = output.split()
-            if len(parts) >= 2:
-                self._tunnel_address = parts[0]
-                self._tunnel_port = int(parts[1])
-                logger.info("Tunnel RSD endpoint: %s:%d", self._tunnel_address, self._tunnel_port)
-                return {"status": "ok", "message": f"Tunnel active at {self._tunnel_address}:{self._tunnel_port}"}
-            else:
-                return {"status": "error", "message": f"Unexpected tunnel output: {output[:200]}"}
+                return {"status": "error", "message": f"tunneld failed: {(output or err)[:200]}"}
+            return {"status": "ok", "message": f"tunneld started (PID {output})"}
         finally:
             os.unlink(script.name)
+
+    async def start_tunnel(self) -> dict:
+        """Ensure tunneld is running, then wait for a tunnel to appear."""
+        import httpx
+
+        # Already have a tunnel
+        if self._tunnel_address and self._tunnel_port:
+            return {"status": "ok", "message": "Tunnel already active"}
+
+        # Start tunneld if not running
+        if not await self._ensure_tunneld():
+            result = await self._start_tunneld()
+            if result["status"] != "ok":
+                return result
+            # Wait for tunneld to be ready
+            await asyncio.sleep(2)
+
+        # Poll tunneld for tunnels (it auto-discovers WiFi devices)
+        logger.info("Waiting for tunneld to establish tunnel...")
+        async with httpx.AsyncClient() as client:
+            for i in range(15):
+                try:
+                    resp = await client.get(self.TUNNELD_URL, timeout=3)
+                    tunnels = resp.json()
+                    logger.info("tunneld tunnels: %s", tunnels)
+                    for udid, details in tunnels.items():
+                        if details:
+                            t = details[0]
+                            self._tunnel_address = t["tunnel-address"]
+                            self._tunnel_port = t["tunnel-port"]
+                            logger.info("Tunnel ready: %s:%d (device %s)",
+                                        self._tunnel_address, self._tunnel_port, udid)
+                            return {"status": "ok",
+                                    "message": f"Tunnel active at {self._tunnel_address}:{self._tunnel_port}"}
+                except Exception as e:
+                    logger.debug("tunneld poll %d: %s", i, e)
+                await asyncio.sleep(2)
+
+        return {"status": "error", "message": "Tunnel not established — device may need re-pairing"}
 
     # ── Installation ──
 
