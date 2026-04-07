@@ -196,6 +196,7 @@ class DeviceManager:
         """Run the actual pairing in a separate thread with its own event loop."""
         import builtins
         from pymobiledevice3.cli.remote import RemotePairingManualPairingService
+        from pymobiledevice3.exceptions import RemotePairingCompletedError
 
         original_input = builtins.input
         self._pin_event.clear()
@@ -218,6 +219,12 @@ class DeviceManager:
             loop.run_until_complete(_do_pair())
             self._pairing_state = "done"
             logger.info("Pairing successful!")
+            return {"status": "ok", "message": "Paired successfully"}
+        except RemotePairingCompletedError:
+            # This is actually a SUCCESS — pymobiledevice3 raises this when
+            # pairing completes and the remote endpoint closes the connection.
+            self._pairing_state = "done"
+            logger.info("Pairing completed successfully (connection closed by device)")
             return {"status": "ok", "message": "Paired successfully"}
         except Exception as e:
             self._pairing_state = "error"
@@ -264,7 +271,7 @@ class DeviceManager:
     async def start_tunnel(self) -> dict:
         """Start a tunnel to paired devices. Runs in background with admin privileges."""
         result = await self._run_privileged(
-            f"{sys.executable} -m pymobiledevice3 remote start-tunnel "
+            f"{sys.executable} -m pymobiledevice3 remote start-tunnel -t wifi "
             f"> /tmp/catapult_tunnel.log 2>&1 & "
             f"TPID=$!; sleep 5; "
             f"if kill -0 $TPID 2>/dev/null; then echo $TPID; else cat /tmp/catapult_tunnel.log; exit 1; fi",
