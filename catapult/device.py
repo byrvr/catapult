@@ -23,7 +23,9 @@ DEVICE_CLASS_MAP = {
     "iPad": "ipados",
 }
 
-INSTALLABLE_SERVICES = {"_remotepairing._tcp.local.", "_apple-mobdev2._tcp.local."}
+# Only mobdev2 is directly installable. Remotepairing needs pair + tunnel first.
+INSTALLABLE_SERVICES = {"_apple-mobdev2._tcp.local."}
+NEEDS_SETUP_SERVICES = {"_remotepairing._tcp.local."}
 
 
 class _Listener(ServiceListener):
@@ -68,6 +70,7 @@ class _Listener(ServiceListener):
             "device_class": device_class,
             "connection": "network",
             "installable": stype in INSTALLABLE_SERVICES,
+            "needs_setup": stype in NEEDS_SETUP_SERVICES,
             "properties": props,
         }
 
@@ -110,7 +113,12 @@ class DeviceManager:
                 best_names[host] = n
             if d.get("model"):
                 best_models[host] = d["model"]
-            if host not in by_host or (d["installable"] and not by_host[host]["installable"]):
+            # Priority: installable > needs_setup > other
+            def _priority(dev):
+                if dev["installable"]: return 2
+                if dev.get("needs_setup"): return 1
+                return 0
+            if host not in by_host or _priority(d) > _priority(by_host[host]):
                 by_host[host] = d
         for host, d in by_host.items():
             if host in best_names:

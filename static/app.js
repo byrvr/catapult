@@ -39,9 +39,7 @@ function renderDevices(devices) {
     }
 
     const filtered = devices.filter((d) => {
-        // Always show installable devices
-        if (d.installable) return true;
-        // Show Apple TV / iPhone / iPad
+        if (d.installable || d.needs_setup) return true;
         const cls = d.device_class || "unknown";
         if (cls === "ios" || cls === "tvos" || cls === "ipados") return true;
         return false;
@@ -57,7 +55,7 @@ function renderDevices(devices) {
             const cls = d.device_class || "unknown";
             const icon = DEVICE_ICONS[cls] || DEVICE_ICONS.unknown;
             const label = cls === "unknown" ? "device" : cls;
-            const needsSetup = !d.installable;
+            const needsSetup = d.needs_setup || (!d.installable && !d.needs_setup);
             return `
                 <div class="device-item${needsSetup ? ' needs-setup' : ''}" data-udid="${esc(d.udid)}" data-installable="${d.installable}">
                     <span class="device-icon">${icon}</span>
