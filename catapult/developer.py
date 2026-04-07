@@ -1,4 +1,18 @@
-"""Apple Developer Services API — certificates, profiles, device registration."""
+"""Apple Developer Services API -- certificates, profiles, device registration.
+
+Implements the provisioning flow used by AltSign/AltStore/ReProvision:
+  1. Fetch team
+  2. Fetch existing certs -> revoke all -> submit new CSR
+  3. Register device (idempotent, resultCode 35 = already exists)
+  4. Register app ID (idempotent, or look up existing)
+  5. Delete any stale provisioning profile for the app
+  6. Download (create) provisioning profile via downloadTeamProvisioningProfile
+     (Apple server-side creates/returns the profile with all registered certs+devices)
+
+Key insight from AltSign: the endpoint is downloadTeamProvisioningProfile, NOT
+createProvisioningProfile.  It only needs appIdId + teamId.  Apple's server
+automatically includes all registered certificates and devices in the profile.
+"""
 
 import logging
 import plistlib
@@ -19,9 +33,18 @@ logger = logging.getLogger(__name__)
 
 DEV_SERVICES = "https://developerservices2.apple.com/services/QH65B2"
 
+# Apple result codes
+RC_SUCCESS = 0
+RC_ALREADY_EXISTS = 35
+RC_BUNDLE_ID_UNAVAILABLE = 9401
+
 
 class DeveloperServicesError(RuntimeError):
     """Raised when Apple's developer services returns an error."""
+
+    def __init__(self, message: str, result_code: int = 0):
+        super().__init__(message)
+        self.result_code = result_code
 
 
 class DeveloperServices:
@@ -30,6 +53,9 @@ class DeveloperServices:
         self._client = httpx.AsyncClient(timeout=30, follow_redirects=True, verify=ctx)
         self._private_key: rsa.RSAPrivateKey | None = None
         self._cert_id: str | None = None
+        self._cert_serial: str | None = None
+
+    # ── Auth headers ──
 
     def _auth_headers(self, session: AuthSession) -> dict:
         headers = {
@@ -40,21 +66,31 @@ class DeveloperServices:
             "X-Xcode-Version": "11.2 (11B41)",
             "X-Apple-App-Info": "com.apple.gs.xcode.auth",
         }
-        # Developer services uses X-Apple-I-Identity-Id + X-Apple-GS-Token
-        # NOT X-Apple-Identity-Token or myacinfo cookies
         if session.adsid:
             headers["X-Apple-I-Identity-Id"] = session.adsid
         if session.gs_token:
             headers["X-Apple-GS-Token"] = session.gs_token
-        # Anisette headers with consistent device identity
         try:
             headers.update(get_anisette_http_headers())
         except Exception as e:
             logger.warning("Could not fetch Anisette for dev services: %s", e)
         return headers
 
-    async def _request(self, session: AuthSession, endpoint: str, fields: dict | None = None) -> dict:
-        payload = {
+    # ── Low-level request ──
+
+    async def _request(
+        self,
+        session: AuthSession,
+        endpoint: str,
+        fields: dict | None = None,
+    ) -> dict:
+        """Send a plist request to Apple Developer Services.
+
+        Returns the parsed plist response dict.  Raises DeveloperServicesError
+        on non-zero resultCode (except RC_ALREADY_EXISTS which is returned
+        so callers can inspect the response).
+        """
+        payload: dict = {
             "clientId": "XABBG36SBA",
             "protocolVersion": "QH65B2",
             "requestId": str(uuid.uuid4()).upper(),
@@ -63,163 +99,421 @@ class DeveloperServices:
             payload.update(fields)
 
         body = plistlib.dumps(payload)
-        url = f"{DEV_SERVICES}/{endpoint}.action?clientId=XABBG36SBA"
-        resp = await self._client.post(url, content=body, headers=self._auth_headers(session))
-        logger.debug("%s: HTTP %d (%d bytes)", endpoint, resp.status_code, len(resp.content))
+        url = f"{DEV_SERVICES}/{endpoint}?clientId=XABBG36SBA"
+        resp = await self._client.post(
+            url, content=body, headers=self._auth_headers(session)
+        )
+        logger.debug(
+            "%s: HTTP %d (%d bytes)", endpoint, resp.status_code, len(resp.content)
+        )
 
         try:
             data = plistlib.loads(resp.content)
         except Exception:
-            logger.error("%s: non-plist response: %s", endpoint, resp.text[:300])
-            raise DeveloperServicesError(f"{endpoint}: invalid response (HTTP {resp.status_code})")
+            logger.error(
+                "%s: non-plist response (%d bytes): %s",
+                endpoint,
+                len(resp.content),
+                resp.text[:300],
+            )
+            raise DeveloperServicesError(
+                f"{endpoint}: invalid response (HTTP {resp.status_code})"
+            )
 
-        # Check for API-level errors
         rc = data.get("resultCode", 0)
-        if rc != 0:
-            msg = data.get("userString") or data.get("resultString") or f"resultCode={rc}"
-            # 35 = already exists (device, app id, etc.) — not fatal
-            if rc == 35:
-                logger.info("%s: already exists, continuing", endpoint)
-                return data
-            raise DeveloperServicesError(f"{endpoint}: {msg}")
+        if rc == RC_SUCCESS:
+            return data
 
-        return data
+        user_msg = (
+            data.get("userString")
+            or data.get("resultString")
+            or f"resultCode={rc}"
+        )
+
+        # RC 35 = "already exists" -- not fatal, let caller decide
+        if rc == RC_ALREADY_EXISTS:
+            logger.info("%s: already exists (rc=35): %s", endpoint, user_msg)
+            return data
+
+        raise DeveloperServicesError(
+            f"{endpoint}: {user_msg} (resultCode={rc})", result_code=rc
+        )
+
+    # ── 1. Team ──
 
     async def get_team(self, session: AuthSession) -> dict:
-        data = await self._request(session, "listTeams")
+        """Fetch the first development team for this Apple ID."""
+        data = await self._request(session, "listTeams.action")
         teams = data.get("teams", [])
         if not teams:
             raise DeveloperServicesError("No development teams found for this Apple ID")
+        # Prefer individual > free > first
         team = teams[0]
-        logger.info("Using team: %s (%s)", team.get("name"), team.get("teamId"))
+        for t in teams:
+            status = t.get("status", "")
+            if status == "active":
+                team = t
+                break
+        logger.info(
+            "Using team: %s (%s, type=%s)",
+            team.get("name"),
+            team.get("teamId"),
+            team.get("type"),
+        )
         return team
 
-    async def get_or_create_cert(self, session: AuthSession, team_id: str) -> tuple[bytes, rsa.RSAPrivateKey]:
-        """Generate a new signing key + CSR and submit to Apple. Returns (cert_pem, private_key)."""
+    # ── 2. Certificates ──
 
-        # Generate fresh keypair
-        self._private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    async def _list_certs(self, session: AuthSession, team_id: str) -> list[dict]:
+        """List all development certificates for the team."""
+        data = await self._request(
+            session,
+            "ios/listAllDevelopmentCerts.action",
+            {"teamId": team_id},
+        )
+        certs = data.get("certificates", [])
+        logger.info("Found %d existing development cert(s)", len(certs))
+        return certs
+
+    async def _revoke_cert(
+        self, session: AuthSession, team_id: str, serial_number: str
+    ):
+        """Revoke a single development certificate by serial number.
+
+        ReProvision/EEAppleServices uses serialNumber (not certificateId).
+        """
+        logger.info("Revoking cert with serial %s", serial_number)
+        try:
+            await self._request(
+                session,
+                "ios/revokeDevelopmentCert.action",
+                {"teamId": team_id, "serialNumber": serial_number},
+            )
+        except DeveloperServicesError as e:
+            logger.warning("Failed to revoke cert serial=%s: %s", serial_number, e)
+
+    async def _revoke_all_certs(self, session: AuthSession, team_id: str):
+        """Revoke ALL development certs to make room for a new one.
+
+        Free Apple IDs can only have a limited number of dev certs.
+        AltSign revokes existing certs before creating a new one.
+        """
+        certs = await self._list_certs(session, team_id)
+        for cert in certs:
+            serial = cert.get("serialNumber", "")
+            name = cert.get("machineName", "?")
+            if serial:
+                logger.info("Revoking cert: %s (serial=%s)", name, serial)
+                await self._revoke_cert(session, team_id, serial)
+            else:
+                logger.warning(
+                    "Cert %s has no serialNumber, skipping revoke",
+                    cert.get("certificateId", "?"),
+                )
+
+    async def get_or_create_cert(
+        self, session: AuthSession, team_id: str
+    ) -> tuple[bytes, rsa.RSAPrivateKey]:
+        """Ensure we have a valid signing certificate.
+
+        Flow (matches AltSign):
+          1. List existing certs
+          2. Revoke all existing certs (free accounts have a limit)
+          3. Generate fresh RSA key + CSR
+          4. Submit CSR to Apple
+          5. Fetch cert content from cert list
+
+        Returns (cert_pem_bytes, private_key).
+        """
+        # Step 1+2: Revoke existing certs to guarantee room
+        logger.info("Revoking existing development certificates...")
+        await self._revoke_all_certs(session, team_id)
+
+        # Step 3: Generate fresh keypair + CSR
+        self._private_key = rsa.generate_private_key(
+            public_exponent=65537, key_size=2048
+        )
         csr = (
             x509.CertificateSigningRequestBuilder()
-            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Catapult")]))
+            .subject_name(
+                x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Catapult")])
+            )
             .sign(self._private_key, hashes.SHA256())
         )
         csr_pem = csr.public_bytes(serialization.Encoding.PEM).decode()
 
-        logger.info("Submitting CSR to Apple")
-        try:
-            data = await self._request(
-                session,
-                "ios/submitDevelopmentCSR",
-                {"teamId": team_id, "csrContent": csr_pem, "machineId": "catapult-local"},
-            )
-        except DeveloperServicesError as e:
-            if "already have" in str(e).lower():
-                logger.info("Cert limit reached, revoking existing certs and retrying")
-                await self._revoke_certs(session, team_id)
-                data = await self._request(
-                    session,
-                    "ios/submitDevelopmentCSR",
-                    {"teamId": team_id, "csrContent": csr_pem, "machineId": "catapult-local"},
-                )
-            else:
-                raise
+        # Step 4: Submit CSR
+        # AltSign sends: csrContent, machineId (UUID), machineName
+        machine_id = str(uuid.uuid4()).upper()
+        logger.info("Submitting development CSR (machineId=%s)", machine_id)
+        data = await self._request(
+            session,
+            "ios/submitDevelopmentCSR.action",
+            {
+                "teamId": team_id,
+                "csrContent": csr_pem,
+                "machineId": machine_id,
+                "machineName": "Catapult",
+            },
+        )
 
         cert_req = data.get("certRequest", {})
         self._cert_id = cert_req.get("certificateId", "")
-        logger.info("CSR accepted, certificateId=%s", self._cert_id)
+        self._cert_serial = cert_req.get("serialNumber", "")
+        logger.info(
+            "CSR accepted: certificateId=%s, serial=%s",
+            self._cert_id,
+            self._cert_serial,
+        )
 
-        # The CSR response doesn't include cert content — fetch it from cert list
-        cert_content = await self._download_cert(session, team_id, self._cert_id)
+        # Step 5: Fetch the actual cert content
+        # The CSR response contains a certRequest but often not the full cert
+        # content. Fetch from the cert list.
+        cert_content = await self._download_cert_content(session, team_id)
         if not cert_content:
-            raise DeveloperServicesError("Apple accepted CSR but certificate content not available")
+            raise DeveloperServicesError(
+                "Apple accepted CSR but certificate content is not available"
+            )
 
-        # certContent is DER-encoded; convert to PEM for codesign tooling
+        # Convert DER to PEM if needed
         if isinstance(cert_content, bytes) and not cert_content.startswith(b"-----"):
             cert_obj = x509.load_der_x509_certificate(cert_content)
             cert_pem = cert_obj.public_bytes(serialization.Encoding.PEM)
         else:
-            cert_pem = cert_content if isinstance(cert_content, bytes) else cert_content.encode()
+            cert_pem = (
+                cert_content
+                if isinstance(cert_content, bytes)
+                else cert_content.encode()
+            )
 
-        logger.info("Signing certificate issued (id: %s)", self._cert_id)
+        logger.info("Signing certificate ready (id=%s)", self._cert_id)
         return cert_pem, self._private_key
 
-    async def _download_cert(self, session: AuthSession, team_id: str, cert_id: str) -> bytes | None:
-        """Fetch cert content by listing all certs and finding by ID."""
-        data = await self._request(session, "ios/listAllDevelopmentCerts", {"teamId": team_id})
-        for cert in data.get("certificates", []):
-            if cert.get("certificateId") == cert_id:
+    async def _download_cert_content(
+        self, session: AuthSession, team_id: str
+    ) -> bytes | None:
+        """Fetch cert content by listing all certs and finding our cert by ID."""
+        certs = await self._list_certs(session, team_id)
+        for cert in certs:
+            if cert.get("certificateId") == self._cert_id:
                 content = cert.get("certContent")
                 if content:
-                    logger.info("Downloaded cert %s (%d bytes)", cert_id, len(content))
+                    logger.info(
+                        "Downloaded cert %s (%d bytes)",
+                        self._cert_id,
+                        len(content),
+                    )
                     return content
-        logger.warning("Cert %s not found in list (%d certs)", cert_id, len(data.get("certificates", [])))
+        # If only one cert exists (we just created it), use that
+        if len(certs) == 1:
+            content = certs[0].get("certContent")
+            if content:
+                logger.info(
+                    "Using sole cert in list (%d bytes, id=%s)",
+                    len(content),
+                    certs[0].get("certificateId"),
+                )
+                self._cert_id = certs[0].get("certificateId", self._cert_id)
+                self._cert_serial = certs[0].get("serialNumber", self._cert_serial)
+                return content
+        logger.warning(
+            "Cert %s not found in list of %d certs", self._cert_id, len(certs)
+        )
         return None
 
-    async def _revoke_certs(self, session: AuthSession, team_id: str):
-        """Revoke development certs to make room for a new one."""
-        try:
-            data = await self._request(session, "ios/listAllDevelopmentCerts", {"teamId": team_id})
-            certs = data.get("certificates", [])
-            logger.info("Found %d existing dev cert(s)", len(certs))
-            for cert in certs:
-                cid = cert.get("certificateId")
-                name = cert.get("machineName", "?")
-                logger.info("Revoking cert %s (%s)", cid, name)
-                try:
-                    await self._request(
-                        session,
-                        "ios/revokeDevelopmentCert",
-                        {"teamId": team_id, "certificateId": cid, "serialNumber": cert.get("serialNumber", "")},
-                    )
-                except Exception as e:
-                    logger.warning("Failed to revoke cert %s: %s", cid, e)
-        except Exception as e:
-            logger.debug("Cert list/revoke failed: %s", e)
+    # ── 3. Device registration ──
 
-    async def register_device(self, session: AuthSession, team_id: str, udid: str, name: str) -> dict:
-        logger.info("Registering device %s (%s)", name, udid)
-        return await self._request(
+    async def register_device(
+        self, session: AuthSession, team_id: str, udid: str, name: str
+    ) -> dict:
+        """Register a device.  Idempotent -- resultCode 35 means already registered."""
+        device_name = name or "Catapult Device"
+        logger.info("Registering device '%s' (%s)", device_name, udid)
+        data = await self._request(
             session,
-            "ios/addDevice",
-            {"teamId": team_id, "deviceNumber": udid, "name": name or "Catapult Device"},
+            "ios/addDevice.action",
+            {
+                "teamId": team_id,
+                "deviceNumber": udid,
+                "name": device_name,
+            },
         )
+        # rc=35 is fine (already registered)
+        device = data.get("device", data)
+        logger.info(
+            "Device registered: %s (rc=%d)",
+            device.get("name", device_name),
+            data.get("resultCode", 0),
+        )
+        return device
+
+    # ── 4. App ID registration ──
 
     @staticmethod
     def sideload_bundle_id(team_id: str, original_bundle_id: str) -> str:
-        """Create a unique bundle ID for sideloading (free accounts can't use taken IDs)."""
+        """Create a unique bundle ID for sideloading.
+
+        Free accounts can't use bundle IDs that are already taken,
+        so we prefix with a team-specific namespace.
+        """
         safe = original_bundle_id.replace(".", "-")
         return f"com.catapult.{team_id}.{safe}"
 
-    async def register_app_id(self, session: AuthSession, team_id: str, bundle_id: str) -> dict:
+    async def _list_app_ids(self, session: AuthSession, team_id: str) -> list[dict]:
+        """List all registered app IDs for the team."""
+        data = await self._request(
+            session,
+            "ios/listAppIds.action",
+            {"teamId": team_id},
+        )
+        return data.get("appIds", [])
+
+    async def _find_app_id(
+        self, session: AuthSession, team_id: str, bundle_identifier: str
+    ) -> dict | None:
+        """Find an existing app ID by its bundle identifier."""
+        app_ids = await self._list_app_ids(session, team_id)
+        for app in app_ids:
+            if app.get("identifier") == bundle_identifier:
+                logger.info(
+                    "Found existing app ID: %s (appIdId=%s)",
+                    bundle_identifier,
+                    app.get("appIdId"),
+                )
+                return app
+        return None
+
+    async def register_app_id(
+        self, session: AuthSession, team_id: str, bundle_id: str
+    ) -> dict:
+        """Register an app ID, or return existing one if already registered.
+
+        AltSign flow:
+          1. Try addAppId
+          2. If it fails with "already exists" or "not available", look it up
+        """
         sideload_id = self.sideload_bundle_id(team_id, bundle_id)
-        logger.info("Registering app ID %s (original: %s)", sideload_id, bundle_id)
+        short_name = bundle_id.rsplit(".", 1)[-1]
+        # Sanitize name: AltSign strips diacritics and non-alphanumeric chars
+        app_name = f"Catapult {short_name}"
+
+        logger.info("Registering app ID: %s (name=%s)", sideload_id, app_name)
         try:
             data = await self._request(
                 session,
-                "ios/addAppId",
+                "ios/addAppId.action",
                 {
                     "teamId": team_id,
                     "identifier": sideload_id,
-                    "name": f"Catapult {bundle_id.rsplit('.', 1)[-1]}",
+                    "name": app_name,
+                    "type": "explicit",
                     "enabledFeatures": {},
-                "entitlements": {},
-            },
-        )
-            return data.get("appId", data)
+                    "entitlements": {},
+                },
+            )
+            rc = data.get("resultCode", 0)
+
+            if rc == RC_ALREADY_EXISTS:
+                logger.info("App ID already exists (rc=35), looking it up")
+                found = await self._find_app_id(session, team_id, sideload_id)
+                if found:
+                    return found
+                # Shouldn't happen, but fall through
+
+            # Success -- extract the appId from response
+            app_id = data.get("appId")
+            if app_id:
+                logger.info(
+                    "App ID registered: %s (appIdId=%s)",
+                    sideload_id,
+                    app_id.get("appIdId"),
+                )
+                return app_id
+
+            # If no appId in response but no error, try looking it up
+            logger.warning("addAppId succeeded but no appId in response, looking up")
+            found = await self._find_app_id(session, team_id, sideload_id)
+            if found:
+                return found
+            raise DeveloperServicesError(
+                f"App ID {sideload_id} registered but could not be found"
+            )
+
         except DeveloperServicesError as e:
-            if "not available" in str(e).lower():
-                logger.info("App ID already exists, looking it up")
-                return await self._find_app_id(session, team_id, sideload_id)
+            # resultCode 9401 = bundle ID unavailable (already taken by someone else)
+            if e.result_code == RC_BUNDLE_ID_UNAVAILABLE or "not available" in str(
+                e
+            ).lower():
+                logger.info(
+                    "App ID bundle '%s' may already exist, looking it up",
+                    sideload_id,
+                )
+                found = await self._find_app_id(session, team_id, sideload_id)
+                if found:
+                    return found
+                raise DeveloperServicesError(
+                    f"App ID {sideload_id} is unavailable and not found in team"
+                ) from e
             raise
 
-    async def _find_app_id(self, session: AuthSession, team_id: str, identifier: str) -> dict:
-        data = await self._request(session, "ios/listAppIds", {"teamId": team_id})
-        for app in data.get("appIds", []):
-            if app.get("identifier") == identifier:
-                logger.info("Found existing app ID: %s", app.get("appIdId"))
-                return app
-        raise DeveloperServicesError(f"App ID {identifier} not found in list")
+    # ── 5. Provisioning profiles ──
+
+    async def _list_profiles(
+        self, session: AuthSession, team_id: str
+    ) -> list[dict]:
+        """List all provisioning profiles for the team."""
+        data = await self._request(
+            session,
+            "ios/listProvisioningProfiles.action",
+            {
+                "teamId": team_id,
+                "includeInactiveProfiles": True,
+            },
+        )
+        profiles = data.get("provisioningProfiles", [])
+        logger.info("Found %d provisioning profile(s)", len(profiles))
+        return profiles
+
+    async def _delete_profile(
+        self, session: AuthSession, team_id: str, profile_id: str
+    ):
+        """Delete a single provisioning profile by its provisioningProfileId."""
+        logger.info("Deleting provisioning profile %s", profile_id)
+        try:
+            await self._request(
+                session,
+                "ios/deleteProvisioningProfile.action",
+                {
+                    "teamId": team_id,
+                    "provisioningProfileId": profile_id,
+                },
+            )
+            logger.info("Profile %s deleted", profile_id)
+        except DeveloperServicesError as e:
+            logger.warning("Failed to delete profile %s: %s", profile_id, e)
+
+    async def _delete_profiles_for_app(
+        self, session: AuthSession, team_id: str, app_id_id: str
+    ):
+        """Delete ALL provisioning profiles matching an appIdId.
+
+        This ensures the next downloadTeamProvisioningProfile creates a fresh
+        profile that includes our newly-created certificate and device.
+        """
+        profiles = await self._list_profiles(session, team_id)
+        found_any = False
+        for p in profiles:
+            if p.get("appIdId") == app_id_id:
+                found_any = True
+                pid = p.get("provisioningProfileId", "")
+                if pid:
+                    await self._delete_profile(session, team_id, pid)
+                else:
+                    logger.warning(
+                        "Profile for app %s has no provisioningProfileId", app_id_id
+                    )
+        if not found_any:
+            logger.info("No existing profiles found for app %s", app_id_id)
 
     async def create_profile(
         self,
@@ -229,69 +523,111 @@ class DeveloperServices:
         cert_bytes: bytes,
         device_udid: str,
     ) -> bytes:
-        app_id_id = app_id.get("appIdId", "")
-        cert_ids = [self._cert_id] if self._cert_id else []
+        """Create/fetch a provisioning profile for the given app.
 
-        # Delete existing profile for this app to ensure fresh cert/device
+        This follows AltSign's approach:
+          1. Delete any existing profile for this app (stale certs/devices)
+          2. Call downloadTeamProvisioningProfile which makes Apple create
+             a fresh profile server-side with all registered certs + devices
+
+        The key insight: downloadTeamProvisioningProfile is the endpoint,
+        NOT createProvisioningProfile.  It only needs appIdId.  Apple's
+        server automatically includes all registered certificates and
+        devices in the generated profile.
+        """
+        app_id_id = app_id.get("appIdId", "")
+        if not app_id_id:
+            raise DeveloperServicesError(
+                "Cannot create profile: app_id dict has no appIdId field. "
+                f"Keys present: {list(app_id.keys())}"
+            )
+
+        # Step 1: Delete stale profiles so Apple creates a fresh one
+        logger.info("Cleaning up existing profiles for app %s...", app_id_id)
         await self._delete_profiles_for_app(session, team_id, app_id_id)
 
-        logger.info("Creating provisioning profile (app=%s, cert=%s)", app_id_id, self._cert_id)
+        # Step 2: Download (create) profile
+        # AltSign sends ONLY appIdId + teamId.  No certificateIds, deviceIds,
+        # or distributionType.  Apple handles it server-side.
+        logger.info(
+            "Requesting provisioning profile (appIdId=%s, team=%s)",
+            app_id_id,
+            team_id,
+        )
         data = await self._request(
             session,
-            "ios/createProvisioningProfile",
+            "ios/downloadTeamProvisioningProfile.action",
             {
                 "teamId": team_id,
                 "appIdId": app_id_id,
-                "certificateIds": cert_ids,
-                "deviceIds": [device_udid],
-                "distributionType": "limited",
-                "template": "DEVELOPMENT",
             },
         )
 
         profile = data.get("provisioningProfile", {})
         encoded = profile.get("encodedProfile", b"")
-        if encoded:
-            logger.info("Provisioning profile created (uuid: %s)", profile.get("UUID", "?"))
-            return encoded
 
-        # Profile already existed — download it
-        logger.info("Profile not in create response, downloading existing profile")
-        return await self._download_profile_for_app(session, team_id, app_id_id)
+        if not encoded:
+            # Log what we got for debugging
+            profile_keys = list(profile.keys()) if profile else []
+            data_keys = list(data.keys())
+            logger.error(
+                "downloadTeamProvisioningProfile returned no encodedProfile. "
+                "profile keys=%s, response keys=%s, resultCode=%s",
+                profile_keys,
+                data_keys,
+                data.get("resultCode", "?"),
+            )
+            raise DeveloperServicesError(
+                "Apple returned an empty provisioning profile. "
+                "This can happen if the app ID or certificate is in an "
+                "inconsistent state.  Try signing in again."
+            )
 
-    async def _download_profile_for_app(self, session: AuthSession, team_id: str, app_id_id: str) -> bytes:
-        """Download an existing provisioning profile matching an app ID."""
-        data = await self._request(session, "ios/listProvisioningProfiles", {
-            "teamId": team_id,
-            "includeInactiveProfiles": True,
-        })
-        for p in data.get("provisioningProfiles", []):
-            if p.get("appIdId") == app_id_id:
-                pid = p.get("provisioningProfileId")
-                logger.info("Downloading profile %s", pid)
-                dl = await self._request(session, "ios/downloadProvisioningProfile", {
-                    "teamId": team_id,
-                    "provisioningProfileId": pid,
-                })
-                encoded = dl.get("provisioningProfile", {}).get("encodedProfile", b"")
-                if encoded:
-                    return encoded
-        raise DeveloperServicesError("Could not find or download provisioning profile")
+        profile_uuid = profile.get("UUID", profile.get("provisioningProfileId", "?"))
+        logger.info(
+            "Provisioning profile ready (UUID=%s, %d bytes)",
+            profile_uuid,
+            len(encoded),
+        )
+        return encoded
 
-    async def _delete_profiles_for_app(self, session: AuthSession, team_id: str, app_id_id: str):
-        """Delete existing provisioning profiles for an app ID so we can create a fresh one."""
-        try:
-            data = await self._request(session, "ios/listProvisioningProfiles", {
-                "teamId": team_id,
-                "includeInactiveProfiles": True,
-            })
-            for p in data.get("provisioningProfiles", []):
-                if p.get("appIdId") == app_id_id:
-                    pid = p.get("provisioningProfileId")
-                    logger.info("Deleting old profile %s", pid)
-                    await self._request(session, "ios/deleteProvisioningProfile", {
-                        "teamId": team_id,
-                        "provisioningProfileId": pid,
-                    })
-        except Exception as e:
-            logger.debug("Profile cleanup skipped: %s", e)
+    # ── Full provisioning flow (convenience) ──
+
+    async def provision(
+        self,
+        session: AuthSession,
+        bundle_id: str,
+        device_udid: str,
+        device_name: str,
+    ) -> tuple[bytes, rsa.RSAPrivateKey, bytes, str]:
+        """Run the complete provisioning flow.
+
+        Returns (cert_pem, private_key, profile_bytes, sideload_bundle_id).
+
+        Order of operations (matches AltSign):
+          1. Fetch team
+          2. Revoke old certs + create new cert
+          3. Register device
+          4. Register app ID
+          5. Delete old profile + download fresh profile
+        """
+        # 1. Team
+        team = await self.get_team(session)
+        team_id = team["teamId"]
+
+        # 2. Certificate
+        cert_pem, private_key = await self.get_or_create_cert(session, team_id)
+
+        # 3. Device
+        await self.register_device(session, team_id, device_udid, device_name)
+
+        # 4. App ID
+        app_id = await self.register_app_id(session, team_id, bundle_id)
+
+        # 5. Profile
+        profile = await self.create_profile(
+            session, team_id, app_id, cert_pem, device_udid
+        )
+
+        sideload_id = self.sideload_bundle_id(team_id, bundle_id)
+        return cert_pem, private_key, profile, sideload_id
