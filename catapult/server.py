@@ -1,5 +1,6 @@
 """FastAPI server — REST + WebSocket API for the Catapult UI."""
 
+import asyncio
 import logging
 from pathlib import Path
 
@@ -78,9 +79,17 @@ async def start_tunnel():
 
 @app.post("/api/devices/setup")
 async def setup_device(payload: dict = None):
-    """Start pairing flow for a device."""
+    """Pair + start tunnel for a device."""
     name = payload.get("name") if payload else None
-    return await device_manager.pair_device(device_name=name)
+    pair_result = await device_manager.pair_device(device_name=name)
+    if pair_result.get("status") != "ok":
+        return pair_result
+    # After successful pairing, start tunnel
+    tunnel_result = await device_manager.start_tunnel()
+    if tunnel_result.get("status") == "ok":
+        await asyncio.sleep(2)
+        await device_manager.discover()
+    return tunnel_result
 
 
 @app.post("/api/devices/pin")

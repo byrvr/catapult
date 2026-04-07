@@ -281,12 +281,19 @@ class DeviceManager:
 
         logger.info("Installing to %s (%s:%s via %s)", device["name"], host, port, service)
 
-        if "remotepairing" in service:
-            await self._install_via_rsd(host, port, ipa_path)
-        elif "mobdev2" in service:
-            await self._install_via_lockdown(host, port, ipa_path)
-        else:
-            raise RuntimeError(f"No supported installation method for service {service}")
+        try:
+            if "remotepairing" in service:
+                await self._install_via_rsd(host, port, ipa_path)
+            elif "mobdev2" in service:
+                await self._install_via_lockdown(host, port, ipa_path)
+            else:
+                raise RuntimeError(f"No supported installation method for service {service}")
+        except (ConnectionResetError, ConnectionRefusedError, OSError) as e:
+            raise RuntimeError(
+                f"Connection to device failed: {e}\n\n"
+                f"A tunnel is required for paired devices. "
+                f"Starting one now — enter your admin password, then try Install again."
+            ) from e
 
         logger.info("Installation complete")
 
