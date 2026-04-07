@@ -120,6 +120,14 @@ class Signer:
             label="set-partition-list",
         )
 
+        # Add temp keychain to search list so codesign can find identities
+        existing = await self._run("security", "list-keychains", "-d", "user", label="list-keychains")
+        # Parse existing keychains (each line is a quoted path)
+        existing_paths = [line.strip().strip('"') for line in existing.splitlines() if line.strip()]
+        all_keychains = [keychain] + existing_paths
+        await self._run("security", "list-keychains", "-d", "user", "-s", *all_keychains, label="add-to-search")
+        self._original_keychains = existing_paths
+
         logger.info("Temporary keychain ready at %s", keychain)
         return keychain
 
@@ -144,6 +152,12 @@ class Signer:
         return "-"
 
     async def _cleanup_keychain(self, keychain: str):
+        # Restore original keychain search list
+        if hasattr(self, '_original_keychains') and self._original_keychains:
+            await self._run(
+                "security", "list-keychains", "-d", "user", "-s", *self._original_keychains,
+                label="restore-keychains", check=False,
+            )
         await self._run("security", "delete-keychain", keychain, label="delete-keychain", check=False)
 
     async def _codesign_app(self, app_dir: Path, keychain: str, identity: str, entitlements: Path):
