@@ -48,6 +48,34 @@ async def list_devices():
         return JSONResponse({"devices": [], "error": str(e)}, status_code=500)
 
 
+@app.post("/api/devices/pair")
+async def pair_device():
+    """Initiate device pairing — shows admin password dialog and PIN on device."""
+    return await device_manager.pair_device()
+
+
+@app.post("/api/devices/tunnel")
+async def start_tunnel():
+    """Start a tunnel to paired devices — shows admin password dialog."""
+    result = await device_manager.start_tunnel()
+    if result.get("status") == "ok":
+        # Rescan to find newly available devices
+        await device_manager.discover()
+    return result
+
+
+@app.post("/api/devices/setup")
+async def setup_device():
+    """One-click pair + tunnel for unpaired devices."""
+    pair_result = await device_manager.pair_device()
+    if pair_result.get("status") != "ok":
+        return pair_result
+    tunnel_result = await device_manager.start_tunnel()
+    if tunnel_result.get("status") == "ok":
+        await device_manager.discover()
+    return tunnel_result
+
+
 @app.get("/api/auth/status")
 async def auth_status():
     """Check if there's an active authenticated session."""

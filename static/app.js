@@ -51,20 +51,47 @@ function renderDevices(devices) {
             const cls = d.device_class || "unknown";
             const icon = DEVICE_ICONS[cls] || DEVICE_ICONS.unknown;
             const label = cls === "unknown" ? "device" : cls;
+            const needsSetup = !d.installable;
             return `
-                <div class="device-item" data-udid="${esc(d.udid)}">
+                <div class="device-item${needsSetup ? ' needs-setup' : ''}" data-udid="${esc(d.udid)}" data-installable="${d.installable}">
                     <span class="device-icon">${icon}</span>
                     <div class="device-meta">
                         <span class="device-name">${esc(d.name)}</span>
                         <span class="device-host">${esc(d.host)}</span>
                     </div>
-                    <span class="device-badge">${label}</span>
+                    ${needsSetup
+                        ? '<button class="btn-setup" title="Pair & setup tunnel">Setup</button>'
+                        : `<span class="device-badge">${label}</span>`}
                 </div>`;
         })
         .join("");
 
     list.querySelectorAll(".device-item").forEach((el) => {
+        const setupBtn = el.querySelector(".btn-setup");
+        if (setupBtn) {
+            setupBtn.addEventListener("click", async (e) => {
+                e.stopPropagation();
+                setupBtn.textContent = "Pairing...";
+                setupBtn.disabled = true;
+                try {
+                    const resp = await fetch("/api/devices/setup", { method: "POST" });
+                    const data = await resp.json();
+                    if (data.status === "ok") {
+                        setupBtn.textContent = "Done!";
+                        setTimeout(refreshDevices, 1000);
+                    } else {
+                        setupBtn.textContent = "Failed";
+                        alert(data.message || "Setup failed");
+                        setTimeout(() => { setupBtn.textContent = "Setup"; setupBtn.disabled = false; }, 2000);
+                    }
+                } catch {
+                    setupBtn.textContent = "Error";
+                    setTimeout(() => { setupBtn.textContent = "Setup"; setupBtn.disabled = false; }, 2000);
+                }
+            });
+        }
         el.addEventListener("click", () => {
+            if (el.dataset.installable === "false") return; // Can't select unpaired devices
             list.querySelectorAll(".device-item").forEach((e) => e.classList.remove("selected"));
             el.classList.add("selected");
             state.device = el.dataset.udid;
