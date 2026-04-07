@@ -276,7 +276,7 @@ class DeviceManager:
             f"pkill -f 'pymobiledevice3 remote start-tunnel' 2>/dev/null; sleep 1; "
             f"HOME={home} PYTHONUNBUFFERED=1 "
             f"{sys.executable} -m pymobiledevice3 remote start-tunnel -t wifi {udid_flag}--script-mode "
-            f"> {log_file} 2>/dev/null & "
+            f"> {log_file} 2>&1 & "
             f"TPID=$!; "
             # Wait up to 20s for the script-mode output line (address port)
             f"for i in $(seq 1 20); do "
@@ -302,10 +302,12 @@ class DeviceManager:
             )
             stdout, stderr = await proc.communicate()
             output = stdout.decode().strip()
-            logger.info("Tunnel output (rc=%d): %s", proc.returncode, output[:200])
+            err = stderr.decode().strip()
+            logger.info("Tunnel output (rc=%d): stdout=%s stderr=%s", proc.returncode, output[:300], err[:300])
 
             if proc.returncode != 0:
-                return {"status": "error", "message": f"Tunnel failed: {output[:200]}"}
+                msg = output or err or "Unknown error"
+                return {"status": "error", "message": f"Tunnel failed: {msg[:200]}"}
 
             # Parse script-mode output: "address port"
             parts = output.split()
