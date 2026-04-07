@@ -98,6 +98,10 @@ class Signer:
             "-out", str(p12_path),
             "-inkey", str(key_path),
             "-in", str(cert_path),
+            # OpenSSL 3.x defaults break macOS security import — force legacy algorithms
+            "-certpbe", "PBE-SHA1-3DES",
+            "-keypbe", "PBE-SHA1-3DES",
+            "-macalg", "SHA1",
             "-passout", "pass:",
             label="create-p12",
         )
