@@ -118,59 +118,50 @@ class DeviceManager:
     # ── Pairing + Tunnel ──
 
     async def pair_device(self) -> dict:
-        """Pair with a device using pymobiledevice3. Requires admin privileges.
-
-        Uses osascript to show macOS admin password dialog for sudo access.
-        The pairing process shows a PIN on the target device.
-        """
-        python = sys.executable
-        pair_cmd = f'"{python}" -m pymobiledevice3 remote pair'
-
-        logger.info("Initiating device pairing (admin privileges required)...")
-        proc = await asyncio.create_subprocess_exec(
-            "osascript", "-e",
-            f'do shell script "{pair_cmd}" with administrator privileges',
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        """Pair with a device using pymobiledevice3. Requires admin privileges."""
+        return await self._run_privileged(
+            f"{sys.executable} -m pymobiledevice3 remote pair",
+            "Pairing",
         )
-        stdout, stderr = await proc.communicate()
 
-        output = stdout.decode() + stderr.decode()
-        logger.info("Pair result (rc=%d): %s", proc.returncode, output[:300])
+    async def _run_privileged(self, command: str, label: str) -> dict:
+        """Run a command with admin privileges via macOS password dialog."""
+        import tempfile, os, stat
 
-        if proc.returncode != 0:
-            return {"status": "error", "message": f"Pairing failed: {output[:200]}"}
-        return {"status": "ok", "message": "Paired successfully"}
+        # Write to a temp script to avoid AppleScript quoting issues
+        script = tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False, prefix="catapult_")
+        script.write(f"#!/bin/bash\n{command}\n")
+        script.close()
+        os.chmod(script.name, stat.S_IRWXU)
+
+        logger.info("%s: running with admin privileges...", label)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "osascript", "-e",
+                f'do shell script "{script.name}" with administrator privileges',
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+            output = (stdout.decode() + stderr.decode()).strip()
+            logger.info("%s result (rc=%d): %s", label, proc.returncode, output[:300])
+
+            if proc.returncode != 0:
+                return {"status": "error", "message": f"{label} failed: {output[:200]}"}
+            return {"status": "ok", "message": f"{label} successful"}
+        finally:
+            os.unlink(script.name)
 
     async def start_tunnel(self) -> dict:
         """Start a tunnel to paired devices. Runs in background with admin privileges."""
-        if self._tunnel_proc and self._tunnel_proc.returncode is None:
-            return {"status": "ok", "message": "Tunnel already running"}
-
-        python = sys.executable
-        tunnel_cmd = f'"{python}" -m pymobiledevice3 remote start-tunnel'
-
-        logger.info("Starting device tunnel (admin privileges required)...")
-        # Use script so tunnel stays running after osascript returns
-        script = f'''
-        do shell script "{tunnel_cmd} &> /tmp/catapult_tunnel.log & echo $!" with administrator privileges
-        '''
-        proc = await asyncio.create_subprocess_exec(
-            "osascript", "-e", script.strip(),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        result = await self._run_privileged(
+            f"{sys.executable} -m pymobiledevice3 remote start-tunnel "
+            f"&> /tmp/catapult_tunnel.log & echo $!",
+            "Tunnel",
         )
-        stdout, stderr = await proc.communicate()
-        output = stdout.decode().strip()
-        logger.info("Tunnel started (pid=%s)", output)
-
-        if proc.returncode != 0:
-            err = stderr.decode()
-            return {"status": "error", "message": f"Tunnel failed: {err[:200]}"}
-
-        # Wait a moment for tunnel to establish, then rescan
-        await asyncio.sleep(3)
-        return {"status": "ok", "message": "Tunnel started"}
+        if result.get("status") == "ok":
+            await asyncio.sleep(3)  # Wait for tunnel to establish
+        return result
 
     # ── Installation ──
 
