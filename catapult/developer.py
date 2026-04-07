@@ -522,6 +522,7 @@ class DeveloperServices:
         app_id: dict,
         cert_bytes: bytes,
         device_udid: str,
+        sub_platform: str | None = None,
     ) -> bytes:
         """Create/fetch a provisioning profile for the given app.
 
@@ -554,13 +555,13 @@ class DeveloperServices:
             app_id_id,
             team_id,
         )
+        body = {"teamId": team_id, "appIdId": app_id_id}
+        if sub_platform:
+            body["subPlatform"] = sub_platform
         data = await self._request(
             session,
             "ios/downloadTeamProvisioningProfile.action",
-            {
-                "teamId": team_id,
-                "appIdId": app_id_id,
-            },
+            body,
         )
 
         profile = data.get("provisioningProfile", {})

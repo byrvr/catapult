@@ -338,6 +338,28 @@ class DeviceManager:
 
         return {"status": "error", "message": "Tunnel not established — device may need re-pairing"}
 
+    async def get_real_udid(self) -> tuple[str, str | None]:
+        """Get the real device UDID from RSD and detect platform (tvOS vs iOS)."""
+        from pymobiledevice3.tunneld.api import get_tunneld_devices
+
+        rsds = await get_tunneld_devices()
+        if not rsds:
+            # Fall back to tunneld key (pairing UUID) if RSD unavailable
+            return (self._tunnel_udid or "", None)
+
+        rsd = rsds[0]
+        udid = rsd.udid
+        # Detect Apple TV via product type or name in peer info
+        peer_info = getattr(rsd, "peer_info", {}) or {}
+        props = peer_info.get("Properties", {})
+        product_type = props.get("ProductType", "")
+        is_tv = "AppleTV" in product_type or "appletv" in product_type.lower()
+        sub_platform = "tvOS" if is_tv else None
+        logger.info("Real device UDID: %s, ProductType: %s, subPlatform: %s",
+                    udid, product_type, sub_platform)
+        await rsd.close()
+        return (udid, sub_platform)
+
     # ── Installation ──
 
     async def install(self, udid: str, ipa_path: Path):

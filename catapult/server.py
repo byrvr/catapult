@@ -194,10 +194,10 @@ async def install_ws(ws: WebSocket):
         await _send(ws, "signing", 10, "Preparing signing certificate...")
         cert, private_key = await dev_services.get_or_create_cert(session, team_id)
 
-        # 2. Register device — use real UDID from tunneld, not mDNS service name
+        # 2. Register device — get real UDID from RSD, not mDNS name or pairing UUID
         await _send(ws, "signing", 25, "Registering device...")
         device_info = await device_manager.get_device_info(device_udid)
-        real_udid = device_manager._tunnel_udid or device_udid
+        real_udid, sub_platform = await device_manager.get_real_udid()
         await dev_services.register_device(session, team_id, real_udid, device_info["name"])
 
         # 3. App ID + provisioning profile
@@ -208,7 +208,9 @@ async def install_ws(ws: WebSocket):
         app_id = await dev_services.register_app_id(session, team_id, original_bundle_id)
 
         await _send(ws, "signing", 50, "Creating provisioning profile...")
-        profile = await dev_services.create_profile(session, team_id, app_id, cert, real_udid)
+        profile = await dev_services.create_profile(
+            session, team_id, app_id, cert, real_udid, sub_platform=sub_platform
+        )
 
         # 4. Sign (with modified bundle ID for sideloading)
         await _send(ws, "signing", 60, "Signing IPA...")
