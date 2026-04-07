@@ -200,8 +200,8 @@ class DeviceManager:
             return {"status": "ok", "message": "Paired successfully"}
         except Exception as e:
             self._pairing_state = "error"
-            logger.error("Pairing failed: %s", e)
-            return {"status": "error", "message": f"Pairing failed: {e}"}
+            logger.exception("Pairing failed")
+            return {"status": "error", "message": f"Pairing failed: {type(e).__name__}: {e}"}
         finally:
             builtins.input = original_input
             loop.close()
