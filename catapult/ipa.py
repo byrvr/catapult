@@ -43,11 +43,14 @@ class IpaProcessor:
         return work_dir / app_dir_name
 
     async def repack(self, app_dir: Path, output_path: Path):
+        # app_dir = work_dir/Payload/App.app
+        # paths must be Payload/App.app/... in the zip
+        root_dir = app_dir.parent.parent
         payload_dir = app_dir.parent
         with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as zf:
             for file in payload_dir.rglob("*"):
                 if file.is_file():
-                    arcname = file.relative_to(payload_dir)
+                    arcname = file.relative_to(root_dir)
                     zf.write(file, arcname)
 
     def _find_app_dir(self, zf: zipfile.ZipFile) -> str:
