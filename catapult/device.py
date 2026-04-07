@@ -257,11 +257,19 @@ class DeviceManager:
         """Start a tunnel to paired devices. Runs in background with admin privileges."""
         result = await self._run_privileged(
             f"{sys.executable} -m pymobiledevice3 remote start-tunnel "
-            f"&> /tmp/catapult_tunnel.log & echo $!",
+            f"> /tmp/catapult_tunnel.log 2>&1 & "
+            f"TPID=$!; sleep 5; "
+            f"if kill -0 $TPID 2>/dev/null; then echo $TPID; else cat /tmp/catapult_tunnel.log; exit 1; fi",
             "Tunnel",
         )
         if result.get("status") == "ok":
-            await asyncio.sleep(3)  # Wait for tunnel to establish
+            # Read tunnel log for the address
+            try:
+                import pathlib
+                log = pathlib.Path("/tmp/catapult_tunnel.log").read_text()
+                logger.info("Tunnel log: %s", log[:300])
+            except Exception:
+                pass
         return result
 
     # ── Installation ──
