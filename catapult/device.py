@@ -250,7 +250,7 @@ class DeviceManager:
 
     async def start_tunnel(self) -> dict:
         """Start a tunnel to paired devices via subprocess (requires admin for TUN device)."""
-        import os, tempfile, stat
+        import os, tempfile, stat, re
 
         # Already have a running tunnel
         if self._tunnel_address and self._tunnel_port:
@@ -259,11 +259,23 @@ class DeviceManager:
         home = Path.home()
         log_file = "/tmp/catapult_tunnel.log"
 
+        # Find the most recent pair record to use as --udid (avoids interactive prompt)
+        pair_dir = home / ".pymobiledevice3"
+        udid_flag = ""
+        if pair_dir.exists():
+            records = sorted(pair_dir.glob("remote_*.plist"), key=lambda p: p.stat().st_mtime, reverse=True)
+            if records:
+                # Extract UUID from filename: remote_{UUID}.plist
+                match = re.search(r"remote_(.+)\.plist", records[0].name)
+                if match:
+                    udid_flag = f"--udid {match.group(1)} "
+                    logger.info("Using pair record: %s", match.group(1))
+
         # Build script: kill stale, start tunnel with --script-mode, wait for output
         command = (
             f"pkill -f 'pymobiledevice3 remote start-tunnel' 2>/dev/null; sleep 1; "
             f"HOME={home} PYTHONUNBUFFERED=1 "
-            f"{sys.executable} -m pymobiledevice3 remote start-tunnel -t wifi --script-mode "
+            f"{sys.executable} -m pymobiledevice3 remote start-tunnel -t wifi {udid_flag}--script-mode "
             f"> {log_file} 2>/dev/null & "
             f"TPID=$!; "
             # Wait up to 20s for the script-mode output line (address port)
