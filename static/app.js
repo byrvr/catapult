@@ -38,14 +38,14 @@ function renderDevices(devices) {
         return;
     }
 
-    // Filter out local Mac and non-Apple devices (LG TVs etc)
+    // Filter: keep ios/tvos/ipados devices + mobdev2/remotepairing unknowns
     const filtered = devices.filter((d) => {
-        if (d.host === "127.0.0.1" || d.host.startsWith("fe80::1")) return false;
-        if (d.name && d.name.includes("MacBook")) return false;
-        const cls = d.device_class || "";
-        // Keep Apple devices (ios, tvos, ipados) and unknown that might be Apple
-        if (cls === "unknown" && !d.name.includes("Apple") && !d.service.includes("apple")) return false;
-        return true;
+        const cls = d.device_class || "unknown";
+        if (cls === "ios" || cls === "tvos" || cls === "ipados") return true;
+        if (d.installable) return true;
+        // Keep companion-link (could be Apple TV) but drop pure AirPlay non-Apple
+        if (d.service && d.service.includes("companion")) return true;
+        return false;
     });
 
     if (!filtered.length) {

@@ -49,8 +49,10 @@ class _Listener(ServiceListener):
         udid = (props.get("UniqueDeviceID") or props.get("rpMRtID")
                 or props.get("deviceid") or name)
         device_class = "unknown"
+        # Check both name and model for device type
+        check_str = f"{device_name} {model}".lower()
         for prefix, cls in DEVICE_CLASS_MAP.items():
-            if prefix.lower() in device_name.lower():
+            if prefix.lower() in check_str:
                 device_class = cls
                 break
 
