@@ -42,8 +42,10 @@ class _Listener(ServiceListener):
             for k, v in info.properties.items()
         }
 
-        device_name = (props.get("model", "") or props.get("rpMd", "")
-                       or props.get("deviceName", "") or name.split(".")[0])
+        # Friendly name is in the service name (e.g. "Living Room._companion-link...")
+        friendly_name = name.split(f".{stype}")[0] if f".{stype}" in name else ""
+        model = props.get("model", "") or props.get("rpMd", "")
+        device_name = friendly_name or props.get("deviceName", "") or model or name.split(".")[0]
         udid = (props.get("UniqueDeviceID") or props.get("rpMRtID")
                 or props.get("deviceid") or name)
         device_class = "unknown"
@@ -55,6 +57,7 @@ class _Listener(ServiceListener):
         key = f"{addresses[0]}:{info.port}:{stype}"
         self.found[key] = {
             "name": device_name,
+            "model": model,
             "udid": udid,
             "host": addresses[0],
             "port": info.port,
