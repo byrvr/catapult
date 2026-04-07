@@ -49,10 +49,17 @@ def _try_native_macos() -> dict | None:
         if aoskit and aoskit.load():
             AOSUtilities = NSClassFromString("AOSUtilities")
             if AOSUtilities and AOSUtilities.respondsToSelector_("retrieveOTPHeadersForDSID:"):
-                headers = AOSUtilities.retrieveOTPHeadersForDSID_("-2")
-                if headers and "X-Apple-I-MD" in headers:
-                    logger.info("Got Anisette from AOSKit")
-                    return dict(headers)
+                raw = AOSUtilities.retrieveOTPHeadersForDSID_("-2")
+                if raw:
+                    # macOS returns X-Apple-MD / X-Apple-MD-M (no "I-" prefix)
+                    h = {str(k): str(v) for k, v in raw.items()}
+                    result = {
+                        "X-Apple-I-MD": h.get("X-Apple-I-MD") or h.get("X-Apple-MD", ""),
+                        "X-Apple-I-MD-M": h.get("X-Apple-I-MD-M") or h.get("X-Apple-MD-M", ""),
+                    }
+                    if result["X-Apple-I-MD"]:
+                        logger.info("Got Anisette from AOSKit (native)")
+                        return result
 
         authkit = NSBundle.bundleWithPath_("/System/Library/PrivateFrameworks/AuthKit.framework")
         if authkit and authkit.load():
