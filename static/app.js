@@ -38,8 +38,15 @@ function renderDevices(devices) {
         return;
     }
 
-    // Filter out the local Mac from results
-    const filtered = devices.filter((d) => d.host !== "127.0.0.1" || d.service.includes("remotepairing"));
+    // Filter out local Mac and non-Apple devices (LG TVs etc)
+    const filtered = devices.filter((d) => {
+        if (d.host === "127.0.0.1" || d.host.startsWith("fe80::1")) return false;
+        if (d.name && d.name.includes("MacBook")) return false;
+        const cls = d.device_class || "";
+        // Keep Apple devices (ios, tvos, ipados) and unknown that might be Apple
+        if (cls === "unknown" && !d.name.includes("Apple") && !d.service.includes("apple")) return false;
+        return true;
+    });
 
     if (!filtered.length) {
         list.innerHTML = '<div class="placeholder">No iOS / tvOS devices found</div>';
@@ -90,11 +97,12 @@ function renderDevices(devices) {
                 }
             });
         }
-        el.addEventListener("click", () => {
-            if (el.dataset.installable === "false") return; // Can't select unpaired devices
+        el.addEventListener("click", (e) => {
+            if (e.target.closest(".btn-setup")) return; // Handled by setup button
             list.querySelectorAll(".device-item").forEach((e) => e.classList.remove("selected"));
             el.classList.add("selected");
             state.device = el.dataset.udid;
+            state.deviceInstallable = el.dataset.installable === "true";
             checkReady();
         });
     });
