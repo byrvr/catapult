@@ -247,6 +247,7 @@ class DeviceManager:
 
     _tunnel_address: str | None = None
     _tunnel_port: int | None = None
+    _tunnel_udid: str | None = None  # Real device UDID from tunneld
     TUNNELD_URL = "http://127.0.0.1:49151"
 
     async def _ensure_tunneld(self) -> bool:
@@ -326,7 +327,8 @@ class DeviceManager:
                             t = details[0]
                             self._tunnel_address = t["tunnel-address"]
                             self._tunnel_port = t["tunnel-port"]
-                            logger.info("Tunnel ready: %s:%d (device %s)",
+                            self._tunnel_udid = udid
+                            logger.info("Tunnel ready: %s:%d (device UDID=%s)",
                                         self._tunnel_address, self._tunnel_port, udid)
                             return {"status": "ok",
                                     "message": f"Tunnel active at {self._tunnel_address}:{self._tunnel_port}"}
