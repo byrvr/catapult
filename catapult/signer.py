@@ -94,15 +94,11 @@ class Signer:
 
     async def _create_p12(self, cert_path: Path, key_path: Path, p12_path: Path):
         await self._run(
-            "openssl", "pkcs12", "-export",
+            "openssl", "pkcs12", "-export", "-legacy",
             "-out", str(p12_path),
             "-inkey", str(key_path),
             "-in", str(cert_path),
-            # OpenSSL 3.x defaults break macOS security import — force legacy algorithms
-            "-certpbe", "PBE-SHA1-3DES",
-            "-keypbe", "PBE-SHA1-3DES",
-            "-macalg", "SHA1",
-            "-passout", "pass:",
+            "-passout", "pass:catapult",
             label="create-p12",
         )
 
@@ -115,7 +111,7 @@ class Signer:
         await self._run("security", "unlock-keychain", "-p", pwd, keychain, label="unlock-keychain")
         await self._run(
             "security", "import", str(p12_path),
-            "-k", keychain, "-P", "", "-T", "/usr/bin/codesign",
+            "-k", keychain, "-P", "catapult", "-T", "/usr/bin/codesign",
             label="import-cert",
         )
         await self._run(
