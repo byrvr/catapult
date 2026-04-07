@@ -123,11 +123,51 @@ class DeviceManager:
     # ── Pairing + Tunnel ──
 
     async def pair_device(self, device_name: str | None = None) -> dict:
-        """Pair with a device using pymobiledevice3. Requires admin privileges."""
-        cmd = f"{sys.executable} -m pymobiledevice3 remote pair"
-        if device_name:
-            cmd += f' --name "{device_name}"'
-        return await self._run_privileged(cmd, "Pairing")
+        """Pair with a device using pymobiledevice3's Python API directly."""
+        try:
+            from pymobiledevice3.remote.bonjour import browse_remotepairing_manual_pairing
+            from pymobiledevice3.remote.remote_service import RemotePairingManualPairingService
+        except ImportError as e:
+            return {"status": "error", "message": f"pymobiledevice3 remote pairing not available: {e}"}
+
+        logger.info("Browsing for devices to pair with (name=%s)...", device_name)
+        try:
+            answers = await browse_remotepairing_manual_pairing()
+        except Exception as e:
+            return {"status": "error", "message": f"Device browse failed: {e}"}
+
+        # Find the device
+        target = None
+        for answer in answers:
+            name = answer.properties.get("name", "")
+            if device_name and name != device_name:
+                continue
+            for addr in answer.addresses:
+                if not addr.full_ip.startswith("fe80"):  # Prefer non-link-local
+                    target = (addr.full_ip, answer.port, answer.properties.get("identifier", ""))
+                    break
+            if target:
+                break
+            # Fallback to first address
+            if answer.addresses:
+                addr = answer.addresses[0]
+                target = (addr.full_ip, answer.port, answer.properties.get("identifier", ""))
+                break
+
+        if not target:
+            return {"status": "error", "message": f"No pairable device found (name={device_name}). Enable Developer Mode on the device."}
+
+        ip, port, identifier = target
+        logger.info("Pairing with %s at %s:%d (id=%s)", device_name or "device", ip, port, identifier)
+
+        try:
+            async with RemotePairingManualPairingService(identifier, ip, port) as service:
+                await service.connect(autopair=True)
+            logger.info("Pairing successful!")
+            return {"status": "ok", "message": "Paired successfully"}
+        except Exception as e:
+            logger.error("Pairing failed: %s", e)
+            return {"status": "error", "message": f"Pairing failed: {e}"}
 
     async def _run_privileged(self, command: str, label: str) -> dict:
         """Run a command with admin privileges via macOS password dialog."""
