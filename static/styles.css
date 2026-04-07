@@ -415,6 +415,68 @@ input::placeholder { color: var(--text-dim); }
 @keyframes spin { to { transform: rotate(360deg); } }
 .spinning svg { animation: spin 0.8s linear infinite; }
 
+/* ── PIN Dialog ── */
+
+.pin-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+    backdrop-filter: blur(4px);
+}
+
+.pin-dialog {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 28px;
+    width: 320px;
+    text-align: center;
+}
+
+.pin-dialog h3 {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 6px;
+}
+
+.pin-dialog p {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-bottom: 16px;
+}
+
+.pin-input {
+    text-align: center !important;
+    font-size: 28px !important;
+    letter-spacing: 0.4em !important;
+    font-variant-numeric: tabular-nums;
+    padding: 12px !important;
+    font-weight: 600;
+}
+
+.pin-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 16px;
+    justify-content: flex-end;
+}
+
+.btn-cancel {
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 16px;
+    color: var(--text-dim);
+    font-size: 13px;
+    cursor: pointer;
+}
+
+.btn-cancel:hover { color: var(--text); border-color: var(--text-dim); }
+
 /* ── Scrollbar ── */
 
 .device-list::-webkit-scrollbar { width: 4px; }

@@ -38,13 +38,12 @@ function renderDevices(devices) {
         return;
     }
 
-    // Filter: keep ios/tvos/ipados devices + mobdev2/remotepairing unknowns
     const filtered = devices.filter((d) => {
+        // Always show installable devices
+        if (d.installable) return true;
+        // Show Apple TV / iPhone / iPad
         const cls = d.device_class || "unknown";
         if (cls === "ios" || cls === "tvos" || cls === "ipados") return true;
-        if (d.installable) return true;
-        // Keep companion-link (could be Apple TV) but drop pure AirPlay non-Apple
-        if (d.service && d.service.includes("companion")) return true;
         return false;
     });
 
@@ -89,7 +88,6 @@ function renderDevices(devices) {
                     body: JSON.stringify({ name: deviceName }),
                 });
 
-                // Poll for PIN request
                 const pollPin = async () => {
                     for (let i = 0; i < 60; i++) {
                         await new Promise(r => setTimeout(r, 1000));
@@ -98,7 +96,7 @@ function renderDevices(devices) {
                             const sd = await sr.json();
                             if (sd.state === "waiting_pin") {
                                 setupBtn.textContent = "Enter PIN";
-                                const pin = prompt("Enter the PIN shown on your Apple TV:");
+                                const pin = await showPinDialog();
                                 if (pin) {
                                     await fetch("/api/devices/pin", {
                                         method: "POST",
@@ -389,6 +387,40 @@ async function checkExistingSession() {
         }
     } catch {}
 }
+
+// ── PIN Dialog ──
+
+function showPinDialog() {
+    return new Promise((resolve) => {
+        const overlay = document.createElement("div");
+        overlay.className = "pin-overlay";
+        overlay.innerHTML = `
+            <div class="pin-dialog">
+                <h3>Enter PIN</h3>
+                <p>Enter the 6-digit PIN shown on your Apple TV</p>
+                <input type="text" class="pin-input" maxlength="6" inputmode="numeric" pattern="[0-9]*" autofocus>
+                <div class="pin-actions">
+                    <button class="btn-cancel">Cancel</button>
+                    <button class="btn-primary btn-confirm">Confirm</button>
+                </div>
+            </div>`;
+        document.body.appendChild(overlay);
+
+        const input = overlay.querySelector(".pin-input");
+        const confirm = overlay.querySelector(".btn-confirm");
+        const cancel = overlay.querySelector(".btn-cancel");
+
+        const submit = () => { overlay.remove(); resolve(input.value); };
+        const dismiss = () => { overlay.remove(); resolve(null); };
+
+        confirm.addEventListener("click", submit);
+        cancel.addEventListener("click", dismiss);
+        input.addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
+        input.focus();
+    });
+}
+
+// ── Init ──
 
 refreshDevices();
 checkExistingSession();

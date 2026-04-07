@@ -98,12 +98,25 @@ class DeviceManager:
         logger.info("Scanning network for devices (%ss timeout)...", timeout)
         raw = await asyncio.to_thread(_scan)
 
-        # Deduplicate by host — prefer installable over AirPlay
+        # Deduplicate by host — prefer installable, merge best name/model
         by_host: dict[str, dict] = {}
+        best_names: dict[str, str] = {}
+        best_models: dict[str, str] = {}
         for d in raw:
             host = d["host"]
+            n = d["name"]
+            # A "good" name is short, no colons (not MAC), no dashes-only (not UUID)
+            if n and len(n) < 30 and ":" not in n and not (len(n) > 20 and n.count("-") >= 3):
+                best_names[host] = n
+            if d.get("model"):
+                best_models[host] = d["model"]
             if host not in by_host or (d["installable"] and not by_host[host]["installable"]):
                 by_host[host] = d
+        for host, d in by_host.items():
+            if host in best_names:
+                d["name"] = best_names[host]
+            if host in best_models and not d.get("model"):
+                d["model"] = best_models[host]
 
         devices = list(by_host.values())
         for d in devices:
