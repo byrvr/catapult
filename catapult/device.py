@@ -275,8 +275,12 @@ class DeviceManager:
 
     async def start_tunnel(self) -> dict:
         """Start a tunnel to paired devices. Runs in background with admin privileges."""
+        home = Path.home()
         result = await self._run_privileged(
-            f"{sys.executable} -m pymobiledevice3 remote start-tunnel -t wifi "
+            # Kill any stale tunnel processes first
+            f"pkill -f 'pymobiledevice3 remote start-tunnel' 2>/dev/null; sleep 1; "
+            # HOME must point to real user so pymobiledevice3 finds pair records
+            f"HOME={home} {sys.executable} -m pymobiledevice3 remote start-tunnel -t wifi "
             f"> /tmp/catapult_tunnel.log 2>&1 & "
             f"TPID=$!; sleep 5; "
             f"if kill -0 $TPID 2>/dev/null; then echo $TPID; else cat /tmp/catapult_tunnel.log; exit 1; fi",
