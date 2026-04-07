@@ -85,6 +85,7 @@ class DeviceManager:
     def __init__(self):
         self._cache: dict[str, dict] = {}
         self._tunnel_proc: asyncio.subprocess.Process | None = None
+        self._tunneled_hosts: set[str] = set()  # hosts with active tunnels
 
     async def discover(self, timeout: float = 4.0) -> list[dict]:
         def _scan():
@@ -128,6 +129,10 @@ class DeviceManager:
 
         devices = list(by_host.values())
         for d in devices:
+            # Preserve tunnel state across rescans
+            if d["host"] in self._tunneled_hosts:
+                d["installable"] = True
+                d["needs_setup"] = False
             self._cache[d["udid"]] = d
 
         logger.info("Found %d device(s)", len(devices))

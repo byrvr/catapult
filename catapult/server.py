@@ -89,6 +89,12 @@ async def setup_device(payload: dict = None):
     if tunnel_result.get("status") == "ok":
         await asyncio.sleep(2)
         await device_manager.discover()
+        # Mark all remotepairing devices as installable now that tunnel is up
+        for d in device_manager._cache.values():
+            if d.get("needs_setup"):
+                d["installable"] = True
+                d["needs_setup"] = False
+                device_manager._tunneled_hosts.add(d["host"])
     return tunnel_result
 
 
