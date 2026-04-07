@@ -117,12 +117,12 @@ class DeviceManager:
 
     # ── Pairing + Tunnel ──
 
-    async def pair_device(self) -> dict:
+    async def pair_device(self, device_name: str | None = None) -> dict:
         """Pair with a device using pymobiledevice3. Requires admin privileges."""
-        return await self._run_privileged(
-            f"{sys.executable} -m pymobiledevice3 remote pair",
-            "Pairing",
-        )
+        cmd = f"{sys.executable} -m pymobiledevice3 remote pair"
+        if device_name:
+            cmd += f' --name "{device_name}"'
+        return await self._run_privileged(cmd, "Pairing")
 
     async def _run_privileged(self, command: str, label: str) -> dict:
         """Run a command with admin privileges via macOS password dialog."""

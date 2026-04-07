@@ -60,9 +60,10 @@ async def list_devices():
 
 
 @app.post("/api/devices/pair")
-async def pair_device():
+async def pair_device(payload: dict = None):
     """Initiate device pairing — shows admin password dialog and PIN on device."""
-    return await device_manager.pair_device()
+    name = payload.get("name") if payload else None
+    return await device_manager.pair_device(device_name=name)
 
 
 @app.post("/api/devices/tunnel")
@@ -76,9 +77,10 @@ async def start_tunnel():
 
 
 @app.post("/api/devices/setup")
-async def setup_device():
+async def setup_device(payload: dict = None):
     """One-click pair + tunnel for unpaired devices."""
-    pair_result = await device_manager.pair_device()
+    name = payload.get("name") if payload else None
+    pair_result = await device_manager.pair_device(device_name=name)
     if pair_result.get("status") != "ok":
         return pair_result
     tunnel_result = await device_manager.start_tunnel()

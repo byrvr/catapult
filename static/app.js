@@ -81,7 +81,12 @@ function renderDevices(devices) {
                 setupBtn.textContent = "Pairing...";
                 setupBtn.disabled = true;
                 try {
-                    const resp = await fetch("/api/devices/setup", { method: "POST" });
+                    const deviceName = el.querySelector(".device-name")?.textContent || "";
+                    const resp = await fetch("/api/devices/setup", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ name: deviceName }),
+                    });
                     const data = await resp.json();
                     if (data.status === "ok") {
                         setupBtn.textContent = "Done!";
