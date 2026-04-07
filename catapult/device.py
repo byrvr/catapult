@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import sys
+import threading
 from pathlib import Path
 
 from zeroconf import ServiceBrowser, ServiceListener, Zeroconf
@@ -122,15 +123,14 @@ class DeviceManager:
 
     # ── Pairing + Tunnel ──
 
-    # For PIN exchange between the pairing coroutine and the web UI
-    _pin_future: asyncio.Future | None = None
-    _pairing_state: str = "idle"  # idle, waiting_pin, pairing, done, error
+    _pairing_state: str = "idle"
+    _pin_event: threading.Event = threading.Event()
+    _pin_value: str = ""
 
     async def pair_device(self, device_name: str | None = None) -> dict:
-        """Start pairing. Returns immediately if PIN is needed (check pair_status)."""
+        """Pair with a device. Runs in a background thread so input() doesn't block."""
         try:
             from pymobiledevice3.bonjour import browse_remotepairing_manual_pairing
-            from pymobiledevice3.cli.remote import RemotePairingManualPairingService
         except ImportError as e:
             return {"status": "error", "message": f"pymobiledevice3 remote pairing not available: {e}"}
 
@@ -166,25 +166,35 @@ class DeviceManager:
         logger.info("Pairing with %s at %s:%d", device_name or "device", ip, port)
         self._pairing_state = "pairing"
 
-        # Monkey-patch input() to wait for PIN from web UI
+        # Run in a thread — the pairing calls input() which blocks, and we need
+        # the main event loop free to handle the PIN submission HTTP request
+        result = await asyncio.to_thread(self._pair_in_thread, identifier, ip, port)
+        return result
+
+    def _pair_in_thread(self, identifier: str, ip: str, port: int) -> dict:
+        """Run the actual pairing in a separate thread with its own event loop."""
         import builtins
+        from pymobiledevice3.cli.remote import RemotePairingManualPairingService
+
         original_input = builtins.input
-        loop = asyncio.get_event_loop()
+        self._pin_event.clear()
+        self._pin_value = ""
 
         def _web_input(prompt=""):
-            logger.info("PIN requested — waiting for input from web UI")
+            logger.info("PIN requested — waiting for web UI input")
             self._pairing_state = "waiting_pin"
-            self._pin_future = loop.create_future()
-            # Block this thread until the PIN is provided
-            # (connect runs in the event loop, so we need a thread-safe wait)
-            pin = asyncio.run_coroutine_threadsafe(self._pin_future, loop).result(timeout=120)
-            logger.info("Got PIN from web UI")
-            return pin
+            self._pin_event.wait(timeout=120)
+            logger.info("Got PIN from web UI: %s", self._pin_value)
+            return self._pin_value
 
+        loop = asyncio.new_event_loop()
+        builtins.input = _web_input
         try:
-            builtins.input = _web_input
-            async with RemotePairingManualPairingService(identifier, ip, port) as service:
-                await service.connect(autopair=True)
+            async def _do_pair():
+                async with RemotePairingManualPairingService(identifier, ip, port) as service:
+                    await service.connect(autopair=True)
+
+            loop.run_until_complete(_do_pair())
             self._pairing_state = "done"
             logger.info("Pairing successful!")
             return {"status": "ok", "message": "Paired successfully"}
@@ -194,12 +204,13 @@ class DeviceManager:
             return {"status": "error", "message": f"Pairing failed: {e}"}
         finally:
             builtins.input = original_input
+            loop.close()
 
     def submit_pin(self, pin: str):
         """Called from the web UI to provide the PIN shown on the device."""
-        if self._pin_future and not self._pin_future.done():
-            self._pin_future.set_result(pin)
-            self._pairing_state = "pairing"
+        self._pin_value = pin
+        self._pin_event.set()
+        self._pairing_state = "pairing"
 
     async def _run_privileged(self, command: str, label: str) -> dict:
         """Run a command with admin privileges via macOS password dialog."""
