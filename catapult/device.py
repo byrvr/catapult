@@ -125,8 +125,8 @@ class DeviceManager:
     async def pair_device(self, device_name: str | None = None) -> dict:
         """Pair with a device using pymobiledevice3's Python API directly."""
         try:
-            from pymobiledevice3.remote.bonjour import browse_remotepairing_manual_pairing
-            from pymobiledevice3.remote.remote_service import RemotePairingManualPairingService
+            from pymobiledevice3.bonjour import browse_remotepairing_manual_pairing
+            from pymobiledevice3.cli.remote import RemotePairingManualPairingService
         except ImportError as e:
             return {"status": "error", "message": f"pymobiledevice3 remote pairing not available: {e}"}
 
