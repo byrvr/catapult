@@ -213,25 +213,9 @@ async def install_ws(ws: WebSocket):
         await _send(ws, "signing", 60, "Signing IPA...")
         signed_path = await signer.sign(ipa_path, cert, private_key, profile, sideload_bundle_id)
 
-        # 5. Install (auto-start tunnel if connection fails)
+        # 5. Install
         await _send(ws, "installing", 80, f"Installing to {device_info['name']}...")
-        try:
-            await device_manager.install(device_udid, signed_path)
-        except RuntimeError as e:
-            if "connection" in str(e).lower():
-                # Need a tunnel — start one with admin privileges
-                await _send(ws, "installing", 82, "Starting tunnel (admin password required)...")
-                tunnel_result = await device_manager.start_tunnel()
-                if tunnel_result.get("status") != "ok":
-                    raise RuntimeError(f"Tunnel failed: {tunnel_result.get('message')}")
-                await _send(ws, "installing", 85, "Waiting for tunnel...")
-                await asyncio.sleep(5)
-                await _send(ws, "installing", 88, "Rescanning devices...")
-                await device_manager.discover()
-                await _send(ws, "installing", 90, "Retrying install...")
-                await device_manager.install(device_udid, signed_path)
-            else:
-                raise
+        await device_manager.install(device_udid, signed_path)
 
         await _send(ws, "done", 100, "Installed successfully!")
         logger.info("Install complete: %s → %s", ipa_info["bundle_id"], device_info["name"])
