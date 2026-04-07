@@ -13,10 +13,10 @@ from catapult.developer import DeveloperServices
 from catapult.device import DeviceManager
 from catapult.ipa import IpaProcessor
 from catapult.signer import Signer
+from catapult import refresh as _refresh
 
 logger = logging.getLogger(__name__)
 
-from starlette.middleware import Middleware
 from starlette.responses import Response
 
 app = FastAPI(title="Catapult")
@@ -37,6 +37,16 @@ auth_client = AppleAuthClient()
 dev_services = DeveloperServices()
 signer = Signer()
 ipa_processor = IpaProcessor()
+
+
+@app.on_event("startup")
+async def _on_startup():
+    # Restore saved session on startup
+    _refresh.restore_session(auth_client)
+    # Start 7-day auto-refresh background loop
+    def _components():
+        return device_manager, auth_client, dev_services, signer, ipa_processor
+    asyncio.create_task(_refresh.run_refresh_loop(_components))
 
 
 # ── Pages ──
@@ -151,6 +161,7 @@ async def _fetch_team(auth_result: dict) -> dict:
         session = auth_client.session
         team = await dev_services.get_team(session)
         logger.info("Team: %s (%s)", team.get("name"), team.get("teamId"))
+        _refresh.save_session(session)
         return auth_result
     except Exception as e:
         logger.error("Team fetch failed: %s", e)
@@ -222,6 +233,7 @@ async def install_ws(ws: WebSocket):
 
         await _send(ws, "done", 100, "Installed successfully!")
         logger.info("Install complete: %s → %s", ipa_info["bundle_id"], device_info["name"])
+        _refresh.record_install(device_udid, ipa_path, device_info["name"])
 
     except Exception as e:
         logger.exception("Install failed")
