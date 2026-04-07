@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import sys
 import threading
 from pathlib import Path
 
@@ -244,64 +245,67 @@ class DeviceManager:
         self._pin_event.set()
         self._pairing_state = "pairing"
 
-    _tunnel_task: asyncio.Task | None = None
     _tunnel_address: str | None = None
     _tunnel_port: int | None = None
 
     async def start_tunnel(self) -> dict:
-        """Start a TCP tunnel to paired devices (no root required)."""
-        from pymobiledevice3.remote.tunnel_service import (
-            get_remote_pairing_tunnel_services,
-            start_tunnel_over_remotepairing,
-            TunnelProtocol,
-        )
+        """Start a tunnel to paired devices via subprocess (requires admin for TUN device)."""
+        import os, tempfile, stat
 
         # Already have a running tunnel
-        if self._tunnel_task and not self._tunnel_task.done():
-            return {"status": "ok", "message": f"Tunnel already active at {self._tunnel_address}:{self._tunnel_port}"}
+        if self._tunnel_address and self._tunnel_port:
+            return {"status": "ok", "message": f"Tunnel already active"}
 
-        logger.info("Searching for paired devices to tunnel...")
+        home = Path.home()
+        log_file = "/tmp/catapult_tunnel.log"
+
+        # Build script: kill stale, start tunnel with --script-mode, wait for output
+        command = (
+            f"pkill -f 'pymobiledevice3 remote start-tunnel' 2>/dev/null; sleep 1; "
+            f"HOME={home} PYTHONUNBUFFERED=1 "
+            f"{sys.executable} -m pymobiledevice3 remote start-tunnel -t wifi --script-mode "
+            f"> {log_file} 2>/dev/null & "
+            f"TPID=$!; "
+            # Wait up to 20s for the script-mode output line (address port)
+            f"for i in $(seq 1 20); do "
+            f"  if [ -s {log_file} ]; then cat {log_file}; exit 0; fi; "
+            f"  if ! kill -0 $TPID 2>/dev/null; then echo 'TUNNEL_DIED'; exit 1; fi; "
+            f"  sleep 1; "
+            f"done; "
+            f"echo 'TUNNEL_TIMEOUT'; exit 1"
+        )
+
+        script = tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False, prefix="catapult_")
+        script.write(f"#!/bin/bash\n{command}\n")
+        script.close()
+        os.chmod(script.name, stat.S_IRWXU)
+
+        logger.info("Starting tunnel (admin privileges required)...")
         try:
-            services = await get_remote_pairing_tunnel_services(bonjour_timeout=5.0)
-        except Exception as e:
-            logger.exception("Tunnel browse failed")
-            return {"status": "error", "message": f"No paired device found: {e}"}
+            proc = await asyncio.create_subprocess_exec(
+                "osascript", "-e",
+                f'do shell script "{script.name}" with administrator privileges',
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+            output = stdout.decode().strip()
+            logger.info("Tunnel output (rc=%d): %s", proc.returncode, output[:200])
 
-        if not services:
-            return {"status": "error", "message": "No paired device found. Try pairing again."}
+            if proc.returncode != 0:
+                return {"status": "error", "message": f"Tunnel failed: {output[:200]}"}
 
-        service = services[0]
-        logger.info("Found paired device: %s", service.remote_identifier)
-
-        # Start tunnel as a long-running background task
-        ready = asyncio.Event()
-        tunnel_error: list[str] = []
-
-        async def _run_tunnel():
-            try:
-                async with start_tunnel_over_remotepairing(
-                    service, protocol=TunnelProtocol.TCP
-                ) as tunnel_result:
-                    self._tunnel_address = tunnel_result.address
-                    self._tunnel_port = tunnel_result.port
-                    logger.info("Tunnel active: %s:%d", tunnel_result.address, tunnel_result.port)
-                    ready.set()
-                    # Keep tunnel alive until cancelled
-                    await asyncio.Event().wait()
-            except Exception as e:
-                logger.exception("Tunnel failed")
-                tunnel_error.append(str(e))
-                ready.set()
-
-        self._tunnel_task = asyncio.create_task(_run_tunnel())
-
-        # Wait for tunnel to be ready (or fail)
-        await asyncio.wait_for(ready.wait(), timeout=30)
-
-        if tunnel_error:
-            return {"status": "error", "message": f"Tunnel failed: {tunnel_error[0]}"}
-
-        return {"status": "ok", "message": f"Tunnel active at {self._tunnel_address}:{self._tunnel_port}"}
+            # Parse script-mode output: "address port"
+            parts = output.split()
+            if len(parts) >= 2:
+                self._tunnel_address = parts[0]
+                self._tunnel_port = int(parts[1])
+                logger.info("Tunnel RSD endpoint: %s:%d", self._tunnel_address, self._tunnel_port)
+                return {"status": "ok", "message": f"Tunnel active at {self._tunnel_address}:{self._tunnel_port}"}
+            else:
+                return {"status": "error", "message": f"Unexpected tunnel output: {output[:200]}"}
+        finally:
+            os.unlink(script.name)
 
     # ── Installation ──
 
