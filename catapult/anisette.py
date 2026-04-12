@@ -9,16 +9,43 @@ come from omnisette; everything else uses our stable module-level IDs.
 
 import base64
 import datetime
+import json
 import logging
 import platform
 import uuid
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Stable device identity — created once, reused across ALL requests in this session.
+# Stable device identity — persisted across restarts so Apple sees a consistent client.
 # Mismatch between GSA cpd and 2FA trigger causes 401.
-_DEVICE_ID = str(uuid.uuid4()).upper()
-_LOCAL_USER_ID = base64.b64encode(uuid.uuid4().bytes).decode()
+_IDENTITY_FILE = Path.home() / ".catapult" / "device_id.json"
+
+
+def _load_or_create_identity() -> tuple[str, str]:
+    """Load persisted device identity or create and save a new one."""
+    try:
+        if _IDENTITY_FILE.exists():
+            data = json.loads(_IDENTITY_FILE.read_text())
+            if data.get("device_id") and data.get("local_user_id"):
+                return data["device_id"], data["local_user_id"]
+    except Exception:
+        pass
+
+    device_id = str(uuid.uuid4()).upper()
+    local_user_id = base64.b64encode(uuid.uuid4().bytes).decode()
+    try:
+        _IDENTITY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _IDENTITY_FILE.write_text(json.dumps({
+            "device_id": device_id,
+            "local_user_id": local_user_id,
+        }))
+    except Exception:
+        logger.debug("Could not persist device identity")
+    return device_id, local_user_id
+
+
+_DEVICE_ID, _LOCAL_USER_ID = _load_or_create_identity()
 
 
 def _fetch_otp() -> dict:
@@ -186,7 +213,7 @@ def _try_native_ctypes() -> dict | None:
 def _try_omnisette_server() -> dict | None:
     try:
         import httpx
-        resp = httpx.get("http://127.0.0.1:6969", timeout=3)
+        resp = httpx.get("http://127.0.0.1:6969", timeout=5)
         if resp.status_code == 200:
             data = resp.json()
             if "X-Apple-I-MD" in data and "X-Apple-I-MD-M" in data:

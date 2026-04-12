@@ -1,6 +1,7 @@
 """FastAPI server — REST + WebSocket API for the Catapult UI."""
 
 import asyncio
+import hashlib
 import logging
 import sys
 from pathlib import Path
@@ -57,12 +58,25 @@ async def _on_startup():
     asyncio.create_task(_refresh.run_refresh_loop(_components))
 
 
+def _asset_hash(filename: str) -> str:
+    """Short content hash for cache busting."""
+    path = static_dir / filename
+    if path.exists():
+        return hashlib.md5(path.read_bytes()).hexdigest()[:8]
+    return "0"
+
+
 # ── Pages ──
 
 
 @app.get("/")
 async def index():
-    return FileResponse(static_dir / "index.html")
+    from starlette.responses import HTMLResponse
+    html = (static_dir / "index.html").read_text()
+    # Replace hardcoded ?v=N with content-based hashes
+    html = html.replace("styles.css?v=2", f"styles.css?v={_asset_hash('styles.css')}")
+    html = html.replace("app.js?v=2", f"app.js?v={_asset_hash('app.js')}")
+    return HTMLResponse(html)
 
 
 # ── REST API ──
@@ -176,11 +190,88 @@ async def _fetch_team(auth_result: dict) -> dict:
         return {"status": "error", "message": f"Signed in but team fetch failed: {e}"}
 
 
+@app.get("/api/account/info")
+async def account_info():
+    """Return team info, registered app IDs, profiles with expiry, and devices."""
+    session = auth_client.session
+    if not session or not session.authenticated:
+        return JSONResponse({"error": "Not authenticated"}, status_code=401)
+
+    try:
+        team = await dev_services.get_team(session)
+        team_id = team["teamId"]
+
+        app_ids = await dev_services._list_app_ids(session, team_id)
+        profiles = await dev_services._list_profiles(session, team_id)
+
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+
+        # Build profile lookup by appIdId for expiry info
+        profile_map = {}
+        for p in profiles:
+            aid = p.get("appIdId", "")
+            exp = p.get("expirationDate")
+            if aid and exp:
+                if isinstance(exp, datetime):
+                    profile_map[aid] = exp
+                else:
+                    try:
+                        profile_map[aid] = datetime.fromisoformat(str(exp))
+                    except Exception:
+                        pass
+
+        # Format app IDs with expiry
+        apps = []
+        for a in app_ids:
+            aid = a.get("appIdId", "")
+            identifier = a.get("identifier", "")
+            name = a.get("name", "")
+            exp = profile_map.get(aid)
+            days_left = None
+            exp_str = None
+            if exp:
+                if exp.tzinfo is None:
+                    exp = exp.replace(tzinfo=timezone.utc)
+                delta = exp - now
+                days_left = max(0, delta.days)
+                exp_str = exp.strftime("%b %d, %Y")
+            apps.append({
+                "name": name,
+                "identifier": identifier,
+                "expiry": exp_str,
+                "days_left": days_left,
+            })
+
+        team_type = team.get("type", "")
+        is_free = team_type.lower() in ("individual", "free", "")
+        app_id_limit = 10 if is_free else 100
+
+        return {
+            "team": {
+                "name": team.get("name", ""),
+                "team_id": team_id,
+                "type": team_type,
+                "is_free": is_free,
+            },
+            "apps": apps,
+            "app_count": len(app_ids),
+            "app_limit": app_id_limit,
+            "apple_id": session.apple_id,
+        }
+    except Exception as e:
+        logger.exception("Account info fetch failed")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @app.post("/api/upload")
 async def upload_ipa(file: UploadFile):
     if not file.filename or not file.filename.endswith(".ipa"):
         return JSONResponse({"error": "Only .ipa files are accepted"}, status_code=400)
-    ipa_path = await ipa_processor.save_upload(file)
+    try:
+        ipa_path = await ipa_processor.save_upload(file)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
     info = await ipa_processor.inspect(ipa_path)
     return {"path": str(ipa_path), "info": info}
 

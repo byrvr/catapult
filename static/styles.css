@@ -361,6 +361,77 @@ input::placeholder { color: var(--text-dim); }
     font-weight: 500;
 }
 
+/* ── Account Dashboard ── */
+
+.account-dashboard {
+    margin-top: 10px;
+    border-top: 1px solid var(--border);
+    padding-top: 10px;
+}
+
+.account-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+
+.account-team {
+    font-size: 13px;
+    font-weight: 500;
+}
+
+.account-type {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-dim);
+    background: var(--bg);
+    padding: 2px 7px;
+    border-radius: 4px;
+}
+
+.account-slots {
+    font-size: 11px;
+    margin-bottom: 8px;
+}
+
+.account-apps {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    max-height: 120px;
+    overflow-y: auto;
+}
+
+.app-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 4px 8px;
+    border-radius: 5px;
+    background: var(--bg);
+    font-size: 11px;
+}
+
+.app-name {
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-right: 8px;
+}
+
+.app-expiry {
+    color: var(--text-dim);
+    flex-shrink: 0;
+    font-variant-numeric: tabular-nums;
+}
+
+.app-expiry.expiry-warning { color: #f59e0b; }
+.app-expiry.expiry-critical { color: var(--error); }
+
 /* ── Install ── */
 
 .btn-launch {

@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -10,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 STATE_DIR = Path.home() / ".catapult"
 STATE_FILE = STATE_DIR / "state.json"
+_KEYCHAIN_SERVICE = "com.catapult.session"
 
 REFRESH_INTERVAL_DAYS = 7
 # Re-sign 12h before expiry to be safe
@@ -56,50 +58,108 @@ def record_install(device_udid: str, ipa_path: str, device_name: str = ""):
     logger.info("Recorded install: %s → %s", ipa_path, device_udid)
 
 
+def _keychain_set(account: str, data: str) -> bool:
+    """Store a value in macOS Keychain."""
+    # Delete existing entry first (ignore errors if not found)
+    subprocess.run(
+        ["security", "delete-generic-password", "-s", _KEYCHAIN_SERVICE, "-a", account],
+        capture_output=True,
+    )
+    result = subprocess.run(
+        ["security", "add-generic-password", "-s", _KEYCHAIN_SERVICE, "-a", account,
+         "-w", data, "-U"],
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
+def _keychain_get(account: str) -> str | None:
+    """Retrieve a value from macOS Keychain."""
+    result = subprocess.run(
+        ["security", "find-generic-password", "-s", _KEYCHAIN_SERVICE, "-a", account, "-w"],
+        capture_output=True, text=True,
+    )
+    if result.returncode == 0:
+        return result.stdout.strip()
+    return None
+
+
+def _keychain_delete(account: str):
+    """Remove a value from macOS Keychain."""
+    subprocess.run(
+        ["security", "delete-generic-password", "-s", _KEYCHAIN_SERVICE, "-a", account],
+        capture_output=True,
+    )
+
+
 def save_session(session) -> None:
-    """Persist auth session tokens to disk."""
-    state = load_state()
-    state["session"] = {
-        "apple_id": session.apple_id,
+    """Persist auth session — tokens go to Keychain, metadata to state file."""
+    tokens = json.dumps({
         "adsid": session.adsid,
         "dsprsid": session.dsprsid,
         "idms_token": session.idms_token,
         "gs_token": session.gs_token,
         "sk": session.sk.hex() if session.sk else "",
         "c": session.c.hex() if session.c else "",
+    })
+    if _keychain_set(session.apple_id, tokens):
+        logger.info("Session tokens stored in Keychain")
+    else:
+        logger.warning("Failed to store tokens in Keychain, falling back to file")
+
+    state = load_state()
+    state["session"] = {
+        "apple_id": session.apple_id,
         "authenticated": session.authenticated,
     }
     save_state(state)
 
 
 def restore_session(auth_client) -> bool:
-    """Restore saved session into auth_client. Returns True if restored."""
+    """Restore saved session — read tokens from Keychain."""
     state = load_state()
     saved = state.get("session")
     if not saved or not saved.get("authenticated"):
         return False
+
+    apple_id = saved.get("apple_id", "")
+    raw = _keychain_get(apple_id)
+    if not raw:
+        logger.warning("No Keychain entry for %s", apple_id)
+        return False
+
+    try:
+        tokens = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        logger.warning("Corrupt Keychain data for %s", apple_id)
+        return False
+
     from catapult.apple_auth import AuthSession
     s = AuthSession(
-        apple_id=saved.get("apple_id", ""),
-        adsid=saved.get("adsid", ""),
-        dsprsid=saved.get("dsprsid", ""),
-        idms_token=saved.get("idms_token", ""),
-        gs_token=saved.get("gs_token", ""),
-        sk=bytes.fromhex(saved.get("sk", "")) if saved.get("sk") else b"",
-        c=bytes.fromhex(saved.get("c", "")) if saved.get("c") else b"",
+        apple_id=apple_id,
+        adsid=tokens.get("adsid", ""),
+        dsprsid=tokens.get("dsprsid", ""),
+        idms_token=tokens.get("idms_token", ""),
+        gs_token=tokens.get("gs_token", ""),
+        sk=bytes.fromhex(tokens.get("sk", "")) if tokens.get("sk") else b"",
+        c=bytes.fromhex(tokens.get("c", "")) if tokens.get("c") else b"",
         authenticated=True,
     )
     auth_client.session = s
-    logger.info("Restored session for %s", s.apple_id)
+    logger.info("Restored session for %s (from Keychain)", s.apple_id)
     return True
 
 
+MAX_CONSECUTIVE_FAILURES = 3
+
+
 def due_installs(state: dict) -> list[dict]:
-    """Return installs that need refreshing."""
+    """Return installs that need refreshing (skip those that failed too many times)."""
     now = _now_ts()
     return [
         r for r in state.get("installs", [])
         if now - r.get("last_installed", 0) >= REFRESH_AFTER_SECONDS
+        and r.get("fail_count", 0) < MAX_CONSECUTIVE_FAILURES
     ]
 
 
@@ -152,7 +212,18 @@ async def _refresh_install(rec, device_manager, auth_client, dev_services, signe
         signed_path = await signer.sign(ipa_path, cert, private_key, profile, sideload_bundle_id)
         await device_manager.install(device_udid, signed_path)
 
+        # Success — reset failure count
+        rec["fail_count"] = 0
         record_install(device_udid, ipa_path, rec.get("device_name", ""))
         logger.info("Auto-refresh complete: %s", ipa_path)
     except Exception:
-        logger.exception("Auto-refresh failed for %s", ipa_path)
+        rec["fail_count"] = rec.get("fail_count", 0) + 1
+        # Persist failure count
+        state = load_state()
+        for r in state.get("installs", []):
+            if r["device_udid"] == device_udid and r["ipa_path"] == ipa_path:
+                r["fail_count"] = rec["fail_count"]
+                break
+        save_state(state)
+        logger.exception("Auto-refresh failed for %s (attempt %d/%d)",
+                         ipa_path, rec["fail_count"], MAX_CONSECUTIVE_FAILURES)

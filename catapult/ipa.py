@@ -1,6 +1,7 @@
 import plistlib
 import shutil
 import tempfile
+import uuid
 import zipfile
 from pathlib import Path
 
@@ -9,13 +10,36 @@ from fastapi import UploadFile
 UPLOAD_DIR = Path(tempfile.gettempdir()) / "catapult_uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
 
+MAX_IPA_SIZE = 4 * 1024 * 1024 * 1024  # 4 GB
+ZIP_MAGIC = b"PK\x03\x04"
+
 
 class IpaProcessor:
     async def save_upload(self, file: UploadFile) -> Path:
-        dest = UPLOAD_DIR / file.filename
+        # Use random filename to prevent path traversal
+        dest = UPLOAD_DIR / f"{uuid.uuid4().hex}.ipa"
+        size = 0
         with dest.open("wb") as f:
+            first_chunk = True
             while chunk := await file.read(1024 * 1024):
+                if first_chunk:
+                    if not chunk[:4].startswith(ZIP_MAGIC):
+                        dest.unlink(missing_ok=True)
+                        raise ValueError("File is not a valid IPA (not a ZIP archive)")
+                    first_chunk = False
+                size += len(chunk)
+                if size > MAX_IPA_SIZE:
+                    dest.unlink(missing_ok=True)
+                    raise ValueError(f"IPA exceeds maximum size ({MAX_IPA_SIZE // (1024**3)} GB)")
                 f.write(chunk)
+
+        # Validate IPA structure
+        try:
+            with zipfile.ZipFile(dest, "r") as zf:
+                self._find_app_dir(zf)
+        except (zipfile.BadZipFile, ValueError) as e:
+            dest.unlink(missing_ok=True)
+            raise ValueError(f"Invalid IPA: {e}") from e
         return dest
 
     async def inspect(self, ipa_path: str | Path) -> dict:
