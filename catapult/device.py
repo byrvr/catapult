@@ -86,8 +86,10 @@ class DeviceManager:
         self._cache: dict[str, dict] = {}
         self._tunnel_proc: asyncio.subprocess.Process | None = None
         self._tunneled_hosts: set[str] = set()  # hosts with active tunnels
+        self._pairing_lock = threading.Lock()
+        self._tunnel_lock: asyncio.Lock | None = None  # created lazily in async context
 
-    async def discover(self, timeout: float = 4.0) -> list[dict]:
+    async def discover(self, timeout: float = 6.0) -> list[dict]:
         def _scan():
             zc = Zeroconf()
             listener = _Listener()
@@ -128,6 +130,17 @@ class DeviceManager:
                 d["model"] = best_models[host]
 
         devices = list(by_host.values())
+
+        # Disambiguate duplicate names by appending short host suffix
+        name_counts: dict[str, list[dict]] = {}
+        for d in devices:
+            name_counts.setdefault(d["name"], []).append(d)
+        for name, group in name_counts.items():
+            if len(group) > 1:
+                for d in group:
+                    suffix = d["host"].rsplit(".", 1)[-1] if "." in d["host"] else d["host"][-4:]
+                    d["name"] = f"{name} ({suffix})"
+
         for d in devices:
             # Preserve tunnel state across rescans
             if d["host"] in self._tunneled_hosts:
@@ -203,6 +216,9 @@ class DeviceManager:
         from pymobiledevice3.cli.remote import RemotePairingManualPairingService
         from pymobiledevice3.exceptions import RemotePairingCompletedError
 
+        if not self._pairing_lock.acquire(blocking=False):
+            return {"status": "error", "message": "Another pairing is already in progress"}
+
         original_input = builtins.input
         self._pin_event.clear()
         self._pin_value = ""
@@ -226,8 +242,6 @@ class DeviceManager:
             logger.info("Pairing successful!")
             return {"status": "ok", "message": "Paired successfully"}
         except RemotePairingCompletedError:
-            # This is actually a SUCCESS — pymobiledevice3 raises this when
-            # pairing completes and the remote endpoint closes the connection.
             self._pairing_state = "done"
             logger.info("Pairing completed successfully (connection closed by device)")
             return {"status": "ok", "message": "Paired successfully"}
@@ -238,6 +252,7 @@ class DeviceManager:
         finally:
             builtins.input = original_input
             loop.close()
+            self._pairing_lock.release()
 
     def submit_pin(self, pin: str):
         """Called from the web UI to provide the PIN shown on the device."""
@@ -302,6 +317,15 @@ class DeviceManager:
         """Ensure tunneld is running, then wait for a tunnel to appear."""
         import httpx
 
+        if self._tunnel_lock is None:
+            self._tunnel_lock = asyncio.Lock()
+
+        async with self._tunnel_lock:
+            return await self._start_tunnel_inner()
+
+    async def _start_tunnel_inner(self) -> dict:
+        import httpx
+
         # Already have a tunnel
         if self._tunnel_address and self._tunnel_port:
             return {"status": "ok", "message": "Tunnel already active"}
@@ -317,7 +341,7 @@ class DeviceManager:
         # Poll tunneld for tunnels (it auto-discovers WiFi devices)
         logger.info("Waiting for tunneld to establish tunnel...")
         async with httpx.AsyncClient() as client:
-            for i in range(15):
+            for i in range(30):
                 try:
                     resp = await client.get(self.TUNNELD_URL, timeout=3)
                     tunnels = resp.json()

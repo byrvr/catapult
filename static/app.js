@@ -33,6 +33,8 @@ async function refreshDevices() {
 
 function renderDevices(devices) {
     const list = $("#deviceList");
+    const previouslySelected = state.device;
+
     if (!devices.length) {
         list.innerHTML = '<div class="placeholder">No devices found on the network</div>';
         return;
@@ -75,7 +77,7 @@ function renderDevices(devices) {
         if (setupBtn) {
             setupBtn.addEventListener("click", async (e) => {
                 e.stopPropagation();
-                setupBtn.textContent = "Searching...";
+                setupBtn.textContent = "Connecting\u2026";
                 setupBtn.disabled = true;
                 const deviceName = el.querySelector(".device-name")?.textContent || "";
 
@@ -86,12 +88,24 @@ function renderDevices(devices) {
                     body: JSON.stringify({ name: deviceName }),
                 });
 
+                const STATE_LABELS = {
+                    browsing: "Connecting\u2026",
+                    pairing: "Pairing\u2026",
+                    waiting_pin: "Enter PIN",
+                    done: "Done!",
+                    error: "Failed",
+                };
+
                 const pollPin = async () => {
                     for (let i = 0; i < 60; i++) {
                         await new Promise(r => setTimeout(r, 1000));
                         try {
                             const sr = await fetch("/api/devices/pair-status");
                             const sd = await sr.json();
+                            // Update button text to reflect current phase
+                            if (STATE_LABELS[sd.state] && sd.state !== "waiting_pin") {
+                                setupBtn.textContent = STATE_LABELS[sd.state];
+                            }
                             if (sd.state === "waiting_pin") {
                                 setupBtn.textContent = "Enter PIN";
                                 const pin = await showPinDialog();
@@ -101,7 +115,7 @@ function renderDevices(devices) {
                                         headers: { "Content-Type": "application/json" },
                                         body: JSON.stringify({ pin }),
                                     });
-                                    setupBtn.textContent = "Pairing...";
+                                    setupBtn.textContent = "Pairing\u2026";
                                 }
                                 return;
                             }
@@ -131,13 +145,24 @@ function renderDevices(devices) {
         }
         el.addEventListener("click", (e) => {
             if (e.target.closest(".btn-setup")) return; // Handled by setup button
-            list.querySelectorAll(".device-item").forEach((e) => e.classList.remove("selected"));
-            el.classList.add("selected");
-            state.device = el.dataset.udid;
-            state.deviceInstallable = el.dataset.installable === "true";
-            checkReady();
+            selectDevice(el);
         });
     });
+
+    // Auto-reselect previously selected device
+    if (previouslySelected) {
+        const prev = list.querySelector(`[data-udid="${CSS.escape(previouslySelected)}"]`);
+        if (prev) selectDevice(prev);
+    }
+}
+
+function selectDevice(el) {
+    const list = $("#deviceList");
+    list.querySelectorAll(".device-item").forEach((e) => e.classList.remove("selected"));
+    el.classList.add("selected");
+    state.device = el.dataset.udid;
+    state.deviceInstallable = el.dataset.installable === "true";
+    checkReady();
 }
 
 function esc(s) {
@@ -302,8 +327,56 @@ function onAuthSuccess() {
                 <polyline points="22 4 12 14.01 9 11.01"/>
             </svg>
             <span>Signed in</span>
+        </div>
+        <div class="account-dashboard" id="accountDashboard">
+            <div class="placeholder">Loading account info\u2026</div>
         </div>`;
     checkReady();
+    loadAccountInfo();
+}
+
+async function loadAccountInfo() {
+    const dash = $("#accountDashboard");
+    if (!dash) return;
+    try {
+        const resp = await fetch("/api/account/info");
+        if (!resp.ok) throw new Error("Failed to load");
+        const data = await resp.json();
+
+        const teamLabel = data.team.is_free ? "Free" : data.team.type;
+        const slotColor = data.app_count >= data.app_limit ? "var(--error)" : "var(--text-dim)";
+
+        let appsHtml = "";
+        if (data.apps.length) {
+            appsHtml = data.apps.map((a) => {
+                let expiryClass = "";
+                let expiryText = "No profile";
+                if (a.days_left !== null) {
+                    expiryText = a.days_left <= 0 ? "Expired" : `${a.days_left}d left`;
+                    if (a.days_left <= 1) expiryClass = "expiry-critical";
+                    else if (a.days_left <= 3) expiryClass = "expiry-warning";
+                }
+                return `<div class="app-row">
+                    <span class="app-name">${esc(a.name || a.identifier)}</span>
+                    <span class="app-expiry ${expiryClass}">${expiryText}</span>
+                </div>`;
+            }).join("");
+        } else {
+            appsHtml = '<div class="placeholder">No provisioned apps</div>';
+        }
+
+        dash.innerHTML = `
+            <div class="account-header">
+                <span class="account-team">${esc(data.team.name)}</span>
+                <span class="account-type">${esc(teamLabel)}</span>
+            </div>
+            <div class="account-slots" style="color:${slotColor}">
+                App IDs: ${data.app_count} / ${data.app_limit}
+            </div>
+            <div class="account-apps">${appsHtml}</div>`;
+    } catch {
+        dash.innerHTML = "";
+    }
 }
 
 function setAuthStatus(msg, cls) {

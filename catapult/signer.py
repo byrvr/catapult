@@ -4,7 +4,6 @@ import asyncio
 import logging
 import plistlib
 import shutil
-import plistlib
 import tempfile
 from pathlib import Path
 
@@ -71,8 +70,15 @@ class Signer:
 
             signed_ipa = work_dir / f"{ipa_path.stem}_signed.ipa"
             await self._ipa.repack(app_dir, signed_ipa)
-            logger.info("Signed IPA written to %s", signed_ipa)
-            return signed_ipa
+
+            # Move signed IPA out of work_dir before cleanup
+            from catapult.ipa import UPLOAD_DIR
+            final_path = UPLOAD_DIR / signed_ipa.name
+            shutil.move(str(signed_ipa), str(final_path))
+            shutil.rmtree(work_dir, ignore_errors=True)
+
+            logger.info("Signed IPA written to %s", final_path)
+            return final_path
         except Exception:
             shutil.rmtree(work_dir, ignore_errors=True)
             raise
