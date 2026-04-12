@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import sys
 from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, WebSocket
@@ -21,7 +22,14 @@ from starlette.responses import Response
 
 app = FastAPI(title="Catapult")
 
-static_dir = Path(__file__).parent.parent / "static"
+def _static_dir() -> Path:
+    """Resolve static/ dir — works both from source and inside a PyInstaller .app bundle."""
+    if getattr(sys, "_MEIPASS", None):
+        return Path(sys._MEIPASS) / "static"
+    return Path(__file__).parent.parent / "static"
+
+
+static_dir = _static_dir()
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 
