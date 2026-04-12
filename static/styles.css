@@ -421,8 +421,9 @@ input::placeholder { color: var(--text-dim); }
     display: flex;
     flex-direction: column;
     gap: 3px;
-    max-height: 120px;
+    max-height: 200px;
     overflow-y: auto;
+    overflow-x: visible;
 }
 
 .app-row {
@@ -485,7 +486,7 @@ input::placeholder { color: var(--text-dim); }
     color: var(--text-dim);
     font-size: 16px;
     cursor: pointer;
-    padding: 0 4px;
+    padding: 2px 6px;
     line-height: 1;
     flex-shrink: 0;
     border-radius: 4px;
@@ -494,19 +495,13 @@ input::placeholder { color: var(--text-dim); }
 
 .btn-kebab:hover { color: var(--text); background: var(--surface-hover); }
 
-.app-row {
-    position: relative;
-}
-
 .kebab-menu {
-    position: absolute;
-    right: 0;
-    top: 100%;
+    position: fixed;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 8px;
     padding: 4px;
-    z-index: 10;
+    z-index: 50;
     box-shadow: 0 4px 12px rgba(0,0,0,0.4);
 }
 

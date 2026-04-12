@@ -440,6 +440,11 @@ async function loadAccountInfo() {
                 // Close any other open menus
                 dash.querySelectorAll(".kebab-menu").forEach((m) => { if (m !== menu) m.hidden = true; });
                 menu.hidden = !menu.hidden;
+                if (!menu.hidden) {
+                    const rect = kebabBtn.getBoundingClientRect();
+                    menu.style.top = `${rect.bottom + 4}px`;
+                    menu.style.right = `${window.innerWidth - rect.right}px`;
+                }
             });
 
             deleteBtn.addEventListener("click", async (e) => {
