@@ -293,7 +293,8 @@ async def account_info():
                 "is_free": is_free,
             },
             "apps": apps,
-            "app_count": len(app_ids),
+            "app_count": len(apps),
+            "app_count_total": len(app_ids),
             "app_limit": app_id_limit,
             "apple_id": session.apple_id,
         }
