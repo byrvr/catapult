@@ -213,6 +213,8 @@ header {
     border-radius: 8px;
 }
 
+.ipa-info[hidden] { display: none; }
+
 .ipa-icon {
     width: 40px;
     height: 40px;
