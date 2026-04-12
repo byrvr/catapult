@@ -245,7 +245,7 @@ $("#clearIpa").addEventListener("click", () => {
 
 // ── Apple ID auth ──
 
-$("#authForm").addEventListener("submit", async (e) => {
+async function handleLogin(e) {
     e.preventDefault();
     const btn = $("#authBtn");
     btn.disabled = true;
@@ -279,12 +279,9 @@ $("#authForm").addEventListener("submit", async (e) => {
         btn.disabled = false;
         btn.textContent = "Sign In";
     }
-});
+}
 
-$("#tfaBtn").addEventListener("click", submitTfa);
-$("#tfaCode").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") submitTfa();
-});
+bindAuthForm();
 
 async function submitTfa() {
     const btn = $("#tfaBtn");
@@ -321,18 +318,60 @@ function onAuthSuccess() {
     const section = $("#authSection");
     section.innerHTML = `
         <h2>Apple ID</h2>
-        <div class="auth-success">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--success)" stroke-width="2">
-                <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
-                <polyline points="22 4 12 14.01 9 11.01"/>
-            </svg>
-            <span>Signed in</span>
+        <div class="auth-header-row">
+            <div class="auth-success">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--success)" stroke-width="2">
+                    <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+                    <polyline points="22 4 12 14.01 9 11.01"/>
+                </svg>
+                <span>Signed in</span>
+            </div>
+            <button class="btn-signout" id="signOutBtn">Sign Out</button>
         </div>
         <div class="account-dashboard" id="accountDashboard">
             <div class="placeholder">Loading account info\u2026</div>
         </div>`;
+    $("#signOutBtn").addEventListener("click", signOut);
     checkReady();
     loadAccountInfo();
+}
+
+async function signOut() {
+    const btn = $("#signOutBtn");
+    btn.disabled = true;
+    btn.textContent = "Signing out\u2026";
+    try {
+        await fetch("/api/auth/logout", { method: "POST" });
+    } catch {}
+    state.authed = false;
+    state.device = null;
+    // Restore original auth section
+    const section = $("#authSection");
+    section.innerHTML = `
+        <h2>Apple ID</h2>
+        <form id="authForm" autocomplete="off">
+            <input type="email" id="appleId" placeholder="Apple ID" required autocomplete="username">
+            <input type="password" id="applePassword" placeholder="Password" required autocomplete="current-password">
+            <button type="submit" class="btn-primary" id="authBtn">Sign In</button>
+        </form>
+        <div id="tfaSection" hidden>
+            <p class="hint">On your iPhone: Settings \u2192 [your name] \u2192 Sign-In &amp; Security \u2192 Get Verification Code</p>
+            <div class="tfa-inputs">
+                <input type="text" id="tfaCode" maxlength="6" placeholder="000000" inputmode="numeric" pattern="[0-9]*" autocomplete="one-time-code">
+                <button class="btn-primary" id="tfaBtn">Verify</button>
+            </div>
+        </div>
+        <div class="auth-status" id="authStatus"></div>`;
+    bindAuthForm();
+    checkReady();
+}
+
+function bindAuthForm() {
+    $("#authForm").addEventListener("submit", handleLogin);
+    $("#tfaBtn").addEventListener("click", submitTfa);
+    $("#tfaCode").addEventListener("keydown", (e) => {
+        if (e.key === "Enter") submitTfa();
+    });
 }
 
 async function loadAccountInfo() {
@@ -356,8 +395,17 @@ async function loadAccountInfo() {
                     if (a.days_left <= 1) expiryClass = "expiry-critical";
                     else if (a.days_left <= 3) expiryClass = "expiry-warning";
                 }
+                const installedLine = a.installed
+                    ? `<span class="app-detail">Installed ${esc(a.installed)}${a.installed_device ? ` on ${esc(a.installed_device)}` : ""}</span>`
+                    : "";
+                const expiryLine = a.expiry
+                    ? `<span class="app-detail">Expires ${esc(a.expiry)}</span>`
+                    : "";
                 return `<div class="app-row">
-                    <span class="app-name">${esc(a.name || a.identifier)}</span>
+                    <div class="app-info">
+                        <span class="app-name">${esc(a.name || a.identifier)}</span>
+                        ${installedLine}${expiryLine}
+                    </div>
                     <span class="app-expiry ${expiryClass}">${expiryText}</span>
                 </div>`;
             }).join("");
