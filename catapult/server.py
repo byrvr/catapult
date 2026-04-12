@@ -241,14 +241,13 @@ async def account_info():
             except Exception:
                 pass
 
-        # Only show Catapult-managed app IDs (com.catapult.TEAMID.xxx)
         catapult_prefix = f"com.catapult.{team_id}."
         apps = []
         for a in app_ids:
             identifier = a.get("identifier", "")
-            if not identifier.startswith(catapult_prefix):
-                continue
             apple_name = a.get("name", "")
+            app_id_id = a.get("appIdId", "")
+            is_catapult = identifier.startswith(catapult_prefix)
 
             # Use real app name from IPA if available, otherwise Apple's registered name
             name = app_display_names.get(identifier, apple_name)
@@ -264,17 +263,19 @@ async def account_info():
                 ts = rec.get("last_installed")
                 if ts:
                     installed_dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-                    installed_str = installed_dt.strftime("%b %d, %Y %H:%M")
                     # Free accounts: profile expires 7 days after signing
                     expiry_dt = installed_dt + timedelta(days=7)
                     delta = expiry_dt - now
                     days_left = max(0, delta.days)
                     exp_str = expiry_dt.strftime("%b %d, %Y")
+                    installed_str = installed_dt.strftime("%b %d, %Y %H:%M")
                 installed_device = rec.get("device_name", "")
 
             apps.append({
                 "name": name,
                 "identifier": identifier,
+                "app_id_id": app_id_id,
+                "is_catapult": is_catapult,
                 "expiry": exp_str,
                 "days_left": days_left,
                 "installed": installed_str,
@@ -293,14 +294,44 @@ async def account_info():
                 "is_free": is_free,
             },
             "apps": apps,
-            "app_count": len(apps),
-            "app_count_total": len(app_ids),
+            "app_count": len(app_ids),
             "app_limit": app_id_limit,
             "apple_id": session.apple_id,
         }
     except Exception as e:
         logger.exception("Account info fetch failed")
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/account/delete-app")
+async def delete_app_id(payload: dict):
+    """Delete a registered app ID from Apple Developer Services."""
+    session = auth_client.session
+    if not session or not session.authenticated:
+        return JSONResponse({"error": "Not authenticated"}, status_code=401)
+
+    app_id_id = payload.get("app_id_id", "")
+    if not app_id_id:
+        return JSONResponse({"error": "app_id_id is required"}, status_code=400)
+
+    try:
+        team = await dev_services.get_team(session)
+        team_id = team["teamId"]
+
+        # Delete any provisioning profiles for this app first
+        await dev_services._delete_profiles_for_app(session, team_id, app_id_id)
+
+        # Delete the app ID
+        await dev_services._request(
+            session,
+            "ios/deleteAppId.action",
+            {"teamId": team_id, "appIdId": app_id_id},
+        )
+        logger.info("Deleted app ID: %s", app_id_id)
+        return {"status": "ok"}
+    except Exception as e:
+        logger.exception("Failed to delete app ID %s", app_id_id)
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
 
 @app.post("/api/upload")

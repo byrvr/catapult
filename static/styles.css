@@ -457,6 +457,19 @@ input::placeholder { color: var(--text-dim); }
     color: var(--text-dim);
 }
 
+.app-source {
+    font-size: 9px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-dim);
+    background: var(--surface);
+    padding: 1px 5px;
+    border-radius: 3px;
+    margin-left: 6px;
+    vertical-align: middle;
+}
+
 .app-expiry {
     color: var(--text-dim);
     flex-shrink: 0;
@@ -465,6 +478,52 @@ input::placeholder { color: var(--text-dim); }
 
 .app-expiry.expiry-warning { color: #f59e0b; }
 .app-expiry.expiry-critical { color: var(--error); }
+
+.btn-kebab {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    font-size: 16px;
+    cursor: pointer;
+    padding: 0 4px;
+    line-height: 1;
+    flex-shrink: 0;
+    border-radius: 4px;
+    transition: all 0.15s;
+}
+
+.btn-kebab:hover { color: var(--text); background: var(--surface-hover); }
+
+.app-row {
+    position: relative;
+}
+
+.kebab-menu {
+    position: absolute;
+    right: 0;
+    top: 100%;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 4px;
+    z-index: 10;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+}
+
+.kebab-delete {
+    background: none;
+    border: none;
+    color: var(--error);
+    font-size: 12px;
+    padding: 6px 12px;
+    cursor: pointer;
+    border-radius: 5px;
+    white-space: nowrap;
+    width: 100%;
+    text-align: left;
+}
+
+.kebab-delete:hover { background: rgba(239,68,68,0.1); }
 
 /* ── Install ── */
 
