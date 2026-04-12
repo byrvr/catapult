@@ -220,15 +220,24 @@ async def account_info():
         now = datetime.now(timezone.utc)
 
         # Load install history and map by sideload bundle identifier
+        # Also resolve real app names from the IPA files
         install_state = _refresh.load_state()
         install_records = install_state.get("installs", [])
-        install_by_bundle = {}
+        install_by_bundle: dict[str, dict] = {}  # sideload_id -> best record
+        app_display_names: dict[str, str] = {}   # sideload_id -> real app name
         for r in install_records:
             path = r.get("ipa_path", "")
             try:
                 info = await ipa_processor.inspect(path)
                 sideload_id = dev_services.sideload_bundle_id(team_id, info["bundle_id"])
-                install_by_bundle[sideload_id] = r
+                # Keep the most recent install record per sideload ID
+                existing = install_by_bundle.get(sideload_id)
+                if not existing or r.get("last_installed", 0) > existing.get("last_installed", 0):
+                    install_by_bundle[sideload_id] = r
+                # Use the IPA's display name (e.g. "Stremio") not Apple's generic name
+                display = info.get("bundle_name") or info.get("bundle_id", "")
+                if display:
+                    app_display_names[sideload_id] = display
             except Exception:
                 pass
 
@@ -236,7 +245,10 @@ async def account_info():
         apps = []
         for a in app_ids:
             identifier = a.get("identifier", "")
-            name = a.get("name", "")
+            apple_name = a.get("name", "")
+
+            # Use real app name from IPA if available, otherwise Apple's registered name
+            name = app_display_names.get(identifier, apple_name)
 
             # Find install record for this app
             rec = install_by_bundle.get(identifier)
