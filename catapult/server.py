@@ -215,31 +215,13 @@ async def account_info():
         team_id = team["teamId"]
 
         app_ids = await dev_services._list_app_ids(session, team_id)
-        profiles = await dev_services._list_profiles(session, team_id)
 
-        from datetime import datetime, timezone
+        from datetime import datetime, timedelta, timezone
         now = datetime.now(timezone.utc)
 
-        # Build profile lookup by appIdId for expiry info
-        profile_map = {}
-        for p in profiles:
-            aid = p.get("appIdId", "")
-            exp = p.get("expirationDate")
-            if aid and exp:
-                if isinstance(exp, datetime):
-                    profile_map[aid] = exp
-                else:
-                    try:
-                        profile_map[aid] = datetime.fromisoformat(str(exp))
-                    except Exception:
-                        pass
-
-        # Load install history for last-installed dates
+        # Load install history and map by sideload bundle identifier
         install_state = _refresh.load_state()
         install_records = install_state.get("installs", [])
-        # Map ipa_path -> install record
-        install_by_path = {r.get("ipa_path", ""): r for r in install_records}
-        # Also map by sideload bundle identifier (com.catapult.TEAM.bundle-id)
         install_by_bundle = {}
         for r in install_records:
             path = r.get("ipa_path", "")
@@ -250,31 +232,29 @@ async def account_info():
             except Exception:
                 pass
 
-        # Format app IDs with expiry and install dates
+        # Format app IDs with computed expiry and install dates
         apps = []
         for a in app_ids:
-            aid = a.get("appIdId", "")
             identifier = a.get("identifier", "")
             name = a.get("name", "")
-            exp = profile_map.get(aid)
-            days_left = None
-            exp_str = None
-            if exp:
-                if exp.tzinfo is None:
-                    exp = exp.replace(tzinfo=timezone.utc)
-                delta = exp - now
-                days_left = max(0, delta.days)
-                exp_str = exp.strftime("%b %d, %Y")
 
             # Find install record for this app
             rec = install_by_bundle.get(identifier)
             installed_str = None
             installed_device = None
+            days_left = None
+            exp_str = None
+
             if rec:
                 ts = rec.get("last_installed")
                 if ts:
                     installed_dt = datetime.fromtimestamp(ts, tz=timezone.utc)
                     installed_str = installed_dt.strftime("%b %d, %Y %H:%M")
+                    # Free accounts: profile expires 7 days after signing
+                    expiry_dt = installed_dt + timedelta(days=7)
+                    delta = expiry_dt - now
+                    days_left = max(0, delta.days)
+                    exp_str = expiry_dt.strftime("%b %d, %Y")
                 installed_device = rec.get("device_name", "")
 
             apps.append({

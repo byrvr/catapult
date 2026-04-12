@@ -389,10 +389,11 @@ async function loadAccountInfo() {
         if (data.apps.length) {
             appsHtml = data.apps.map((a) => {
                 let expiryClass = "";
-                let expiryText = "No profile";
+                let expiryText = "Not installed";
                 if (a.days_left !== null) {
                     expiryText = a.days_left <= 0 ? "Expired" : `${a.days_left}d left`;
-                    if (a.days_left <= 1) expiryClass = "expiry-critical";
+                    if (a.days_left <= 0) expiryClass = "expiry-critical";
+                    else if (a.days_left <= 1) expiryClass = "expiry-critical";
                     else if (a.days_left <= 3) expiryClass = "expiry-warning";
                 }
                 const installedLine = a.installed
