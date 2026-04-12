@@ -21,6 +21,11 @@ DEVICE_CLASS_MAP = {
     "AppleTV": "tvos",
     "iPhone": "ios",
     "iPad": "ipados",
+    "Mac": "macos",
+    "MacBook": "macos",
+    "iMac": "macos",
+    "AudioAccessory": "homepod",
+    "HomePod": "homepod",
 }
 
 # Only mobdev2 is directly installable. Remotepairing needs pair + tunnel first.
@@ -48,7 +53,22 @@ class _Listener(ServiceListener):
         # Friendly name is in the service name (e.g. "Living Room._companion-link...")
         friendly_name = name.split(f".{stype}")[0] if f".{stype}" in name else ""
         model = props.get("model", "") or props.get("rpMd", "")
-        device_name = friendly_name or props.get("deviceName", "") or model or name.split(".")[0]
+
+        # Filter out raw MAC/UUID/IPv6 names — they're not human-readable
+        def _is_good_name(n: str) -> bool:
+            if not n or len(n) > 50:
+                return False
+            if ":" in n or "@" in n:  # MAC or IPv6
+                return False
+            if len(n) > 20 and n.count("-") >= 3:  # UUID-like
+                return False
+            return True
+
+        candidates = [friendly_name, props.get("deviceName", ""), model]
+        device_name = next((n for n in candidates if _is_good_name(n)), "")
+        if not device_name:
+            # Last resort: use model family or generic label
+            device_name = model.split(",")[0] if model else "Apple Device"
         udid = (props.get("UniqueDeviceID") or props.get("rpMRtID")
                 or props.get("deviceid") or name)
         device_class = "unknown"

@@ -9,8 +9,10 @@ const $ = (sel) => document.querySelector(sel);
 const DEVICE_ICONS = {
     ios: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="2" width="14" height="20" rx="2"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>`,
     ipados: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="3" width="16" height="18" rx="2"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`,
-    tvos: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>`,
-    unknown: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>`,
+    tvos: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M9 20l3-3 3 3"/></svg>`,
+    macos: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M2 14h20"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>`,
+    homepod: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="18" rx="6" ry="3"/><path d="M6 18V8a6 6 0 0 1 12 0v10"/></svg>`,
+    unknown: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 8v4"/><circle cx="12" cy="16" r="0.5" fill="currentColor"/></svg>`,
 };
 
 // ── Device discovery ──
@@ -43,8 +45,7 @@ function renderDevices(devices) {
     const filtered = devices.filter((d) => {
         if (d.installable || d.needs_setup) return true;
         const cls = d.device_class || "unknown";
-        if (cls === "ios" || cls === "tvos" || cls === "ipados") return true;
-        return false;
+        return ["ios", "tvos", "ipados", "macos", "homepod"].includes(cls);
     });
 
     if (!filtered.length) {
