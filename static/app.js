@@ -383,8 +383,7 @@ async function loadAccountInfo() {
         const data = await resp.json();
 
         const teamLabel = data.team.is_free ? "Free" : data.team.type;
-        const totalUsed = data.app_count_total || data.app_count;
-        const slotColor = totalUsed >= data.app_limit ? "var(--error)" : "var(--text-dim)";
+        const slotColor = data.app_count >= data.app_limit ? "var(--error)" : "var(--text-dim)";
 
         let appsHtml = "";
         if (data.apps.length) {
@@ -397,18 +396,23 @@ async function loadAccountInfo() {
                     else if (a.days_left <= 1) expiryClass = "expiry-critical";
                     else if (a.days_left <= 3) expiryClass = "expiry-warning";
                 }
+                const sourceTag = a.is_catapult ? "" : '<span class="app-source">external</span>';
                 const installedLine = a.installed
                     ? `<span class="app-detail">Installed ${esc(a.installed)}${a.installed_device ? ` on ${esc(a.installed_device)}` : ""}</span>`
                     : "";
                 const expiryLine = a.expiry
                     ? `<span class="app-detail">Expires ${esc(a.expiry)}</span>`
                     : "";
-                return `<div class="app-row">
+                return `<div class="app-row" data-app-id-id="${esc(a.app_id_id)}">
                     <div class="app-info">
-                        <span class="app-name">${esc(a.name || a.identifier)}</span>
+                        <span class="app-name">${esc(a.name || a.identifier)}${sourceTag}</span>
                         ${installedLine}${expiryLine}
                     </div>
                     <span class="app-expiry ${expiryClass}">${expiryText}</span>
+                    <button class="btn-kebab" title="Options">\u22EE</button>
+                    <div class="kebab-menu" hidden>
+                        <button class="kebab-delete">Delete App ID</button>
+                    </div>
                 </div>`;
             }).join("");
         } else {
@@ -421,9 +425,53 @@ async function loadAccountInfo() {
                 <span class="account-type">${esc(teamLabel)}</span>
             </div>
             <div class="account-slots" style="color:${slotColor}">
-                App IDs: ${totalUsed} / ${data.app_limit} used${data.app_count < totalUsed ? ` (${data.app_count} by Catapult)` : ""}
+                App IDs: ${data.app_count} / ${data.app_limit}
             </div>
             <div class="account-apps">${appsHtml}</div>`;
+
+        // Bind kebab menus
+        dash.querySelectorAll(".app-row").forEach((row) => {
+            const kebabBtn = row.querySelector(".btn-kebab");
+            const menu = row.querySelector(".kebab-menu");
+            const deleteBtn = row.querySelector(".kebab-delete");
+
+            kebabBtn.addEventListener("click", (e) => {
+                e.stopPropagation();
+                // Close any other open menus
+                dash.querySelectorAll(".kebab-menu").forEach((m) => { if (m !== menu) m.hidden = true; });
+                menu.hidden = !menu.hidden;
+            });
+
+            deleteBtn.addEventListener("click", async (e) => {
+                e.stopPropagation();
+                menu.hidden = true;
+                const appIdId = row.dataset.appIdId;
+                const name = row.querySelector(".app-name")?.textContent || "";
+                if (!confirm(`Delete "${name}"? This frees an App ID slot.`)) return;
+                deleteBtn.textContent = "Deleting\u2026";
+                try {
+                    const resp = await fetch("/api/account/delete-app", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ app_id_id: appIdId }),
+                    });
+                    const data = await resp.json();
+                    if (data.status === "ok") {
+                        row.remove();
+                        loadAccountInfo(); // Refresh counts
+                    } else {
+                        alert(data.message || "Delete failed");
+                    }
+                } catch {
+                    alert("Delete failed");
+                }
+            });
+        });
+
+        // Close menus on outside click
+        document.addEventListener("click", () => {
+            dash.querySelectorAll(".kebab-menu").forEach((m) => m.hidden = true);
+        });
     } catch {
         dash.innerHTML = "";
     }
