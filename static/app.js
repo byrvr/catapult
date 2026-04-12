@@ -383,7 +383,8 @@ async function loadAccountInfo() {
         const data = await resp.json();
 
         const teamLabel = data.team.is_free ? "Free" : data.team.type;
-        const slotColor = data.app_count >= data.app_limit ? "var(--error)" : "var(--text-dim)";
+        const totalUsed = data.app_count_total || data.app_count;
+        const slotColor = totalUsed >= data.app_limit ? "var(--error)" : "var(--text-dim)";
 
         let appsHtml = "";
         if (data.apps.length) {
@@ -420,7 +421,7 @@ async function loadAccountInfo() {
                 <span class="account-type">${esc(teamLabel)}</span>
             </div>
             <div class="account-slots" style="color:${slotColor}">
-                App IDs: ${data.app_count} / ${data.app_limit}
+                App IDs: ${totalUsed} / ${data.app_limit} used${data.app_count < totalUsed ? ` (${data.app_count} by Catapult)` : ""}
             </div>
             <div class="account-apps">${appsHtml}</div>`;
     } catch {
