@@ -32,17 +32,34 @@ def _fetch_otp() -> dict:
         return omnisette
 
     raise AnisetteError(
-        "Could not obtain Anisette data. Options:\n"
-        "  1. Run omnisette-server: docker run -d -p 6969:80 ghcr.io/sidestore/omnisette-server:latest\n"
-        "  2. On macOS, ensure SIP allows access to private frameworks"
+        "Could not obtain Anisette data. "
+        "On macOS, ensure SIP allows loading private frameworks "
+        "(csrutil status should show 'enabled' — full SIP is fine, "
+        "only a custom policy blocking library validation causes issues)."
     )
 
 
 def _try_native_macos() -> dict | None:
     if platform.system() != "Darwin":
         return None
+
+    # Try pyobjc approach first
+    result = _try_native_pyobjc()
+    if result:
+        return result
+
+    # Fallback: ctypes-based approach (no pyobjc dependency)
+    result = _try_native_ctypes()
+    if result:
+        return result
+
+    return None
+
+
+def _try_native_pyobjc() -> dict | None:
+    """Get Anisette OTP via pyobjc bridge (AOSKit / AuthKit)."""
     try:
-        import objc
+        import objc  # noqa: F401
         from Foundation import NSClassFromString, NSBundle
 
         aoskit = NSBundle.bundleWithPath_("/System/Library/PrivateFrameworks/AOSKit.framework")
@@ -51,14 +68,13 @@ def _try_native_macos() -> dict | None:
             if AOSUtilities and AOSUtilities.respondsToSelector_("retrieveOTPHeadersForDSID:"):
                 raw = AOSUtilities.retrieveOTPHeadersForDSID_("-2")
                 if raw:
-                    # macOS returns X-Apple-MD / X-Apple-MD-M (no "I-" prefix)
                     h = {str(k): str(v) for k, v in raw.items()}
                     result = {
                         "X-Apple-I-MD": h.get("X-Apple-I-MD") or h.get("X-Apple-MD", ""),
                         "X-Apple-I-MD-M": h.get("X-Apple-I-MD-M") or h.get("X-Apple-MD-M", ""),
                     }
                     if result["X-Apple-I-MD"]:
-                        logger.info("Got Anisette from AOSKit (native)")
+                        logger.info("Got Anisette from AOSKit (pyobjc)")
                         return result
 
         authkit = NSBundle.bundleWithPath_("/System/Library/PrivateFrameworks/AuthKit.framework")
@@ -69,10 +85,101 @@ def _try_native_macos() -> dict | None:
                 if session and session.respondsToSelector_("appleIDHeadersForRequest:"):
                     headers = session.appleIDHeadersForRequest_(None)
                     if headers and "X-Apple-I-MD" in headers:
-                        logger.info("Got Anisette from AuthKit")
+                        logger.info("Got Anisette from AuthKit (pyobjc)")
                         return dict(headers)
     except Exception as e:
-        logger.debug("Native Anisette failed: %s", e)
+        logger.debug("pyobjc Anisette failed: %s", e)
+    return None
+
+
+def _try_native_ctypes() -> dict | None:
+    """Get Anisette OTP via ctypes — works without pyobjc installed."""
+    try:
+        import ctypes
+        import ctypes.util
+
+        # Load ObjC runtime
+        objc = ctypes.cdll.LoadLibrary(ctypes.util.find_library("objc"))
+        objc.objc_getClass.restype = ctypes.c_void_p
+        objc.objc_getClass.argtypes = [ctypes.c_char_p]
+        objc.sel_registerName.restype = ctypes.c_void_p
+        objc.sel_registerName.argtypes = [ctypes.c_char_p]
+        objc.objc_msgSend.restype = ctypes.c_void_p
+        objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+
+        cf = ctypes.cdll.LoadLibrary(ctypes.util.find_library("CoreFoundation"))
+        cf.CFStringGetCStringPtr.restype = ctypes.c_char_p
+        cf.CFStringGetCStringPtr.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        cf.CFDictionaryGetCount.restype = ctypes.c_long
+        cf.CFDictionaryGetCount.argtypes = [ctypes.c_void_p]
+        cf.CFDictionaryGetKeysAndValues.restype = None
+        cf.CFDictionaryGetKeysAndValues.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_void_p)
+        ]
+
+        def msg(obj, sel_name, *args):
+            sel = objc.sel_registerName(sel_name.encode())
+            return objc.objc_msgSend(obj, sel, *args)
+
+        def cfstr_to_py(cfstr) -> str:
+            s = cf.CFStringGetCStringPtr(cfstr, 0x08000100)  # kCFStringEncodingUTF8
+            if s:
+                return s.decode("utf-8")
+            # Fallback for non-ASCII
+            buf = ctypes.create_string_buffer(1024)
+            cf.CFStringGetCString(cfstr, buf, 1024, 0x08000100)
+            return buf.value.decode("utf-8")
+
+        def cfdict_to_py(cfdict) -> dict:
+            count = cf.CFDictionaryGetCount(cfdict)
+            if count <= 0:
+                return {}
+            keys = (ctypes.c_void_p * count)()
+            vals = (ctypes.c_void_p * count)()
+            cf.CFDictionaryGetKeysAndValues(cfdict, keys, vals)
+            return {cfstr_to_py(keys[i]): cfstr_to_py(vals[i]) for i in range(count)}
+
+        def cfstr(s: str):
+            return cf.CFStringCreateWithCString(None, s.encode(), 0x08000100)
+
+        cf.CFStringCreateWithCString.restype = ctypes.c_void_p
+        cf.CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
+        cf.CFStringGetCString.restype = ctypes.c_bool
+        cf.CFStringGetCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_long, ctypes.c_uint32]
+
+        # Load AOSKit
+        try:
+            ctypes.cdll.LoadLibrary(
+                "/System/Library/PrivateFrameworks/AOSKit.framework/AOSKit"
+            )
+        except OSError:
+            logger.debug("ctypes: Could not load AOSKit framework")
+            return None
+
+        AOSUtilities = objc.objc_getClass(b"AOSUtilities")
+        if not AOSUtilities:
+            logger.debug("ctypes: AOSUtilities class not found")
+            return None
+
+        dsid = cfstr("-2")
+        sel = objc.sel_registerName(b"retrieveOTPHeadersForDSID:")
+        objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+        raw = objc.objc_msgSend(AOSUtilities, sel, dsid)
+        if not raw:
+            logger.debug("ctypes: retrieveOTPHeadersForDSID returned nil")
+            return None
+
+        h = cfdict_to_py(raw)
+        result = {
+            "X-Apple-I-MD": h.get("X-Apple-I-MD") or h.get("X-Apple-MD", ""),
+            "X-Apple-I-MD-M": h.get("X-Apple-I-MD-M") or h.get("X-Apple-MD-M", ""),
+        }
+        if result["X-Apple-I-MD"]:
+            logger.info("Got Anisette from AOSKit (ctypes)")
+            return result
+
+    except Exception as e:
+        logger.debug("ctypes Anisette failed: %s", e)
     return None
 
 
