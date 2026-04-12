@@ -241,10 +241,13 @@ async def account_info():
             except Exception:
                 pass
 
-        # Format app IDs with computed expiry and install dates
+        # Only show Catapult-managed app IDs (com.catapult.TEAMID.xxx)
+        catapult_prefix = f"com.catapult.{team_id}."
         apps = []
         for a in app_ids:
             identifier = a.get("identifier", "")
+            if not identifier.startswith(catapult_prefix):
+                continue
             apple_name = a.get("name", "")
 
             # Use real app name from IPA if available, otherwise Apple's registered name
