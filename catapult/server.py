@@ -154,6 +154,19 @@ async def auth_status():
     return {"authenticated": False}
 
 
+@app.post("/api/auth/logout")
+async def logout():
+    """Clear session and remove Keychain tokens."""
+    if auth_client.session and auth_client.session.apple_id:
+        _refresh._keychain_delete(auth_client.session.apple_id)
+    auth_client.session = None
+    state = _refresh.load_state()
+    state["session"] = None
+    _refresh.save_state(state)
+    logger.info("Signed out")
+    return {"status": "ok"}
+
+
 @app.post("/api/auth/login")
 async def login(payload: dict):
     apple_id = payload.get("apple_id", "")
@@ -221,7 +234,23 @@ async def account_info():
                     except Exception:
                         pass
 
-        # Format app IDs with expiry
+        # Load install history for last-installed dates
+        install_state = _refresh.load_state()
+        install_records = install_state.get("installs", [])
+        # Map ipa_path -> install record
+        install_by_path = {r.get("ipa_path", ""): r for r in install_records}
+        # Also map by sideload bundle identifier (com.catapult.TEAM.bundle-id)
+        install_by_bundle = {}
+        for r in install_records:
+            path = r.get("ipa_path", "")
+            try:
+                info = await ipa_processor.inspect(path)
+                sideload_id = dev_services.sideload_bundle_id(team_id, info["bundle_id"])
+                install_by_bundle[sideload_id] = r
+            except Exception:
+                pass
+
+        # Format app IDs with expiry and install dates
         apps = []
         for a in app_ids:
             aid = a.get("appIdId", "")
@@ -236,11 +265,25 @@ async def account_info():
                 delta = exp - now
                 days_left = max(0, delta.days)
                 exp_str = exp.strftime("%b %d, %Y")
+
+            # Find install record for this app
+            rec = install_by_bundle.get(identifier)
+            installed_str = None
+            installed_device = None
+            if rec:
+                ts = rec.get("last_installed")
+                if ts:
+                    installed_dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+                    installed_str = installed_dt.strftime("%b %d, %Y %H:%M")
+                installed_device = rec.get("device_name", "")
+
             apps.append({
                 "name": name,
                 "identifier": identifier,
                 "expiry": exp_str,
                 "days_left": days_left,
+                "installed": installed_str,
+                "installed_device": installed_device,
             })
 
         team_type = team.get("type", "")

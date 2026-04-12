@@ -352,6 +352,12 @@ input::placeholder { color: var(--text-dim); }
 .auth-status.ok { color: var(--success); }
 .auth-status.err { color: var(--error); }
 
+.auth-header-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
 .auth-success {
     display: flex;
     align-items: center;
@@ -360,6 +366,20 @@ input::placeholder { color: var(--text-dim); }
     font-size: 13px;
     font-weight: 500;
 }
+
+.btn-signout {
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 11px;
+    color: var(--text-dim);
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.btn-signout:hover { color: var(--error); border-color: var(--error); }
+.btn-signout:disabled { opacity: 0.4; cursor: wait; }
 
 /* ── Account Dashboard ── */
 
@@ -409,18 +429,32 @@ input::placeholder { color: var(--text-dim); }
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 4px 8px;
+    padding: 6px 8px;
     border-radius: 5px;
     background: var(--bg);
     font-size: 11px;
+    gap: 8px;
+}
+
+.app-info {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+    flex: 1;
 }
 
 .app-name {
     color: var(--text);
+    font-weight: 500;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    margin-right: 8px;
+}
+
+.app-detail {
+    font-size: 10px;
+    color: var(--text-dim);
 }
 
 .app-expiry {
