@@ -148,6 +148,14 @@ class DeviceManager:
                 d["name"] = best_names[host]
             if host in best_models and not d.get("model"):
                 d["model"] = best_models[host]
+            # Recompute device_class against the merged name+model — the
+            # per-service entry that won deduplication (often _remotepairing)
+            # may have arrived with neither, leaving class as "unknown".
+            check_str = f"{d['name']} {d.get('model', '')}".lower()
+            for prefix, cls in DEVICE_CLASS_MAP.items():
+                if prefix.lower() in check_str:
+                    d["device_class"] = cls
+                    break
 
         devices = list(by_host.values())
 
@@ -227,14 +235,38 @@ class DeviceManager:
 
         # Run in a thread — the pairing calls input() which blocks, and we need
         # the main event loop free to handle the PIN submission HTTP request
-        result = await asyncio.to_thread(self._pair_in_thread, identifier, ip, port)
-        return result
+        try:
+            result = await asyncio.to_thread(self._pair_in_thread, identifier, ip, port)
+            return result
+        except Exception as e:
+            # If _pair_in_thread itself raises (e.g., import failure in the bundled
+            # .app), state would otherwise be stranded at "pairing".
+            self._pairing_state = "error"
+            logger.exception("Pairing thread raised")
+            return {"status": "error", "message": f"Pairing failed: {type(e).__name__}: {e}"}
 
     def _pair_in_thread(self, identifier: str, ip: str, port: int) -> dict:
         """Run the actual pairing in a separate thread with its own event loop."""
         import builtins
-        from pymobiledevice3.cli.remote import RemotePairingManualPairingService
+        # Import directly from tunnel_service — going through pymobiledevice3.cli
+        # pulls in inquirer3 → readchar, whose __init__ calls importlib.metadata.version()
+        # at import time. PyInstaller doesn't bundle that metadata, so the CLI path
+        # crashes the pair thread with PackageNotFoundError in the .app build.
+        from pymobiledevice3.remote.tunnel_service import RemotePairingManualPairingService
         from pymobiledevice3.exceptions import RemotePairingCompletedError
+
+        class _PinPairingService(RemotePairingManualPairingService):
+            # Upstream only prompts for the on-screen PIN when the literal string
+            # "AppleTV" appears in the handshake model; some tvOS builds report a
+            # model that misses that check, so the library silently falls back to
+            # the "000000" placeholder, the TV rejects the SRP proof, and pairing
+            # blows up with `KeyError: PROOF` deep in _verify_proof. Always prompt
+            # (via our monkeypatched web input) when the consent step left it unset.
+            async def _request_pair_consent(self):
+                consent = await super()._request_pair_consent()
+                if not consent.pin:
+                    consent = consent._replace(pin=input("Enter PIN: "))
+                return consent
 
         if not self._pairing_lock.acquire(blocking=False):
             return {"status": "error", "message": "Another pairing is already in progress"}
@@ -254,7 +286,7 @@ class DeviceManager:
         builtins.input = _web_input
         try:
             async def _do_pair():
-                async with RemotePairingManualPairingService(identifier, ip, port) as service:
+                async with _PinPairingService(identifier, ip, port) as service:
                     await service.connect(autopair=True)
 
             loop.run_until_complete(_do_pair())
@@ -265,6 +297,20 @@ class DeviceManager:
             self._pairing_state = "done"
             logger.info("Pairing completed successfully (connection closed by device)")
             return {"status": "ok", "message": "Paired successfully"}
+        except (KeyError, AssertionError):
+            # The SRP proof step (pymobiledevice3 _verify_proof) raises a bare
+            # KeyError(PROOF) / AssertionError when the TV rejects the code —
+            # wrong PIN, or the trust relationship expired (Apple drops it after
+            # ~7 days). Translate it into something the user can act on.
+            self._pairing_state = "error"
+            logger.exception("Apple TV rejected pairing (wrong/expired PIN)")
+            return {"status": "error", "message": (
+                "Apple TV rejected the pairing code — it was wrong, or the previous "
+                "pairing expired (Apple drops trust after ~7 days).\n\n"
+                "On the Apple TV: Settings → Remotes and Devices → Remote App and "
+                "Devices. Leave that screen open, then click Setup again and type the "
+                "fresh 4-digit code it shows."
+            )}
         except Exception as e:
             self._pairing_state = "error"
             logger.exception("Pairing failed")
@@ -276,23 +322,35 @@ class DeviceManager:
 
     def submit_pin(self, pin: str):
         """Called from the web UI to provide the PIN shown on the device."""
-        self._pin_value = pin
+        self._pin_value = (pin or "").strip()
         self._pin_event.set()
         self._pairing_state = "pairing"
 
     _tunnel_address: str | None = None
     _tunnel_port: int | None = None
     _tunnel_udid: str | None = None  # Real device UDID from tunneld
+    _tunneld_owned: bool = False  # True once WE started tunneld this process
     TUNNELD_URL = "http://127.0.0.1:49151"
 
     async def _ensure_tunneld(self) -> bool:
-        """Check if tunneld is running, start it if not."""
+        """Return True only if a tunneld WE started this session is responding.
+
+        A foreign/stale tunneld — e.g. a root-owned zombie left over from a
+        previous app run — happily answers the HTTP API with 200 but its
+        tunnel-building machinery is dead, so it returns an empty tunnel list
+        forever ("Tunnel not established"). Trusting it (status==200) meant we
+        skipped _start_tunneld() and never cleared it. So unless we started
+        this tunneld ourselves, report it as not-ready to force a clean restart.
+        """
         import httpx
+        if not self._tunneld_owned:
+            return False
         try:
             async with httpx.AsyncClient() as client:
                 resp = await client.get(self.TUNNELD_URL, timeout=2)
                 return resp.status_code == 200
         except Exception:
+            self._tunneld_owned = False
             return False
 
     async def _start_tunneld(self) -> dict:
@@ -300,10 +358,31 @@ class DeviceManager:
         import os, tempfile, stat
 
         home = Path.home()
+        # In the PyInstaller .app bundle, sys.executable is the Catapult bootloader,
+        # not a Python interpreter — `-m pymobiledevice3` won't work. The bundle
+        # accepts --tunneld to run pymobiledevice3.tunneld.TunneldRunner in-process.
+        # In dev (running from source), sys.executable is the venv python; we use
+        # `-m pymobiledevice3 …` so behavior matches the historical command.
+        if getattr(sys, "frozen", False):
+            tunneld_invocation = f"'{sys.executable}' --tunneld"
+        else:
+            tunneld_invocation = (
+                f"'{sys.executable}' -m pymobiledevice3 remote tunneld "
+                f"--no-usb --no-usbmux --no-mobdev2"
+            )
         command = (
-            f"pkill -f 'pymobiledevice3 remote tunneld' 2>/dev/null; sleep 1; "
+            # Clear any prior tunneld before starting a new one. The previous
+            # single pkill used a regex alternation ('A|B') that macOS pkill does
+            # NOT treat as alternation, so a stale (even root-owned) tunneld
+            # survived and kept port 49151 bound — the new tunneld then died with
+            # [Errno 48] address already in use. Kill by name (separate calls)
+            # AND by whoever holds the port, then wait for the socket to release.
+            f"pkill -9 -f 'Catapult --tunneld' 2>/dev/null; "
+            f"pkill -9 -f 'pymobiledevice3 remote tunneld' 2>/dev/null; "
+            f"PIDS=$(lsof -ti tcp:49151 2>/dev/null); [ -n \"$PIDS\" ] && kill -9 $PIDS 2>/dev/null; "
+            f"for i in 1 2 3 4 5; do lsof -ti tcp:49151 >/dev/null 2>&1 || break; sleep 1; done; "
             f"HOME={home} PYTHONUNBUFFERED=1 "
-            f"{sys.executable} -m pymobiledevice3 remote tunneld --no-usb --no-usbmux --no-mobdev2 "
+            f"{tunneld_invocation} "
             f"> /tmp/catapult_tunneld.log 2>&1 & "
             f"TPID=$!; sleep 3; "
             f"if kill -0 $TPID 2>/dev/null; then echo $TPID; else cat /tmp/catapult_tunneld.log; exit 1; fi"
@@ -329,6 +408,7 @@ class DeviceManager:
 
             if proc.returncode != 0:
                 return {"status": "error", "message": f"tunneld failed: {(output or err)[:200]}"}
+            self._tunneld_owned = True
             return {"status": "ok", "message": f"tunneld started (PID {output})"}
         finally:
             os.unlink(script.name)
@@ -413,6 +493,19 @@ class DeviceManager:
         service = device.get("service", "")
         installable = device.get("installable", False)
 
+        # tvOS / remotepairing devices install through the tunnel. The cached
+        # `installable` flag comes from the last scan and lags the tunnel coming
+        # up (~20-30s), so an install fired right after Setup can race ahead of
+        # the tunnel and fail spuriously with "not ready". Ensure (and wait for)
+        # the tunnel here instead of trusting the stale flag — start_tunnel() is
+        # idempotent and returns immediately if the tunnel is already active, and
+        # won't re-prompt for admin when tunneld is already running.
+        if "remotepairing" in service and not installable:
+            logger.info("Tunnel not marked ready for %s — ensuring before install...", device["name"])
+            tunnel = await self.start_tunnel()
+            if tunnel.get("status") == "ok":
+                installable = True
+
         if not installable:
             raise RuntimeError(
                 f"Device '{device['name']}' is not ready for installation. "
@@ -421,37 +514,51 @@ class DeviceManager:
 
         logger.info("Installing to %s (%s:%s via %s)", device["name"], host, port, service)
 
-        if "remotepairing" in service or self._tunnel_address:
-            # Use tunnel RSD address instead of direct device IP
-            if not self._tunnel_address:
-                raise RuntimeError("No active tunnel. Use Setup to pair and create a tunnel first.")
-            logger.info("Using tunnel at %s:%d", self._tunnel_address, self._tunnel_port)
-            await self._install_via_rsd(self._tunnel_address, self._tunnel_port, ipa_path)
-        elif "mobdev2" in service:
-            await self._install_via_lockdown(host, port, ipa_path)
+        # Prefer a live RSD tunnel matching this UDID (required for tvOS;
+        # also survives LaunchAgent restarts since tunneld runs separately).
+        # mobdev2 mDNS records don't carry the real UDID, so exact match often
+        # fails — when that happens but exactly one tunnel exists, use it.
+        from pymobiledevice3.tunneld.api import get_tunneld_devices
+        try:
+            rsds = await get_tunneld_devices()
+        except Exception as e:
+            logger.debug("tunneld query failed: %s", e)
+            rsds = []
+
+        logger.info("tunneld RSDs: %s (target udid=%s)",
+                    [getattr(r, "udid", "?") for r in rsds], udid)
+        matching = next((r for r in rsds if getattr(r, "udid", None) == udid), None)
+        if matching is None and len(rsds) == 1:
+            matching = rsds[0]
+            logger.info("Using sole tunneled RSD (udid=%s) for target (udid=%s)",
+                        matching.udid, udid)
+        if matching is not None:
+            try:
+                await self._install_via_rsd_client(matching, ipa_path)
+            finally:
+                for r in rsds:
+                    await r.close()
         else:
-            raise RuntimeError(f"No supported installation method for service {service}")
+            for r in rsds:
+                await r.close()
+            if "remotepairing" in service:
+                raise RuntimeError("No active tunnel. Use Setup to pair and create a tunnel first.")
+            elif "mobdev2" in service:
+                await self._install_via_lockdown(host, port, udid, ipa_path)
+            else:
+                raise RuntimeError(f"No supported installation method for service {service}")
 
         logger.info("Installation complete")
 
-    async def _install_via_rsd(self, host: str, port: int, ipa_path: Path):
-        from pymobiledevice3.tunneld.api import get_tunneld_devices
+    async def _install_via_rsd_client(self, rsd, ipa_path: Path):
         from pymobiledevice3.services.installation_proxy import InstallationProxyService
+        installer = InstallationProxyService(lockdown=rsd)
+        await installer.install_from_local(str(ipa_path))
 
-        rsds = await get_tunneld_devices()
-        if not rsds:
-            raise RuntimeError("No tunneled devices found. Try Setup again.")
-        rsd = rsds[0]
-        try:
-            installer = InstallationProxyService(lockdown=rsd)
-            await installer.install_from_local(str(ipa_path))
-        finally:
-            await rsd.close()
-
-    async def _install_via_lockdown(self, host: str, port: int, ipa_path: Path):
+    async def _install_via_lockdown(self, host: str, port: int, udid: str, ipa_path: Path):
         from pymobiledevice3.lockdown import create_using_tcp
         from pymobiledevice3.services.installation_proxy import InstallationProxyService
 
-        lockdown = create_using_tcp(host, port)
+        lockdown = await create_using_tcp(host, identifier=udid, port=port)
         installer = InstallationProxyService(lockdown=lockdown)
         await installer.install_from_local(str(ipa_path))
