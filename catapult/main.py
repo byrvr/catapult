@@ -5,6 +5,8 @@ import logging
 import sys
 import threading
 import webbrowser
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 import uvicorn
 
@@ -14,10 +16,20 @@ DEFAULT_PORT = 9450
 
 
 def _configure_logging(verbose: bool = False):
+    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
+    # The native pywebview window discards stderr, so in the production .app
+    # nothing was ever written anywhere — pairing/install failures vanished
+    # silently. Always tee to ~/.catapult/app.log so the app is debuggable.
+    try:
+        log_path = Path.home() / ".catapult" / "app.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        handlers.append(RotatingFileHandler(log_path, maxBytes=1_000_000, backupCount=2))
+    except Exception:
+        pass
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO,
         format=LOG_FORMAT,
-        stream=sys.stderr,
+        handlers=handlers,
     )
     for lib in ("httpx", "httpcore", "zeroconf", "hpack", "h2", "python_multipart"):
         logging.getLogger(lib).setLevel(logging.WARNING)
@@ -25,6 +37,24 @@ def _configure_logging(verbose: bool = False):
 
 def _run_server(host: str, port: int):
     uvicorn.run("catapult.server:app", host=host, port=port, log_level="warning")
+
+
+def _run_tunneld():
+    """In-process tunneld. In the PyInstaller .app bundle, `python -m pymobiledevice3`
+    isn't reachable (sys.executable is the Catapult bootloader), so _start_tunneld
+    re-invokes the bundle with --tunneld and lands here. Requires admin (utun)."""
+    from pymobiledevice3.tunneld.api import TUNNELD_DEFAULT_ADDRESS
+    from pymobiledevice3.tunneld.server import TunneldRunner
+    from pymobiledevice3.remote.tunnel_service import TunnelProtocol
+    TunneldRunner.create(
+        TUNNELD_DEFAULT_ADDRESS[0],
+        TUNNELD_DEFAULT_ADDRESS[1],
+        protocol=TunnelProtocol.DEFAULT,
+        usb_monitor=False,
+        wifi_monitor=True,
+        usbmux_monitor=False,
+        mobdev2_monitor=False,
+    )
 
 
 def _open_in_browser(host: str, port: int):
@@ -110,11 +140,16 @@ def main():
     parser.add_argument("--browser", action="store_true", help="Open in browser instead of native window")
     parser.add_argument("--serve", action="store_true", help="Run as headless background server (no window)")
     parser.add_argument("--install-agent", action="store_true", help="Install macOS LaunchAgent for auto-start at login")
+    parser.add_argument("--tunneld", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--verbose", "-v", action="store_true", help="Debug logging")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Server port (default: 9450)")
     args = parser.parse_args()
 
     _configure_logging(args.verbose)
+
+    if args.tunneld:
+        _run_tunneld()
+        return
 
     if args.install_agent:
         _install_launch_agent(args.port)

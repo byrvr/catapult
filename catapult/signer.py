@@ -99,14 +99,19 @@ class Signer:
         logger.info("Extracted entitlements: %s", list(entitlements.keys()))
 
     async def _create_p12(self, cert_path: Path, key_path: Path, p12_path: Path):
-        await self._run(
-            "openssl", "pkcs12", "-export", "-legacy",
+        # -legacy is required on OpenSSL 3.x (RC2 moved to legacy provider)
+        # but unknown to LibreSSL, which is what ships at /usr/bin/openssl on macOS.
+        version = await self._run("openssl", "version", label="openssl-version")
+        args = ["openssl", "pkcs12", "-export"]
+        if version.startswith("OpenSSL 3"):
+            args.append("-legacy")
+        args += [
             "-out", str(p12_path),
             "-inkey", str(key_path),
             "-in", str(cert_path),
             "-passout", "pass:catapult",
-            label="create-p12",
-        )
+        ]
+        await self._run(*args, label="create-p12")
 
     async def _setup_keychain(self, work_dir: Path, p12_path: Path) -> str:
         keychain = str(work_dir / "catapult.keychain-db")
