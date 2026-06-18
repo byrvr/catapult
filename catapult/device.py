@@ -1,7 +1,9 @@
 """Network device discovery, pairing, tunnel, and app installation."""
 
 import asyncio
+import json
 import logging
+import os
 import sys
 import threading
 from pathlib import Path
@@ -31,6 +33,24 @@ DEVICE_CLASS_MAP = {
 # Only mobdev2 is directly installable. Remotepairing needs pair + tunnel first.
 INSTALLABLE_SERVICES = {"_apple-mobdev2._tcp.local."}
 NEEDS_SETUP_SERVICES = {"_remotepairing._tcp.local."}
+STATE_DIR = Path.home() / ".catapult"
+PAIRED_DEVICES_PATH = STATE_DIR / "paired_devices.json"
+TUNNELD_DAEMON_LABEL = "com.catapult.tunneld"
+TUNNELD_DAEMON_PLIST = Path("/Library/LaunchDaemons") / f"{TUNNELD_DAEMON_LABEL}.plist"
+TUNNELD_LOG_PATH = "/tmp/catapult_tunneld.log"
+
+
+def scan_network(timeout: float = 6.0) -> list[dict]:
+    zc = Zeroconf()
+    listener = _Listener()
+    try:
+        for svc in MDNS_SERVICES:
+            ServiceBrowser(zc, svc, listener)
+        import time
+        time.sleep(timeout)
+        return list(listener.found.values())
+    finally:
+        zc.close()
 
 
 class _Listener(ServiceListener):
@@ -91,6 +111,9 @@ class _Listener(ServiceListener):
             "connection": "network",
             "installable": stype in INSTALLABLE_SERVICES,
             "needs_setup": stype in NEEDS_SETUP_SERVICES,
+            "paired": False,
+            "requires_tunnel": stype in NEEDS_SETUP_SERVICES,
+            "tunnel_active": False,
             "properties": props,
         }
 
@@ -106,23 +129,26 @@ class DeviceManager:
         self._cache: dict[str, dict] = {}
         self._tunnel_proc: asyncio.subprocess.Process | None = None
         self._tunneled_hosts: set[str] = set()  # hosts with active tunnels
+        self._paired_devices = self._load_paired_devices()
         self._pairing_lock = threading.Lock()
         self._tunnel_lock: asyncio.Lock | None = None  # created lazily in async context
+        self._scan_lock: asyncio.Lock | None = None
 
     async def discover(self, timeout: float = 6.0) -> list[dict]:
-        def _scan():
-            zc = Zeroconf()
-            listener = _Listener()
-            for svc in MDNS_SERVICES:
-                ServiceBrowser(zc, svc, listener)
-            import time
-            time.sleep(timeout)
-            results = list(listener.found.values())
-            zc.close()
-            return results
-
         logger.info("Scanning network for devices (%ss timeout)...", timeout)
-        raw = await asyncio.to_thread(_scan)
+        try:
+            if self._scan_lock is None:
+                self._scan_lock = asyncio.Lock()
+            async with self._scan_lock:
+                raw = await self._scan_in_subprocess(timeout)
+        except asyncio.TimeoutError:
+            logger.error("mDNS scan exceeded timeout")
+            raise RuntimeError("Local network scan timed out")
+        except Exception:
+            logger.exception("mDNS scan failed")
+            raw = []
+
+        raw.extend(await self._scan_usb_devices())
 
         # Deduplicate by host — prefer installable, merge best name/model
         by_host: dict[str, dict] = {}
@@ -169,15 +195,118 @@ class DeviceManager:
                     suffix = d["host"].rsplit(".", 1)[-1] if "." in d["host"] else d["host"][-4:]
                     d["name"] = f"{name} ({suffix})"
 
+        remote_pair_ids = self._remote_paired_identifiers()
         for d in devices:
+            if self._is_known_paired(d, remote_pair_ids):
+                d["paired"] = True
+                d["needs_setup"] = False
+                d["requires_tunnel"] = "remotepairing" in d.get("service", "")
             # Preserve tunnel state across rescans
             if d["host"] in self._tunneled_hosts:
                 d["installable"] = True
                 d["needs_setup"] = False
+                d["paired"] = True
+                d["requires_tunnel"] = "remotepairing" in d.get("service", "")
+                d["tunnel_active"] = True
             self._cache[d["udid"]] = d
 
         logger.info("Found %d device(s)", len(devices))
         return devices
+
+    async def _scan_usb_devices(self) -> list[dict]:
+        """Discover trusted iPhone/iPad devices connected through usbmuxd."""
+        try:
+            from pymobiledevice3.lockdown import create_using_usbmux
+            from pymobiledevice3.usbmux import list_devices
+        except Exception as e:
+            logger.debug("USB discovery unavailable: %s", e)
+            return []
+
+        try:
+            mux_devices = await list_devices()
+        except Exception as e:
+            logger.info("USB discovery failed: %s", e)
+            return []
+
+        devices: list[dict] = []
+        for mux_device in mux_devices:
+            udid = getattr(mux_device, "serial", "") or ""
+            if not udid:
+                continue
+
+            connection_type = str(getattr(mux_device, "connection_type", "") or "USB")
+            info = {
+                "DeviceName": "iPhone" if connection_type.upper() == "USB" else "Apple Device",
+                "ProductType": "",
+                "ProductVersion": "",
+                "DeviceClass": "iPhone",
+                "UniqueDeviceID": udid,
+            }
+            trusted = False
+            try:
+                lockdown = await create_using_usbmux(serial=udid, pair_timeout=3)
+                for key in list(info):
+                    try:
+                        value = await lockdown.get_value(key=key)
+                    except Exception:
+                        value = None
+                    if value:
+                        info[key] = str(value)
+                trusted = True
+            except Exception as e:
+                logger.info("USB device %s is visible but not ready: %s", udid, e)
+
+            device_class = "ios"
+            if str(info.get("DeviceClass", "")).lower() == "ipad" or str(info.get("ProductType", "")).startswith("iPad"):
+                device_class = "ipados"
+
+            devices.append({
+                "name": info.get("DeviceName") or ("iPad" if device_class == "ipados" else "iPhone"),
+                "model": info.get("ProductType", ""),
+                "udid": udid,
+                "host": f"usb:{udid}",
+                "port": 62078,
+                "service": "usbmux",
+                "device_class": device_class,
+                "connection": connection_type.lower(),
+                "installable": trusted,
+                "needs_setup": not trusted,
+                "paired": trusted,
+                "requires_tunnel": False,
+                "tunnel_active": False,
+                "properties": {
+                    "ProductVersion": info.get("ProductVersion", ""),
+                    "UniqueDeviceID": info.get("UniqueDeviceID", udid),
+                    "ConnectionType": connection_type,
+                    "trusted": trusted,
+                },
+            })
+        return devices
+
+    async def _scan_in_subprocess(self, timeout: float) -> list[dict]:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "catapult.discovery_worker",
+            str(timeout),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout + 5)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.communicate()
+            raise
+
+        if proc.returncode != 0:
+            message = stderr.decode(errors="replace").strip()
+            raise RuntimeError(message or f"Device scan failed with exit code {proc.returncode}")
+
+        try:
+            return json.loads(stdout.decode() or "[]")
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"Device scan returned invalid data: {e}") from e
 
     async def get_device_info(self, udid: str) -> dict:
         if udid in self._cache:
@@ -186,7 +315,142 @@ class DeviceManager:
         for d in devices:
             if d["udid"] == udid:
                 return d
+        remembered = self._remembered_device_info(udid)
+        if remembered:
+            self._cache[udid] = remembered
+            return remembered
         raise RuntimeError(f"Device {udid} not found on the network")
+
+    def _remembered_device_info(self, udid: str) -> dict | None:
+        normalized_udid = str(udid).split("._", 1)[0]
+        for device in self._paired_devices.get("devices", []):
+            identifiers = {str(i).split("._", 1)[0] for i in device.get("identifiers", [])}
+            if normalized_udid not in identifiers:
+                continue
+            model = device.get("model", "")
+            return {
+                "name": device.get("name") or "Apple TV",
+                "model": model,
+                "udid": udid,
+                "host": device.get("host", ""),
+                "port": 49152,
+                "service": "_remotepairing._tcp.local.",
+                "device_class": "tvos" if "AppleTV" in model else "unknown",
+                "connection": "network",
+                "installable": False,
+                "needs_setup": False,
+                "paired": True,
+                "requires_tunnel": True,
+                "tunnel_active": bool(self._tunnel_address and self._tunnel_port),
+                "properties": {},
+            }
+        return None
+
+    def _load_paired_devices(self) -> dict:
+        try:
+            with PAIRED_DEVICES_PATH.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return {
+                    "hosts": list({str(h) for h in data.get("hosts", []) if h}),
+                    "identifiers": list({str(i) for i in data.get("identifiers", []) if i}),
+                    "devices": data.get("devices", []),
+                }
+        except FileNotFoundError:
+            pass
+        except Exception:
+            logger.exception("Failed to load paired device state")
+        return {"hosts": [], "identifiers": [], "devices": []}
+
+    def _save_paired_devices(self):
+        try:
+            STATE_DIR.mkdir(exist_ok=True)
+            with PAIRED_DEVICES_PATH.open("w", encoding="utf-8") as f:
+                json.dump(self._paired_devices, f, indent=2, sort_keys=True)
+        except Exception:
+            logger.exception("Failed to save paired device state")
+
+    def _remote_paired_identifiers(self) -> set[str]:
+        try:
+            from pymobiledevice3.remote.tunnel_service import iter_remote_paired_identifiers
+            return {str(identifier) for identifier in iter_remote_paired_identifiers()}
+        except Exception:
+            logger.debug("Could not read pymobiledevice3 remote pairing records", exc_info=True)
+            return set()
+
+    def _device_identifiers(self, device: dict) -> set[str]:
+        props = device.get("properties", {}) or {}
+        values = {
+            device.get("udid", ""),
+            props.get("identifier", ""),
+            props.get("UniqueDeviceID", ""),
+            props.get("rpMRtID", ""),
+            props.get("deviceid", ""),
+        }
+        identifiers: set[str] = set()
+        for value in values:
+            if not value:
+                continue
+            text = str(value)
+            identifiers.add(text)
+            if "._" in text:
+                identifiers.add(text.split("._", 1)[0])
+        return {identifier for identifier in identifiers if identifier}
+
+    def _is_known_paired(self, device: dict, remote_pair_ids: set[str] | None = None) -> bool:
+        service = device.get("service", "")
+        host = device.get("host", "")
+        paired_hosts = set(self._paired_devices.get("hosts", []))
+        paired_ids = set(self._paired_devices.get("identifiers", []))
+        if remote_pair_ids is None:
+            remote_pair_ids = self._remote_paired_identifiers()
+
+        if host and host in paired_hosts:
+            return True
+
+        identifiers = self._device_identifiers(device)
+        if identifiers & (paired_ids | remote_pair_ids):
+            return True
+
+        # `_remotepairing._tcp` identifiers can rotate and do not always match
+        # the persisted pairing-record filename. If this Mac has any tvOS remote
+        # pairing record and only sees an Apple TV over remotepairing, treat it as
+        # paired and let the Connect action prove the tunnel can be opened.
+        is_tvos = device.get("device_class") == "tvos" or "AppleTV" in str(device.get("model", ""))
+        return bool(remote_pair_ids) and is_tvos and "remotepairing" in service
+
+    def _remember_paired_device(
+        self,
+        *,
+        name: str | None = None,
+        host: str | None = None,
+        identifiers: list[str | None] | None = None,
+        model: str | None = None,
+    ):
+        hosts = set(self._paired_devices.get("hosts", []))
+        ids = set(self._paired_devices.get("identifiers", []))
+        if host:
+            hosts.add(host)
+        for identifier in identifiers or []:
+            if identifier:
+                ids.add(str(identifier).split("._", 1)[0])
+
+        self._paired_devices["hosts"] = sorted(hosts)
+        self._paired_devices["identifiers"] = sorted(ids)
+
+        if host or ids:
+            devices = [
+                d for d in self._paired_devices.get("devices", [])
+                if not host or d.get("host") != host
+            ]
+            devices.append({
+                "name": name or "Apple TV",
+                "host": host or "",
+                "model": model or "",
+                "identifiers": sorted(ids),
+            })
+            self._paired_devices["devices"] = devices[-20:]
+        self._save_paired_devices()
 
     # ── Pairing + Tunnel ──
 
@@ -194,40 +458,74 @@ class DeviceManager:
     _pin_event: threading.Event = threading.Event()
     _pin_value: str = ""
 
-    async def pair_device(self, device_name: str | None = None) -> dict:
+    async def pair_device(
+        self,
+        device_name: str | None = None,
+        device_udid: str | None = None,
+        device_host: str | None = None,
+    ) -> dict:
         """Pair with a device. Runs in a background thread so input() doesn't block."""
         try:
             from pymobiledevice3.bonjour import browse_remotepairing_manual_pairing
         except ImportError as e:
             return {"status": "error", "message": f"pymobiledevice3 remote pairing not available: {e}"}
 
-        logger.info("Browsing for devices to pair with (name=%s)...", device_name)
+        selected = self._selected_device(device_udid=device_udid, device_host=device_host)
+        if selected:
+            device_name = device_name or selected.get("name")
+            device_host = device_host or selected.get("host")
+
+        logger.info(
+            "Browsing for devices to pair with (name=%s, udid=%s, host=%s)...",
+            device_name,
+            device_udid,
+            device_host,
+        )
         self._pairing_state = "browsing"
         try:
-            answers = await browse_remotepairing_manual_pairing()
+            answers = await browse_remotepairing_manual_pairing(timeout=10.0)
         except Exception as e:
             self._pairing_state = "error"
             return {"status": "error", "message": f"Device browse failed: {e}"}
 
-        target = None
         for answer in answers:
-            name = answer.properties.get("name", "")
-            if device_name and name != device_name:
-                continue
-            for addr in answer.addresses:
-                if not addr.full_ip.startswith("fe80"):
-                    target = (addr.full_ip, answer.port, answer.properties.get("identifier", ""))
-                    break
-            if target:
-                break
-            if answer.addresses:
-                addr = answer.addresses[0]
-                target = (addr.full_ip, answer.port, answer.properties.get("identifier", ""))
-                break
+            logger.info(
+                "Pairable answer: instance=%s host=%s port=%s addrs=%s props=%s",
+                answer.instance,
+                answer.host,
+                answer.port,
+                [a.full_ip for a in answer.addresses],
+                answer.properties,
+            )
+
+        target = self._choose_pairing_target(
+            answers,
+            selected=selected,
+            device_name=device_name,
+            device_udid=device_udid,
+            device_host=device_host,
+        )
 
         if not target:
             self._pairing_state = "error"
-            return {"status": "error", "message": "No pairable device found. Enable Developer Mode on Apple TV."}
+            if selected or device_host:
+                return {
+                    "status": "error",
+                    "message": (
+                        f"Catapult can see the Apple TV{f' at {device_host}' if device_host else ''}, "
+                        "but it is not advertising manual pairing right now.\n\n"
+                        "Keep Apple TV on Settings → Remotes and Devices → Remote App and Devices, "
+                        "wait a few seconds, then click Setup again. If it still fails, toggle "
+                        "Developer Mode or restart the Apple TV."
+                    ),
+                }
+            return {
+                "status": "error",
+                "message": (
+                    "No pairable Apple TV was found. Open Settings → Remotes and Devices → "
+                    "Remote App and Devices on the Apple TV, then click Setup again."
+                ),
+            }
 
         ip, port, identifier = target
         logger.info("Pairing with %s at %s:%d", device_name or "device", ip, port)
@@ -237,6 +535,14 @@ class DeviceManager:
         # the main event loop free to handle the PIN submission HTTP request
         try:
             result = await asyncio.to_thread(self._pair_in_thread, identifier, ip, port)
+            if result.get("status") == "ok":
+                selected_ids = list(self._device_identifiers(selected or {}))
+                self._remember_paired_device(
+                    name=device_name,
+                    host=device_host or ip,
+                    identifiers=[identifier, device_udid, *selected_ids],
+                    model=(selected or {}).get("model"),
+                )
             return result
         except Exception as e:
             # If _pair_in_thread itself raises (e.g., import failure in the bundled
@@ -244,6 +550,114 @@ class DeviceManager:
             self._pairing_state = "error"
             logger.exception("Pairing thread raised")
             return {"status": "error", "message": f"Pairing failed: {type(e).__name__}: {e}"}
+
+    def _selected_device(self, device_udid: str | None = None, device_host: str | None = None) -> dict | None:
+        if device_udid and device_udid in self._cache:
+            return self._cache[device_udid]
+        if device_host:
+            for device in self._cache.values():
+                if device.get("host") == device_host:
+                    return device
+        return None
+
+    def _choose_pairing_target(
+        self,
+        answers,
+        *,
+        selected: dict | None,
+        device_name: str | None,
+        device_udid: str | None,
+        device_host: str | None,
+    ) -> tuple[str, int, str] | None:
+        """Choose the manual-pairing Bonjour answer that best matches the selected device.
+
+        The visible device row comes from `_remotepairing._tcp`, but pairing uses
+        `_remotepairing-manual-pairing._tcp`. Their TXT names often differ, so
+        exact friendly-name matching makes setup fail even while the TV is on the
+        right screen. Prefer host/identifier matches, then use a single answer.
+        """
+        if not answers:
+            return None
+
+        if len(answers) == 1:
+            return self._answer_to_target(answers[0])
+
+        selected_host = device_host or (selected or {}).get("host", "")
+        selected_identifiers = {
+            v for v in [
+                device_udid,
+                (selected or {}).get("udid"),
+                (selected or {}).get("properties", {}).get("identifier"),
+                (selected or {}).get("properties", {}).get("rpMRtID"),
+                (selected or {}).get("properties", {}).get("deviceid"),
+                (selected or {}).get("properties", {}).get("UniqueDeviceID"),
+            ] if v
+        }
+        selected_names = {
+            self._clean_pair_name(v) for v in [
+                device_name,
+                (selected or {}).get("name"),
+                (selected or {}).get("properties", {}).get("name"),
+                (selected or {}).get("properties", {}).get("deviceName"),
+            ] if v
+        }
+
+        def _score(answer) -> int:
+            score = 0
+            answer_hosts = {self._strip_scope(a.full_ip) for a in answer.addresses}
+            answer_identifier = (
+                answer.properties.get("identifier")
+                or answer.properties.get("rpMRtID")
+                or answer.properties.get("deviceid")
+                or ""
+            )
+            answer_names = {
+                self._clean_pair_name(v) for v in [
+                    answer.properties.get("name"),
+                    answer.properties.get("deviceName"),
+                    answer.instance.split("._", 1)[0] if answer.instance else "",
+                ] if v
+            }
+
+            if selected_host and self._strip_scope(selected_host) in answer_hosts:
+                score += 100
+            if answer_identifier and answer_identifier in selected_identifiers:
+                score += 80
+            if selected_names.intersection(answer_names):
+                score += 30
+            elif selected_names and answer_names:
+                if any(a in b or b in a for a in selected_names for b in answer_names):
+                    score += 10
+            if any(not a.full_ip.startswith("fe80") for a in answer.addresses):
+                score += 5
+            return score
+
+        best = max(answers, key=_score)
+        if _score(best) <= 0:
+            logger.warning("Multiple pairable devices found but none matched selected device")
+            return None
+        return self._answer_to_target(best)
+
+    def _answer_to_target(self, answer) -> tuple[str, int, str] | None:
+        if not answer.addresses or not answer.port:
+            return None
+        preferred = next((a.full_ip for a in answer.addresses if not a.full_ip.startswith("fe80")), None)
+        ip = preferred or answer.addresses[0].full_ip
+        identifier = answer.properties.get("identifier", "")
+        return (ip, answer.port, identifier)
+
+    @staticmethod
+    def _strip_scope(host: str) -> str:
+        return (host or "").split("%", 1)[0]
+
+    @staticmethod
+    def _clean_pair_name(name: str) -> str:
+        name = (name or "").strip().lower()
+        # Drop the duplicate-host suffix appended by our UI names, e.g.
+        # "Apple Device (92)" -> "apple device".
+        if name.endswith(")") and "(" in name:
+            name = name.rsplit("(", 1)[0].strip()
+        return name
 
     def _pair_in_thread(self, identifier: str, ip: str, port: int) -> dict:
         """Run the actual pairing in a separate thread with its own event loop."""
@@ -329,106 +743,390 @@ class DeviceManager:
     _tunnel_address: str | None = None
     _tunnel_port: int | None = None
     _tunnel_udid: str | None = None  # Real device UDID from tunneld
-    _tunneld_owned: bool = False  # True once WE started tunneld this process
+    _tunneld_owned: bool = False  # True once Catapult has verified its managed helper
     TUNNELD_URL = "http://127.0.0.1:49151"
 
     async def _ensure_tunneld(self) -> bool:
-        """Return True only if a tunneld WE started this session is responding.
+        """Return True for Catapult's managed tunneld helper.
 
-        A foreign/stale tunneld — e.g. a root-owned zombie left over from a
-        previous app run — happily answers the HTTP API with 200 but its
-        tunnel-building machinery is dead, so it returns an empty tunnel list
-        forever ("Tunnel not established"). Trusting it (status==200) meant we
-        skipped _start_tunneld() and never cleared it. So unless we started
-        this tunneld ourselves, report it as not-ready to force a clean restart.
+        The helper runs as a root LaunchDaemon so users do not have to enter an
+        admin password every time they reconnect an Apple TV tunnel. We still do
+        not trust arbitrary processes on port 49151; stale non-daemon tunneld
+        processes are replaced during daemon installation.
         """
+        if await self._tunneld_api_ready() and (
+            self._tunneld_owned
+            or await self._launchdaemon_loaded()
+            or await self._trusted_root_tunneld_running()
+        ):
+            self._tunneld_owned = True
+            return True
+        self._tunneld_owned = False
+        return False
+
+    async def _start_tunneld(self) -> dict:
+        """Install or start Catapult's privileged tunneld LaunchDaemon."""
+        if await self._ensure_tunneld():
+            return {"status": "ok", "message": "tunneld already running"}
+
+        logger.info("Installing or restarting Catapult tunneld LaunchDaemon...")
+        result = await self._install_tunneld_launchdaemon()
+        if result.get("status") != "ok":
+            return result
+
+        for _ in range(12):
+            if await self._ensure_tunneld():
+                return {"status": "ok", "message": "tunneld helper ready"}
+            await asyncio.sleep(1)
+
+        return {"status": "error", "message": f"tunneld helper did not become ready. See {TUNNELD_LOG_PATH}"}
+
+    async def _tunneld_api_ready(self) -> bool:
         import httpx
-        if not self._tunneld_owned:
-            return False
         try:
             async with httpx.AsyncClient() as client:
                 resp = await client.get(self.TUNNELD_URL, timeout=2)
                 return resp.status_code == 200
         except Exception:
-            self._tunneld_owned = False
             return False
 
-    async def _start_tunneld(self) -> dict:
-        """Start tunneld as a background daemon with admin privileges."""
-        import os, tempfile, stat
-
-        home = Path.home()
-        # In the PyInstaller .app bundle, sys.executable is the Catapult bootloader,
-        # not a Python interpreter — `-m pymobiledevice3` won't work. The bundle
-        # accepts --tunneld to run pymobiledevice3.tunneld.TunneldRunner in-process.
-        # In dev (running from source), sys.executable is the venv python; we use
-        # `-m pymobiledevice3 …` so behavior matches the historical command.
-        if getattr(sys, "frozen", False):
-            tunneld_invocation = f"'{sys.executable}' --tunneld"
-        else:
-            tunneld_invocation = (
-                f"'{sys.executable}' -m pymobiledevice3 remote tunneld "
-                f"--no-usb --no-usbmux --no-mobdev2"
-            )
-        command = (
-            # Clear any prior tunneld before starting a new one. The previous
-            # single pkill used a regex alternation ('A|B') that macOS pkill does
-            # NOT treat as alternation, so a stale (even root-owned) tunneld
-            # survived and kept port 49151 bound — the new tunneld then died with
-            # [Errno 48] address already in use. Kill by name (separate calls)
-            # AND by whoever holds the port, then wait for the socket to release.
-            f"pkill -9 -f 'Catapult --tunneld' 2>/dev/null; "
-            f"pkill -9 -f 'pymobiledevice3 remote tunneld' 2>/dev/null; "
-            f"PIDS=$(lsof -ti tcp:49151 2>/dev/null); [ -n \"$PIDS\" ] && kill -9 $PIDS 2>/dev/null; "
-            f"for i in 1 2 3 4 5; do lsof -ti tcp:49151 >/dev/null 2>&1 || break; sleep 1; done; "
-            f"HOME={home} PYTHONUNBUFFERED=1 "
-            f"{tunneld_invocation} "
-            f"> /tmp/catapult_tunneld.log 2>&1 & "
-            f"TPID=$!; sleep 3; "
-            f"if kill -0 $TPID 2>/dev/null; then echo $TPID; else cat /tmp/catapult_tunneld.log; exit 1; fi"
+    async def _launchdaemon_loaded(self) -> bool:
+        proc = await asyncio.create_subprocess_exec(
+            "/bin/launchctl",
+            "print",
+            f"system/{TUNNELD_DAEMON_LABEL}",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
         )
-
-        script = tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False, prefix="catapult_")
-        script.write(f"#!/bin/bash\n{command}\n")
-        script.close()
-        os.chmod(script.name, stat.S_IRWXU)
-
-        logger.info("Starting tunneld (admin privileges required)...")
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "osascript", "-e",
-                f'do shell script "{script.name}" with administrator privileges',
+            await asyncio.wait_for(proc.wait(), timeout=2)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return False
+        return proc.returncode == 0
+
+    async def _trusted_root_tunneld_running(self) -> bool:
+        """Trust an existing root-owned pymobiledevice3/Catapult tunneld."""
+        proc = await asyncio.create_subprocess_exec(
+            "/usr/sbin/lsof",
+            "-ti",
+            "tcp:49151",
+            "-sTCP:LISTEN",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await proc.communicate()
+        pids = [pid.strip() for pid in stdout.decode().splitlines() if pid.strip()]
+        for pid in pids:
+            ps = await asyncio.create_subprocess_exec(
+                "/bin/ps",
+                "-o",
+                "user=",
+                "-o",
+                "command=",
+                "-p",
+                pid,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
             )
-            stdout, stderr = await proc.communicate()
-            output = stdout.decode().strip()
-            err = stderr.decode().strip()
-            logger.info("tunneld output (rc=%d): %s %s", proc.returncode, output[:200], err[:200])
+            ps_out, _ = await ps.communicate()
+            row = ps_out.decode(errors="replace").strip()
+            if not row:
+                continue
+            parts = row.split(None, 1)
+            user = parts[0]
+            command = parts[1] if len(parts) > 1 else ""
+            if user == "root" and (
+                "pymobiledevice3 remote tunneld" in command
+                or "Catapult --tunneld" in command
+            ):
+                logger.info("Reusing existing trusted tunneld process (pid=%s)", pid)
+                return True
+        return False
 
-            if proc.returncode != 0:
-                return {"status": "error", "message": f"tunneld failed: {(output or err)[:200]}"}
-            self._tunneld_owned = True
-            return {"status": "ok", "message": f"tunneld started (PID {output})"}
+    def _tunneld_program_arguments(self) -> list[str]:
+        if getattr(sys, "frozen", False):
+            return [sys.executable, "--tunneld"]
+        for env_root in (
+            os.environ.get("UV_PROJECT_ENVIRONMENT"),
+            str(Path.home() / "Library/Application Support/Catapult/BackendEnv"),
+        ):
+            if not env_root:
+                continue
+            python = Path(env_root) / "bin" / "python"
+            if python.exists():
+                return [
+                    str(python),
+                    "-m",
+                    "pymobiledevice3",
+                    "remote",
+                    "tunneld",
+                    "--no-usb",
+                    "--no-usbmux",
+                    "--no-mobdev2",
+                ]
+        return [
+            sys.executable,
+            "-m",
+            "pymobiledevice3",
+            "remote",
+            "tunneld",
+            "--no-usb",
+            "--no-usbmux",
+            "--no-mobdev2",
+        ]
+
+    async def _install_tunneld_launchdaemon(self) -> dict:
+        import os
+        import plistlib
+        import shlex
+        import stat
+        import tempfile
+
+        plist_data = {
+            "Label": TUNNELD_DAEMON_LABEL,
+            "ProgramArguments": self._tunneld_program_arguments(),
+            "RunAtLoad": True,
+            "KeepAlive": True,
+            "EnvironmentVariables": {
+                "HOME": str(Path.home()),
+                "PYTHONUNBUFFERED": "1",
+            },
+            "StandardOutPath": TUNNELD_LOG_PATH,
+            "StandardErrorPath": TUNNELD_LOG_PATH,
+        }
+
+        plist_file = tempfile.NamedTemporaryFile(mode="wb", suffix=".plist", delete=False, prefix="catapult_tunneld_")
+        try:
+            plistlib.dump(plist_data, plist_file)
+            plist_file.close()
+
+            plist_src = shlex.quote(plist_file.name)
+            plist_dst = shlex.quote(str(TUNNELD_DAEMON_PLIST))
+            label = shlex.quote(TUNNELD_DAEMON_LABEL)
+            script_body = f"""#!/bin/bash
+set -e
+/bin/launchctl bootout system {plist_dst} 2>/dev/null || /bin/launchctl bootout system/{label} 2>/dev/null || true
+/usr/bin/pkill -9 -f 'Catapult --tunneld' 2>/dev/null || true
+/usr/bin/pkill -9 -f 'pymobiledevice3 remote tunneld' 2>/dev/null || true
+PIDS=$(/usr/sbin/lsof -ti tcp:49151 2>/dev/null || true)
+if [ -n "$PIDS" ]; then /bin/kill -9 $PIDS 2>/dev/null || true; fi
+for i in 1 2 3 4 5; do /usr/sbin/lsof -ti tcp:49151 >/dev/null 2>&1 || break; /bin/sleep 1; done
+/bin/cp {plist_src} {plist_dst}
+/usr/sbin/chown root:wheel {plist_dst}
+/bin/chmod 644 {plist_dst}
+/bin/launchctl bootstrap system {plist_dst}
+/bin/launchctl enable system/{label}
+/bin/launchctl kickstart -k system/{label}
+echo installed
+"""
+
+            script = tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False, prefix="catapult_tunneld_install_")
+            try:
+                script.write(script_body)
+                script.close()
+                os.chmod(script.name, stat.S_IRWXU)
+
+                escaped_script = script.name.replace('"', '\\"')
+                proc = await asyncio.create_subprocess_exec(
+                    "osascript",
+                    "-e",
+                    f'do shell script "{escaped_script}" with administrator privileges',
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await proc.communicate()
+                output = stdout.decode().strip()
+                err = stderr.decode().strip()
+                logger.info("tunneld LaunchDaemon install output (rc=%d): %s %s", proc.returncode, output[:200], err[:200])
+                if proc.returncode != 0:
+                    return {"status": "error", "message": f"tunneld helper install failed: {(output or err)[:300]}"}
+                self._tunneld_owned = True
+                return {"status": "ok", "message": "tunneld helper installed"}
+            finally:
+                try:
+                    os.unlink(script.name)
+                except Exception:
+                    pass
         finally:
-            os.unlink(script.name)
+            try:
+                os.unlink(plist_file.name)
+            except Exception:
+                pass
 
-    async def start_tunnel(self) -> dict:
+    async def start_tunnel(
+        self,
+        device_udid: str | None = None,
+        device_host: str | None = None,
+    ) -> dict:
         """Ensure tunneld is running, then wait for a tunnel to appear."""
-        import httpx
-
         if self._tunnel_lock is None:
             self._tunnel_lock = asyncio.Lock()
 
         async with self._tunnel_lock:
-            return await self._start_tunnel_inner()
+            return await self._start_tunnel_inner(device_udid=device_udid, device_host=device_host)
 
-    async def _start_tunnel_inner(self) -> dict:
-        import httpx
+    def _tunnel_target(self, device_udid: str | None = None, device_host: str | None = None) -> dict | None:
+        if device_udid or device_host:
+            selected = self._selected_device(device_udid=device_udid, device_host=device_host)
+            if selected:
+                return selected
+            if device_udid:
+                remembered = self._remembered_device_info(device_udid)
+                if remembered:
+                    return remembered
+            if device_host:
+                for remembered in self._paired_devices.get("devices", []):
+                    if remembered.get("host") == device_host:
+                        return {
+                            "name": remembered.get("name") or "Apple TV",
+                            "model": remembered.get("model", ""),
+                            "udid": device_udid or "",
+                            "host": device_host,
+                            "service": "_remotepairing._tcp.local.",
+                            "device_class": "tvos" if "AppleTV" in remembered.get("model", "") else "unknown",
+                            "properties": {},
+                        }
+        return None
 
-        # Already have a tunnel
+    def _target_identifiers(self, target: dict | None) -> set[str]:
+        if not target:
+            return set()
+        identifiers = self._device_identifiers(target)
+        target_host = target.get("host", "")
+        for remembered in self._paired_devices.get("devices", []):
+            if target_host and remembered.get("host") == target_host:
+                for identifier in remembered.get("identifiers", []):
+                    if identifier:
+                        identifiers.add(str(identifier).split("._", 1)[0])
+        return {identifier for identifier in identifiers if identifier}
+
+    def _rsd_identifiers(self, rsd) -> set[str]:
+        peer_info = getattr(rsd, "peer_info", {}) or {}
+        props = peer_info.get("Properties", {}) or {}
+        values = {
+            getattr(rsd, "udid", ""),
+            props.get("UniqueDeviceID", ""),
+            props.get("SerialNumber", ""),
+            props.get("UniqueChipID", ""),
+        }
+        return {str(value).split("._", 1)[0] for value in values if value}
+
+    def _rsd_names(self, rsd) -> set[str]:
+        peer_info = getattr(rsd, "peer_info", {}) or {}
+        props = peer_info.get("Properties", {}) or {}
+        all_values = getattr(rsd, "all_values", {}) or {}
+        names = {
+            props.get("DeviceName", ""),
+            props.get("ComputerName", ""),
+            props.get("ProductName", ""),
+            all_values.get("DeviceName", ""),
+            all_values.get("ProductName", ""),
+        }
+        return {self._clean_pair_name(str(name)) for name in names if name}
+
+    def _score_rsd_for_target(self, rsd, target: dict | None) -> int:
+        if not target:
+            return 1
+
+        score = 0
+        target_ids = self._target_identifiers(target)
+        if target_ids & self._rsd_identifiers(rsd):
+            score += 100
+
+        target_names = {
+            self._clean_pair_name(value)
+            for value in [
+                target.get("name", ""),
+                target.get("properties", {}).get("deviceName", ""),
+                target.get("properties", {}).get("name", ""),
+            ]
+            if value
+        }
+        rsd_names = self._rsd_names(rsd)
+        if target_names and rsd_names:
+            if target_names & rsd_names:
+                score += 40
+            elif any(a in b or b in a for a in target_names for b in rsd_names):
+                score += 15
+
+        target_model = str(target.get("model", ""))
+        rsd_product = str(getattr(rsd, "product_type", "") or (getattr(rsd, "peer_info", {}) or {}).get("Properties", {}).get("ProductType", ""))
+        if target_model and rsd_product and (target_model in rsd_product or rsd_product in target_model):
+            score += 20
+
+        return score
+
+    def _select_rsd(self, rsds: list, target: dict | None, *, allow_single_fallback: bool) -> object | None:
+        if not rsds:
+            return None
+        if not target:
+            return rsds[0]
+        scored = [(self._score_rsd_for_target(rsd, target), rsd) for rsd in rsds]
+        best_score, best = max(scored, key=lambda item: item[0])
+        if best_score > 0:
+            return best
+        if allow_single_fallback and len(rsds) == 1:
+            logger.info(
+                "Using sole tunneled RSD (udid=%s) for selected target %s",
+                getattr(rsds[0], "udid", "?"),
+                target.get("name") or target.get("udid") or target.get("host"),
+            )
+            return rsds[0]
+        logger.warning(
+            "No active RSD tunnel matched selected target %s. Available RSDs: %s",
+            target.get("name") or target.get("udid") or target.get("host"),
+            [getattr(rsd, "udid", "?") for rsd in rsds],
+        )
+        return None
+
+    def _cache_active_tunnel(self, rsd, target: dict | None = None):
+        self._tunnel_address, self._tunnel_port = getattr(rsd, "service").address
+        self._tunnel_udid = getattr(rsd, "udid", None)
+        if target and target.get("host"):
+            self._tunneled_hosts.add(target["host"])
+        logger.info(
+            "Tunnel ready: %s:%d (device UDID=%s)",
+            self._tunnel_address,
+            self._tunnel_port,
+            self._tunnel_udid,
+        )
+
+    async def _start_tunnel_inner(
+        self,
+        device_udid: str | None = None,
+        device_host: str | None = None,
+    ) -> dict:
+        from pymobiledevice3.tunneld.api import get_tunneld_devices
+
+        target = self._tunnel_target(device_udid=device_udid, device_host=device_host)
+
         if self._tunnel_address and self._tunnel_port:
-            return {"status": "ok", "message": "Tunnel already active"}
+            try:
+                rsds = await get_tunneld_devices()
+            except Exception as e:
+                logger.debug("Cached tunnel verification failed: %s", e)
+                rsds = []
+            selected = self._select_rsd(rsds, target, allow_single_fallback=True)
+            if selected:
+                self._cache_active_tunnel(selected, target)
+                for rsd in rsds:
+                    try:
+                        await rsd.close()
+                    except Exception:
+                        pass
+                return {"status": "ok", "message": "Tunnel already active"}
+            for rsd in rsds:
+                try:
+                    await rsd.close()
+                except Exception:
+                    pass
+
+            logger.info("Cached tunnel is stale; clearing and waiting for a live tunnel")
+            self._tunnel_address = None
+            self._tunnel_port = None
+            self._tunnel_udid = None
 
         # Start tunneld if not running
         if not await self._ensure_tunneld():
@@ -440,38 +1138,61 @@ class DeviceManager:
 
         # Poll tunneld for tunnels (it auto-discovers WiFi devices)
         logger.info("Waiting for tunneld to establish tunnel...")
-        async with httpx.AsyncClient() as client:
-            for i in range(30):
-                try:
-                    resp = await client.get(self.TUNNELD_URL, timeout=3)
-                    tunnels = resp.json()
-                    logger.info("tunneld tunnels: %s", tunnels)
-                    for udid, details in tunnels.items():
-                        if details:
-                            t = details[0]
-                            self._tunnel_address = t["tunnel-address"]
-                            self._tunnel_port = t["tunnel-port"]
-                            self._tunnel_udid = udid
-                            logger.info("Tunnel ready: %s:%d (device UDID=%s)",
-                                        self._tunnel_address, self._tunnel_port, udid)
-                            return {"status": "ok",
-                                    "message": f"Tunnel active at {self._tunnel_address}:{self._tunnel_port}"}
-                except Exception as e:
-                    logger.debug("tunneld poll %d: %s", i, e)
-                await asyncio.sleep(2)
+        for i in range(30):
+            rsds = []
+            try:
+                rsds = await get_tunneld_devices()
+                logger.info("tunneld RSDs: %s", [getattr(rsd, "udid", "?") for rsd in rsds])
+                selected = self._select_rsd(rsds, target, allow_single_fallback=True)
+                if selected:
+                    self._cache_active_tunnel(selected, target)
+                    message = f"Tunnel active at {self._tunnel_address}:{self._tunnel_port}"
+                    return {"status": "ok", "message": message}
+            except Exception as e:
+                logger.debug("tunneld poll %d: %s", i, e)
+            finally:
+                for rsd in rsds:
+                    try:
+                        await rsd.close()
+                    except Exception:
+                        pass
+            await asyncio.sleep(2)
 
+        self._tunnel_address = None
+        self._tunnel_port = None
+        self._tunnel_udid = None
+        if target:
+            name = target.get("name") or target.get("host") or target.get("udid") or "device"
+            return {"status": "error", "message": f"Tunnel not established for {name} — device may need re-pairing"}
         return {"status": "error", "message": "Tunnel not established — device may need re-pairing"}
 
-    async def get_real_udid(self) -> tuple[str, str | None]:
+    async def get_real_udid(
+        self,
+        device_udid: str | None = None,
+        device_host: str | None = None,
+    ) -> tuple[str, str | None]:
         """Get the real device UDID from RSD and detect platform (tvOS vs iOS)."""
         from pymobiledevice3.tunneld.api import get_tunneld_devices
 
+        target = self._tunnel_target(device_udid=device_udid, device_host=device_host)
         rsds = await get_tunneld_devices()
         if not rsds:
-            # Fall back to tunneld key (pairing UUID) if RSD unavailable
-            return (self._tunnel_udid or "", None)
+            tunnel = await self.start_tunnel(device_udid=device_udid, device_host=device_host)
+            if tunnel.get("status") == "ok":
+                rsds = await get_tunneld_devices()
 
-        rsd = rsds[0]
+        if not rsds:
+            raise RuntimeError("No active Apple TV tunnel. Use Setup when the Apple TV is awake and on this network.")
+
+        rsd = self._select_rsd(rsds, target, allow_single_fallback=True)
+        if not rsd:
+            for candidate in rsds:
+                try:
+                    await candidate.close()
+                except Exception:
+                    pass
+            raise RuntimeError("No active tunnel matched the selected Apple TV. Reconnect it from Setup.")
+
         udid = rsd.udid
         # Detect Apple TV via product type or name in peer info
         peer_info = getattr(rsd, "peer_info", {}) or {}
@@ -481,8 +1202,132 @@ class DeviceManager:
         sub_platform = "tvOS" if is_tv else None
         logger.info("Real device UDID: %s, ProductType: %s, subPlatform: %s",
                     udid, product_type, sub_platform)
-        await rsd.close()
+        for candidate in rsds:
+            try:
+                await candidate.close()
+            except Exception:
+                pass
         return (udid, sub_platform)
+
+    async def find_installed_app(
+        self,
+        *,
+        bundle_id: str,
+        display_name: str,
+        candidate_bundle_ids: list[str],
+        team_id: str,
+        device_udid: str | None = None,
+    ) -> dict | None:
+        """Find an already-installed app that should be updated in place."""
+        apps = await self.list_installed_apps(device_udid=device_udid)
+        candidate_set = {value for value in candidate_bundle_ids if value}
+        normalized_name = display_name.strip().casefold()
+        catapult_prefix = f"com.catapult.{team_id}."
+
+        exact = next((app for app in apps if app.get("bundle_id") == bundle_id), None)
+        if exact:
+            return exact
+
+        candidate = next((app for app in apps if app.get("bundle_id") in candidate_set), None)
+        if candidate:
+            return candidate
+
+        if normalized_name:
+            matches = [
+                app for app in apps
+                if app.get("bundle_id", "").startswith(catapult_prefix)
+                and app.get("name", "").strip().casefold() == normalized_name
+            ]
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1:
+                logger.warning(
+                    "Multiple installed Catapult apps match %s: %s",
+                    display_name,
+                    [app.get("bundle_id") for app in matches],
+                )
+        return None
+
+    async def list_installed_apps(self, device_udid: str | None = None) -> list[dict]:
+        """List installed user apps through the active RSD tunnel."""
+        from pymobiledevice3.tunneld.api import get_tunneld_devices
+        from pymobiledevice3.services.installation_proxy import InstallationProxyService
+
+        target = None
+        if device_udid:
+            device = self._cache.get(device_udid) or self._remembered_device_info(device_udid)
+            if device and device.get("service") == "usbmux":
+                return await self._list_installed_apps_usbmux(device_udid)
+            target = device
+
+        rsds = await get_tunneld_devices()
+        if not rsds:
+            tunnel = await self.start_tunnel(device_udid=device_udid, device_host=(target or {}).get("host"))
+            if tunnel.get("status") == "ok":
+                rsds = await get_tunneld_devices()
+        if not rsds:
+            logger.info("No active RSD tunnel while listing installed apps")
+            return []
+        rsd = self._select_rsd(rsds, target, allow_single_fallback=True)
+        if not rsd:
+            logger.info("No matching RSD tunnel while listing installed apps for %s", device_udid or "default target")
+            for candidate in rsds:
+                try:
+                    await candidate.close()
+                except Exception:
+                    pass
+            return []
+        try:
+            installer = InstallationProxyService(lockdown=rsd)
+            attributes = [
+                "CFBundleIdentifier",
+                "CFBundleDisplayName",
+                "CFBundleName",
+                "CFBundleShortVersionString",
+                "ApplicationType",
+            ]
+            rows = await installer.browse(attributes=attributes)
+            apps = []
+            for row in rows:
+                if row.get("ApplicationType") != "User":
+                    continue
+                apps.append({
+                    "bundle_id": row.get("CFBundleIdentifier", ""),
+                    "name": row.get("CFBundleDisplayName") or row.get("CFBundleName") or "",
+                    "version": row.get("CFBundleShortVersionString", ""),
+                })
+            return apps
+        finally:
+            for rsd in rsds:
+                try:
+                    await rsd.close()
+                except Exception:
+                    pass
+
+    async def _list_installed_apps_usbmux(self, udid: str) -> list[dict]:
+        from pymobiledevice3.lockdown import create_using_usbmux
+        from pymobiledevice3.services.installation_proxy import InstallationProxyService
+
+        lockdown = await create_using_usbmux(serial=udid, pair_timeout=3)
+        installer = InstallationProxyService(lockdown=lockdown)
+        attributes = [
+            "CFBundleIdentifier",
+            "CFBundleDisplayName",
+            "CFBundleName",
+            "CFBundleShortVersionString",
+            "ApplicationType",
+        ]
+        rows = await installer.browse(attributes=attributes)
+        apps = []
+        for row in rows:
+            if row.get("ApplicationType") != "User":
+                continue
+            apps.append({
+                "bundle_id": row.get("CFBundleIdentifier", ""),
+                "name": row.get("CFBundleDisplayName") or row.get("CFBundleName") or "",
+                "version": row.get("CFBundleShortVersionString", ""),
+            })
+        return apps
 
     # ── Installation ──
 
@@ -502,7 +1347,7 @@ class DeviceManager:
         # won't re-prompt for admin when tunneld is already running.
         if "remotepairing" in service and not installable:
             logger.info("Tunnel not marked ready for %s — ensuring before install...", device["name"])
-            tunnel = await self.start_tunnel()
+            tunnel = await self.start_tunnel(device_udid=udid, device_host=host)
             if tunnel.get("status") == "ok":
                 installable = True
 
@@ -514,6 +1359,11 @@ class DeviceManager:
 
         logger.info("Installing to %s (%s:%s via %s)", device["name"], host, port, service)
 
+        if service == "usbmux" or device.get("connection") == "usb":
+            await self._install_via_usbmux(udid, ipa_path)
+            logger.info("Installation complete")
+            return
+
         # Prefer a live RSD tunnel matching this UDID (required for tvOS;
         # also survives LaunchAgent restarts since tunneld runs separately).
         # mobdev2 mDNS records don't carry the real UDID, so exact match often
@@ -524,14 +1374,18 @@ class DeviceManager:
         except Exception as e:
             logger.debug("tunneld query failed: %s", e)
             rsds = []
+        if not rsds and ("remotepairing" in service or device.get("requires_tunnel")):
+            tunnel = await self.start_tunnel(device_udid=udid, device_host=host)
+            if tunnel.get("status") == "ok":
+                try:
+                    rsds = await get_tunneld_devices()
+                except Exception as e:
+                    logger.debug("tunneld query after start failed: %s", e)
+                    rsds = []
 
         logger.info("tunneld RSDs: %s (target udid=%s)",
                     [getattr(r, "udid", "?") for r in rsds], udid)
-        matching = next((r for r in rsds if getattr(r, "udid", None) == udid), None)
-        if matching is None and len(rsds) == 1:
-            matching = rsds[0]
-            logger.info("Using sole tunneled RSD (udid=%s) for target (udid=%s)",
-                        matching.udid, udid)
+        matching = self._select_rsd(rsds, device, allow_single_fallback=True)
         if matching is not None:
             try:
                 await self._install_via_rsd_client(matching, ipa_path)
@@ -560,5 +1414,13 @@ class DeviceManager:
         from pymobiledevice3.services.installation_proxy import InstallationProxyService
 
         lockdown = await create_using_tcp(host, identifier=udid, port=port)
+        installer = InstallationProxyService(lockdown=lockdown)
+        await installer.install_from_local(str(ipa_path))
+
+    async def _install_via_usbmux(self, udid: str, ipa_path: Path):
+        from pymobiledevice3.lockdown import create_using_usbmux
+        from pymobiledevice3.services.installation_proxy import InstallationProxyService
+
+        lockdown = await create_using_usbmux(serial=udid, pair_timeout=3)
         installer = InstallationProxyService(lockdown=lockdown)
         await installer.install_from_local(str(ipa_path))
