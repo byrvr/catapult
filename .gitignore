@@ -9,6 +9,8 @@ build/
 .idea/
 *.iml
 .DS_Store
+.build/
+icon-concepts/
 *.pem
 *.p12
 *.mobileprovision

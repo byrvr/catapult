@@ -11,7 +11,7 @@ Server startup
       └─ run_refresh_loop()    ← background asyncio task (checks every hour)
                 │
                 ├─ load_state()
-                ├─ find installs where now - last_installed >= 6.5 days
+                ├─ find installs with 72h or less before expiry
                 └─ for each due install:
                        _refresh_install(rec)
                            ├─ get_or_create_cert
@@ -27,7 +27,8 @@ Server startup
 ## Timing
 
 - **Check interval**: every 1 hour
-- **Refresh threshold**: 6.5 days after last install (12h safety margin before 7-day expiry)
+- **Refresh window**: starts 72 hours before the 7-day expiry
+- **Refresh behavior**: the hourly checker refreshes at the first successful opportunity inside that window
 - **Startup delay**: 30 seconds (lets server finish initializing)
 
 ## Persistent State
@@ -51,7 +52,10 @@ All state is stored in `~/.catapult/state.json`:
       "device_udid": "2F433D19-...",
       "ipa_path": "/tmp/catapult_uploads/stremio_tvOS.ipa",
       "device_name": "Living Room",
-      "last_installed": 1712345678.0
+      "last_installed": 1712345678.0,
+      "expires_at": 1712950478.0,
+      "refresh_after": 1712691278.0,
+      "refresh_window_hours": 72
     }
   ]
 }
@@ -73,7 +77,7 @@ refresh.restore_session(auth_client)
 
 This means the server can restart without requiring re-authentication, and the auto-refresh loop can run unattended.
 
-**Security note**: Session tokens are stored in plaintext in `~/.catapult/state.json`. This is equivalent to how Xcode stores its credentials. The file is only readable by the user who created it (default macOS permissions).
+**Security note**: Session metadata is stored in `~/.catapult/state.json`; auth tokens are stored in the macOS Keychain.
 
 ## Install Recording
 
@@ -82,7 +86,7 @@ After every successful WebSocket install:
 refresh.record_install(device_udid, ipa_path, device_info["name"])
 ```
 
-This creates or updates a record. If the same device+IPA combination is installed again, only `last_installed` is updated.
+This creates or updates a record. If the same device+IPA combination is installed again, `last_installed`, `expires_at`, and `refresh_after` are updated.
 
 ## Background Refresh Requirements
 

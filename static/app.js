@@ -404,10 +404,16 @@ async function loadAccountInfo() {
                 const expiryLine = a.expiry
                     ? `<span class="app-detail">Expires ${esc(a.expiry)}</span>`
                     : "";
+                const title = a.is_extension
+                    ? `${esc(a.parent_name || "App")} ${String(a.extension_name || "Extension").toLowerCase().includes("widget") ? "Widget Extension" : esc(a.extension_name || "Extension")}`
+                    : esc(a.name || a.identifier);
+                const detailLine = a.is_extension
+                    ? `<span class="app-detail">Extension App ID for ${esc(a.parent_name || "the parent app")}</span>`
+                    : "";
                 return `<div class="app-row" data-app-id-id="${esc(a.app_id_id)}">
                     <div class="app-info">
-                        <span class="app-name">${esc(a.name || a.identifier)}${sourceTag}</span>
-                        ${installedLine}${expiryLine}
+                        <span class="app-name">${title}${sourceTag}</span>
+                        ${detailLine}${installedLine}${expiryLine}
                     </div>
                     <span class="app-expiry ${expiryClass}">${expiryText}</span>
                     <button class="btn-kebab" title="Options">\u22EE</button>

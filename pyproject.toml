@@ -1,7 +1,7 @@
 [project]
 name = "catapult"
-version = "0.1.0"
-description = "Sideload apps to iOS and tvOS devices over your local network"
+version = "0.2.0"
+description = "Native macOS sideloading workspace for iOS and tvOS devices"
 requires-python = ">=3.14"
 dependencies = [
     "pymobiledevice3>=4.0.0",

@@ -14,6 +14,7 @@ createProvisioningProfile.  It only needs appIdId + teamId.  Apple's server
 automatically includes all registered certificates and devices in the profile.
 """
 
+import asyncio
 import logging
 import plistlib
 import ssl
@@ -36,6 +37,7 @@ DEV_SERVICES = "https://developerservices2.apple.com/services/QH65B2"
 # Apple result codes
 RC_SUCCESS = 0
 RC_ALREADY_EXISTS = 35
+RC_NOT_ALLOWED = 1200
 RC_BUNDLE_ID_UNAVAILABLE = 9401
 
 
@@ -54,6 +56,7 @@ class DeveloperServices:
         self._private_key: rsa.RSAPrivateKey | None = None
         self._cert_id: str | None = None
         self._cert_serial: str | None = None
+        self._cert_lock = asyncio.Lock()
 
     # ── Auth headers ──
 
@@ -192,6 +195,26 @@ class DeveloperServices:
         except DeveloperServicesError as e:
             logger.warning("Failed to revoke cert serial=%s: %s", serial_number, e)
 
+    async def _revoke_cert_by_id(
+        self, session: AuthSession, team_id: str, certificate_id: str
+    ):
+        """Revoke a single development certificate by certificateId.
+
+        Apple's responses do not always include serialNumber for pending or
+        recently-created certificates. Keep serial revocation as the preferred
+        path, but fall back to certificateId so a stale pending cert does not
+        permanently block new CSRs.
+        """
+        logger.info("Revoking cert with id %s", certificate_id)
+        try:
+            await self._request(
+                session,
+                "ios/revokeDevelopmentCert.action",
+                {"teamId": team_id, "certificateId": certificate_id},
+            )
+        except DeveloperServicesError as e:
+            logger.warning("Failed to revoke cert id=%s: %s", certificate_id, e)
+
     async def _revoke_all_certs(self, session: AuthSession, team_id: str):
         """Revoke ALL development certs to make room for a new one.
 
@@ -205,6 +228,13 @@ class DeveloperServices:
             if serial:
                 logger.info("Revoking cert: %s (serial=%s)", name, serial)
                 await self._revoke_cert(session, team_id, serial)
+            elif cert.get("certificateId"):
+                logger.info(
+                    "Revoking cert: %s (id=%s)",
+                    name,
+                    cert.get("certificateId"),
+                )
+                await self._revoke_cert_by_id(session, team_id, cert["certificateId"])
             else:
                 logger.warning(
                     "Cert %s has no serialNumber, skipping revoke",
@@ -212,6 +242,12 @@ class DeveloperServices:
                 )
 
     async def get_or_create_cert(
+        self, session: AuthSession, team_id: str
+    ) -> tuple[bytes, rsa.RSAPrivateKey]:
+        async with self._cert_lock:
+            return await self._get_or_create_cert_locked(session, team_id)
+
+    async def _get_or_create_cert_locked(
         self, session: AuthSession, team_id: str
     ) -> tuple[bytes, rsa.RSAPrivateKey]:
         """Ensure we have a valid signing certificate.
@@ -246,16 +282,32 @@ class DeveloperServices:
         # AltSign sends: csrContent, machineId (UUID), machineName
         machine_id = str(uuid.uuid4()).upper()
         logger.info("Submitting development CSR (machineId=%s)", machine_id)
-        data = await self._request(
-            session,
-            "ios/submitDevelopmentCSR.action",
-            {
-                "teamId": team_id,
-                "csrContent": csr_pem,
-                "machineId": machine_id,
-                "machineName": "Catapult",
-            },
-        )
+        csr_fields = {
+            "teamId": team_id,
+            "csrContent": csr_pem,
+            "machineId": machine_id,
+            "machineName": "Catapult",
+        }
+        try:
+            data = await self._request(
+                session,
+                "ios/submitDevelopmentCSR.action",
+                csr_fields,
+            )
+        except DeveloperServicesError as e:
+            if e.result_code != 7460:
+                raise
+            logger.info(
+                "CSR was blocked by an existing or pending certificate; "
+                "revoking and retrying once"
+            )
+            await self._revoke_all_certs(session, team_id)
+            await asyncio.sleep(2)
+            data = await self._request(
+                session,
+                "ios/submitDevelopmentCSR.action",
+                csr_fields,
+            )
 
         cert_req = data.get("certRequest", {})
         self._cert_id = cert_req.get("certificateId", "")
@@ -383,28 +435,25 @@ class DeveloperServices:
                 return app
         return None
 
-    async def register_app_id(
-        self, session: AuthSession, team_id: str, bundle_id: str
-    ) -> dict:
-        """Register an app ID, or return existing one if already registered.
+    async def register_app_id(self, session: AuthSession, team_id: str, bundle_id: str) -> dict:
+        """Register an exact app ID, or return the team's existing one.
 
-        AltSign flow:
-          1. Try addAppId
-          2. If it fails with "already exists" or "not available", look it up
+        Preserve the IPA's bundle identifier by default. Rewriting it creates a
+        second app on iOS/tvOS and loses the existing data container.
         """
-        sideload_id = self.sideload_bundle_id(team_id, bundle_id)
+        target_id = bundle_id
         short_name = bundle_id.rsplit(".", 1)[-1]
         # Sanitize name: AltSign strips diacritics and non-alphanumeric chars
         app_name = f"Catapult {short_name}"
 
-        logger.info("Registering app ID: %s (name=%s)", sideload_id, app_name)
+        logger.info("Registering app ID: %s (name=%s)", target_id, app_name)
         try:
             data = await self._request(
                 session,
                 "ios/addAppId.action",
                 {
                     "teamId": team_id,
-                    "identifier": sideload_id,
+                    "identifier": target_id,
                     "name": app_name,
                     "type": "explicit",
                     "enabledFeatures": {},
@@ -415,7 +464,7 @@ class DeveloperServices:
 
             if rc == RC_ALREADY_EXISTS:
                 logger.info("App ID already exists (rc=35), looking it up")
-                found = await self._find_app_id(session, team_id, sideload_id)
+                found = await self._find_app_id(session, team_id, target_id)
                 if found:
                     return found
                 # Shouldn't happen, but fall through
@@ -425,18 +474,18 @@ class DeveloperServices:
             if app_id:
                 logger.info(
                     "App ID registered: %s (appIdId=%s)",
-                    sideload_id,
+                    target_id,
                     app_id.get("appIdId"),
                 )
                 return app_id
 
             # If no appId in response but no error, try looking it up
             logger.warning("addAppId succeeded but no appId in response, looking up")
-            found = await self._find_app_id(session, team_id, sideload_id)
+            found = await self._find_app_id(session, team_id, target_id)
             if found:
                 return found
             raise DeveloperServicesError(
-                f"App ID {sideload_id} registered but could not be found"
+                f"App ID {target_id} registered but could not be found"
             )
 
         except DeveloperServicesError as e:
@@ -446,15 +495,60 @@ class DeveloperServices:
             ).lower():
                 logger.info(
                     "App ID bundle '%s' may already exist, looking it up",
-                    sideload_id,
+                    target_id,
                 )
-                found = await self._find_app_id(session, team_id, sideload_id)
+                found = await self._find_app_id(session, team_id, target_id)
                 if found:
                     return found
+                wildcard = await self._get_or_create_wildcard_app_id(session, team_id)
+                if wildcard:
+                    logger.info(
+                        "Using wildcard App ID %s to preserve bundle ID %s",
+                        wildcard.get("identifier"),
+                        target_id,
+                    )
+                    return wildcard
                 raise DeveloperServicesError(
-                    f"App ID {sideload_id} is unavailable and not found in team"
+                    f"Cannot update '{target_id}' in place with this Apple ID. "
+                    "Apple rejected the exact bundle ID and this account cannot create a "
+                    "wildcard App ID. Use the same Apple ID/tool that installed the current "
+                    "app, or install as a separate copy."
                 ) from e
             raise
+
+    async def _get_or_create_wildcard_app_id(
+        self, session: AuthSession, team_id: str
+    ) -> dict | None:
+        """Return a wildcard App ID when Apple allows this account to create one."""
+        for identifier in ("*", f"{team_id}.*"):
+            found = await self._find_app_id(session, team_id, identifier)
+            if found:
+                return found
+
+        try:
+            data = await self._request(
+                session,
+                "ios/addAppId.action",
+                {
+                    "teamId": team_id,
+                    "identifier": "*",
+                    "name": "Catapult Wildcard",
+                    "type": "wildcard",
+                    "enabledFeatures": {},
+                    "entitlements": {},
+                },
+            )
+            app_id = data.get("appId")
+            if app_id:
+                logger.info("Wildcard App ID registered (appIdId=%s)", app_id.get("appIdId"))
+                return app_id
+            return await self._find_app_id(session, team_id, "*")
+        except DeveloperServicesError as e:
+            if e.result_code == RC_NOT_ALLOWED:
+                logger.info("Wildcard App ID is not allowed for this Apple ID")
+                return None
+            logger.warning("Wildcard App ID creation failed: %s", e)
+            return None
 
     # ── 5. Provisioning profiles ──
 
@@ -630,5 +724,4 @@ class DeveloperServices:
             session, team_id, app_id, cert_pem, device_udid
         )
 
-        sideload_id = self.sideload_bundle_id(team_id, bundle_id)
-        return cert_pem, private_key, profile, sideload_id
+        return cert_pem, private_key, profile, bundle_id

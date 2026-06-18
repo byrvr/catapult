@@ -8,11 +8,11 @@ Catapult is a macOS-native sideloading tool that installs `.ipa` files onto iOS 
 ┌─────────────────────────────────────────────────────────────────┐
 │                         macOS Host                               │
 │                                                                  │
-│  ┌──────────┐   WebSocket/REST   ┌─────────────────────────┐    │
-│  │  Web UI  │◄──────────────────►│   FastAPI Server        │    │
-│  │(pywebview│                    │   (catapult/server.py)  │    │
-│  │or browser│                    └────────┬────────────────┘    │
-│  └──────────┘                             │                      │
+│  ┌───────────────┐  WebSocket/REST ┌─────────────────────────┐   │
+│  │ Native SwiftUI│◄───────────────►│   FastAPI Server        │   │
+│  │ macOS App     │                 │   (catapult/server.py)  │   │
+│  │ + menu bar    │                 └────────┬────────────────┘   │
+│  └───────────────┘                          │                    │
 │                              ┌────────────┼─────────────┐       │
 │                              │            │             │        │
 │                      ┌───────▼──┐  ┌─────▼────┐  ┌────▼─────┐ │
@@ -30,7 +30,7 @@ Catapult is a macOS-native sideloading tool that installs `.ipa` files onto iOS 
 │  ┌──────────────────────────────────────────────────────────┐   │
 │  │  Background Refresh (catapult/refresh.py)                │   │
 │  │  Checks ~/.catapult/state.json every hour               │   │
-│  │  Re-signs and re-installs expired apps (<12h to expiry) │   │
+│  │  Re-signs and re-installs apps inside 72h expiry window │   │
 │  └──────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────┘
          │                                        │
@@ -72,7 +72,7 @@ WebSocket /ws/install
 | `device.py` | mDNS discovery, pairing, tunneld, installation |
 | `signer.py` | IPA signing (keychain, codesign, bundle ID rewrite) |
 | `ipa.py` | IPA zip handling (extract, inspect, repack) |
-| `refresh.py` | Persistent state, 7-day auto-refresh loop |
+| `refresh.py` | Persistent state, 72h-window opportunistic auto-refresh loop |
 
 ## Key Data Structures
 

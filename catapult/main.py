@@ -36,7 +36,11 @@ def _configure_logging(verbose: bool = False):
 
 
 def _run_server(host: str, port: int):
-    uvicorn.run("catapult.server:app", host=host, port=port, log_level="warning")
+    # pymobiledevice3 uses asyncio UDP transports for Bonjour/pairing. uvicorn's
+    # auto mode selects uvloop when installed, and uvloop can get stuck spinning
+    # on those UDP transports after pairing. Keep the API server on stdlib
+    # asyncio so later requests like upload/login remain responsive.
+    uvicorn.run("catapult.server:app", host=host, port=port, log_level="warning", loop="asyncio")
 
 
 def _run_tunneld():

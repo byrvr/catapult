@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- macOS 13+ (uses AOSKit for Anisette — no Docker needed)
+- macOS 14+ for the native app
 - Python 3.14+
 - `uv` package manager
 - Apple ID (free developer account)
@@ -18,8 +18,17 @@ uv sync
 
 ## Modes
 
-### Native App (default)
-Opens a native macOS window via pywebview:
+### Native App
+Build and run the SwiftUI macOS app:
+```bash
+cd native/CatapultNative
+swift run
+```
+
+The native app starts the local Python engine automatically.
+
+### Legacy Web App
+Opens the browser/pywebview interface:
 ```bash
 uv run python run.py
 ```
@@ -64,7 +73,7 @@ Logs go to `~/.catapult/server.log`.
 
 6. **Click Install**.
 
-After the first successful install, Catapult will automatically refresh the app every 7 days as long as the server is running.
+After the first successful install, Catapult checks hourly and automatically refreshes the app at the first successful opportunity once it has 72 hours or less before expiry.
 
 ## First-Time Setup (iPhone/iPad)
 
@@ -79,7 +88,7 @@ iPhones with the `_apple-mobdev2` mDNS service are directly installable — no p
 
 | Flag | Description |
 |------|-------------|
-| `--browser` | Open UI in browser instead of native window |
+| `--browser` | Open the legacy web UI in a browser |
 | `--serve` | Run headless (no window or browser) |
 | `--install-agent` | Install macOS LaunchAgent for auto-start at login |
 | `--verbose` / `-v` | Enable debug logging |
