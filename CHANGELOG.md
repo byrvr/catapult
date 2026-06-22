@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1 - 2026-06-22
+
+- Reworked the DMG installer background with a cleaner light layout and better label contrast.
+
 ## 0.3.0 - 2026-06-22
 
 - Added a durable local IPA vault under Application Support so auto-refresh no longer depends on temporary upload paths.
