@@ -49,7 +49,7 @@ backend, ad-hoc signs the bundle for local distribution, and writes:
 ```text
 ../outputs/Catapult.app
 ../outputs/Catapult.app.zip
-../outputs/Catapult-0.2.0.dmg
+../outputs/Catapult-0.3.0.dmg
 ```
 
 ## Current Boundary
