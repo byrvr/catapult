@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0 - 2026-06-22
+
+- Added a durable local IPA vault under Application Support so auto-refresh no longer depends on temporary upload paths.
+- Added optional encrypted cross-device sync for install manifests and IPA blobs using a sync folder or Cloudflare R2.
+- Added sync status to the native developer account view, including missing-key and wrong-key states.
+- Added sync REST endpoints for status and manual merge/recovery.
+- Updated auto-refresh, API, architecture, and running docs for vault-backed installs.
+
 ## 0.2.0 - 2026-06-18
 
 - Added the native SwiftUI macOS app.

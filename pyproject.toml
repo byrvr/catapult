@@ -1,6 +1,6 @@
 [project]
 name = "catapult"
-version = "0.2.0"
+version = "0.3.0"
 description = "Native macOS sideloading workspace for iOS and tvOS devices"
 requires-python = ">=3.14"
 dependencies = [
