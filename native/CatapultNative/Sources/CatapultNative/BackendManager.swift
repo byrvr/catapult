@@ -39,6 +39,9 @@ final class BackendManager: ObservableObject {
         if case .starting = status {
             return
         }
+        if case .ready = status {
+            return
+        }
 
         logLines.removeAll()
         startupDetail = "Checking local engine..."
@@ -51,47 +54,49 @@ final class BackendManager: ObservableObject {
             let supportRoot = bundledBackend ? try appSupportRoot() : nil
             backendRoot = root
 
-            var backgroundAgentReady = false
             if bundledBackend, let supportRoot {
                 startupDetail = "Preparing background engine..."
-                if isBackendPythonReady(supportRoot: supportRoot) {
-                    do {
-                        let updatedAgent = try installOrUpdateBackgroundAgent(root: root, supportRoot: supportRoot)
-                        backgroundAgentReady = true
-                        appendLog(updatedAgent ? "Installed Catapult background refresh agent" : "Catapult background refresh agent is installed")
-                        kickstartBackgroundAgent()
-                    } catch {
-                        appendLog("Could not install background refresh agent: \(error.localizedDescription)")
+                if !isBackendPythonReady(supportRoot: supportRoot) {
+                    try await prepareBundledBackendEnvironment(root: root, uv: uv, supportRoot: supportRoot)
+                }
+
+                do {
+                    let updatedAgent = try installOrUpdateBackgroundAgent(root: root, supportRoot: supportRoot)
+                    appendLog(updatedAgent ? "Installed Catapult background refresh agent" : "Catapult background refresh agent is installed")
+
+                    if await isTrustedBackendHealthy() {
+                        startupDetail = "Engine ready."
+                        status = .ready
+                        return
                     }
-                } else {
-                    appendLog("Backend environment is not ready yet; starting one-time setup")
+
+                    if terminateStaleBackendOnPort() {
+                        appendLog("Stopping stale Catapult backend on port 9450")
+                        try? await Task.sleep(nanoseconds: 600_000_000)
+                    }
+
+                    startupDetail = "Starting background engine..."
+                    kickstartBackgroundAgent()
+                    for _ in 0..<360 {
+                        if await isTrustedBackendHealthy() {
+                            startupDetail = "Engine ready."
+                            status = .ready
+                            return
+                        }
+                        try? await Task.sleep(nanoseconds: 500_000_000)
+                    }
+
+                    status = .failed(backgroundAgentFailureMessage("The background backend did not become ready on port 9450."))
+                    return
+                } catch {
+                    appendLog("Could not start background refresh agent: \(error.localizedDescription)")
+                    startupDetail = "Starting local engine..."
                 }
             }
 
             if await isTrustedBackendHealthy() {
                 startupDetail = "Engine ready."
                 status = .ready
-                return
-            }
-
-            if bundledBackend, backgroundAgentReady {
-                startupDetail = "Starting background engine. First launch can take a minute."
-                if terminateStaleBackendOnPort() {
-                    appendLog("Stopping stale Catapult backend on port 9450")
-                    try? await Task.sleep(nanoseconds: 600_000_000)
-                    kickstartBackgroundAgent()
-                }
-
-                for _ in 0..<360 {
-                    if await isTrustedBackendHealthy() {
-                        startupDetail = "Engine ready."
-                        status = .ready
-                        return
-                    }
-                    try? await Task.sleep(nanoseconds: 500_000_000)
-                }
-
-                status = .failed(backgroundAgentFailureMessage("The background backend did not become ready on port 9450."))
                 return
             }
 
@@ -146,7 +151,9 @@ final class BackendManager: ObservableObject {
                     return
                 }
                 if await isTrustedBackendHealthy() {
-                    installBackgroundAgentIfPossible(root: root, supportRoot: supportRoot, bundledBackend: bundledBackend)
+                    if !bundledBackend {
+                        installBackgroundAgentIfPossible(root: root, supportRoot: supportRoot, bundledBackend: bundledBackend)
+                    }
                     startupDetail = "Engine ready."
                     status = .ready
                     return
@@ -157,6 +164,49 @@ final class BackendManager: ObservableObject {
             status = .failed(backendFailureMessage("The backend did not become ready on port 9450."))
         } catch {
             status = .failed(error.localizedDescription)
+        }
+    }
+
+    private func prepareBundledBackendEnvironment(root: URL, uv: UVCommand, supportRoot: URL) async throws {
+        startupDetail = "Creating backend environment..."
+        appendLog("Creating Catapult backend environment")
+
+        let process = Process()
+        process.executableURL = uv.executable
+        process.arguments = uv.prefixArguments + [
+            "sync",
+            "--frozen",
+            "--no-dev",
+        ]
+        process.currentDirectoryURL = root
+
+        var environment = ProcessInfo.processInfo.environment
+        environment["PYTHONUNBUFFERED"] = "1"
+        environment["UV_PROJECT_ENVIRONMENT"] = supportRoot.appending(path: "BackendEnv").path
+        environment["UV_CACHE_DIR"] = supportRoot.appending(path: "uv-cache").path
+        process.environment = environment
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else {
+                return
+            }
+            Task { @MainActor [weak self] in
+                self?.appendLog(text)
+            }
+        }
+
+        try process.run()
+        while process.isRunning {
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+        pipe.fileHandleForReading.readabilityHandler = nil
+
+        guard process.terminationStatus == 0, isBackendPythonReady(supportRoot: supportRoot) else {
+            throw CatapultError.backendUnavailable("Could not prepare the backend Python environment.")
         }
     }
 
