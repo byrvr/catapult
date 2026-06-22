@@ -32,6 +32,12 @@ Catapult is a macOS-native sideloading tool that installs `.ipa` files onto iOS 
 │  │  Checks ~/.catapult/state.json every hour               │   │
 │  │  Re-signs and re-installs apps inside 72h expiry window │   │
 │  └──────────────────────────────────────────────────────────┘   │
+│                                                                  │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │  IPA Vault + Sync (catapult/vault.py, catapult/sync.py)  │   │
+│  │  Stores durable local IPAs by SHA-256 and optionally     │   │
+│  │  uploads encrypted blobs/manifests to folder or R2 sync  │   │
+│  └──────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────┘
          │                                        │
          │ GSA / Developer Services               │ pymobiledevice3
@@ -55,9 +61,11 @@ WebSocket /ws/install
       ├─ 4. Register device with Apple Developer Portal
       ├─ 5. Register app ID (sideload namespace: com.catapult.{team}.{bundle})
       ├─ 6. Delete stale profiles → downloadTeamProvisioningProfile
-      ├─ 7. Sign IPA (temp keychain, codesign, patch bundle ID)
-      ├─ 8. Install via tunnel RSD → installd reports 100%
-      └─ 9. Record install timestamp in ~/.catapult/state.json
+      ├─ 7. Copy IPA into durable content-addressed vault
+      ├─ 8. Sign IPA (temp keychain, codesign, patch bundle ID)
+      ├─ 9. Install via tunnel RSD → installd reports 100%
+      ├─ 10. Record install timestamp + IPA SHA in ~/.catapult/state.json
+      └─ 11. If configured, sync encrypted manifest/blob to folder or R2
 ```
 
 ## Module Map
@@ -73,6 +81,8 @@ WebSocket /ws/install
 | `signer.py` | IPA signing (keychain, codesign, bundle ID rewrite) |
 | `ipa.py` | IPA zip handling (extract, inspect, repack) |
 | `refresh.py` | Persistent state, 72h-window opportunistic auto-refresh loop |
+| `vault.py` | Durable local content-addressed IPA storage |
+| `sync.py` | Encrypted cross-device manifest and IPA blob sync |
 
 ## Key Data Structures
 
@@ -121,7 +131,10 @@ class AuthSession:
   "installs": [
     {
       "device_udid": "ECD3D531-...",
-      "ipa_path": "/tmp/catapult_uploads/app.ipa",
+      "ipa_path": "/Users/user/Library/Application Support/Catapult/IPAs/7d793....ipa",
+      "ipa_sha256": "7d793...",
+      "ipa_size": 123456789,
+      "original_filename": "app.ipa",
       "device_name": "Living Room",
       "last_installed": 1712345678.0
     }

@@ -195,6 +195,7 @@ struct AccountInfo: Codable, Sendable {
     let appLimit: Int
     let autoRefreshWindowHours: Int?
     let appleID: String
+    let sync: SyncInfo?
 
     enum CodingKeys: String, CodingKey {
         case team
@@ -203,6 +204,33 @@ struct AccountInfo: Codable, Sendable {
         case appLimit = "app_limit"
         case autoRefreshWindowHours = "auto_refresh_window_hours"
         case appleID = "apple_id"
+        case sync
+    }
+}
+
+struct SyncInfo: Codable, Hashable, Sendable {
+    let status: String?
+    let provider: String
+    let configured: Bool
+    let portableKey: Bool?
+    let folder: String?
+    let r2Endpoint: String?
+    let r2Bucket: String?
+    let uploadedIPAs: Int?
+    let downloadedIPAs: Int?
+    let installCount: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case status
+        case provider
+        case configured
+        case portableKey = "portable_key"
+        case folder
+        case r2Endpoint = "r2_endpoint"
+        case r2Bucket = "r2_bucket"
+        case uploadedIPAs = "uploaded_ipas"
+        case downloadedIPAs = "downloaded_ipas"
+        case installCount = "install_count"
     }
 }
 

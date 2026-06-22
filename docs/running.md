@@ -56,6 +56,33 @@ uv run python run.py --install-agent
 The server starts automatically at login and restarts if it crashes.
 Logs go to `~/.catapult/server.log`.
 
+## Cross-Device Sync
+
+Catapult can recover refreshable installs on another Mac only if the original
+IPA is available. Configure encrypted sync to store a remote IPA vault.
+
+### Sync Folder
+
+```bash
+export CATAPULT_SYNC_PROVIDER=folder
+export CATAPULT_SYNC_KEY="choose-a-long-shared-recovery-key"
+export CATAPULT_SYNC_FOLDER="$HOME/Library/Mobile Documents/com~apple~CloudDocs/Catapult"
+```
+
+### Cloudflare R2
+
+```bash
+export CATAPULT_SYNC_PROVIDER=r2
+export CATAPULT_SYNC_KEY="choose-a-long-shared-recovery-key"
+export CATAPULT_R2_ENDPOINT="https://<account-id>.r2.cloudflarestorage.com"
+export CATAPULT_R2_BUCKET="catapult"
+export CATAPULT_R2_ACCESS_KEY_ID="..."
+export CATAPULT_R2_SECRET_ACCESS_KEY="..."
+```
+
+Use the same `CATAPULT_SYNC_KEY` on every Mac that should decrypt and refresh
+the same IPA vault.
+
 ## First-Time Setup (Apple TV)
 
 1. **Enable Developer Mode** on the Apple TV:
@@ -100,9 +127,10 @@ iPhones with the `_apple-mobdev2` mDNS service are directly installable — no p
 |------|----------|
 | `~/.catapult/state.json` | Persisted Apple ID session + install records |
 | `~/.catapult/server.log` | Logs when running as LaunchAgent |
+| `~/Library/Application Support/Catapult/IPAs/` | Durable content-addressed IPA vault |
 | `~/.pymobiledevice3/remote_*.plist` | Apple TV pair records |
 | `~/Library/LaunchAgents/com.catapult.server.plist` | LaunchAgent config |
-| `/tmp/catapult_uploads/` | Uploaded IPA files |
+| `~/.catapult/uploads/` | Temporary upload staging before vault import |
 | `/tmp/catapult_sign_*/` | Temporary signing workdirs (cleaned up after signing) |
 | `/tmp/catapult_tunneld.log` | tunneld daemon log |
 

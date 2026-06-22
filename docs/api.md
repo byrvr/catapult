@@ -118,6 +118,50 @@ Submit 2FA verification code.
 
 ---
 
+## Sync Endpoints
+
+### `GET /api/sync/status`
+Return the configured cross-device sync provider and whether the current key is
+portable across Macs.
+
+**Response:**
+```json
+{
+  "provider": "r2",
+  "configured": true,
+  "portable_key": true,
+  "r2_endpoint": "https://example.r2.cloudflarestorage.com",
+  "r2_bucket": "catapult",
+  "apple_id": "user@example.com",
+  "team_id": "ABCDE12345"
+}
+```
+
+---
+
+### `POST /api/sync/run`
+Merge local install state with the encrypted remote manifest, upload missing IPA
+blobs, and download missing IPA blobs.
+
+If a provider is configured without a shared recovery key, the endpoint returns
+`needs_key`. If a second Mac uses the wrong key for an existing remote vault, it
+returns `wrong_key`.
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "provider": "folder",
+  "configured": true,
+  "portable_key": true,
+  "uploaded_ipas": 1,
+  "downloaded_ipas": 0,
+  "install_count": 1
+}
+```
+
+---
+
 ## File Endpoints
 
 ### `POST /api/upload`
@@ -126,14 +170,19 @@ Upload an IPA file (multipart form data, field name `file`).
 **Response:**
 ```json
 {
-  "path": "/tmp/catapult_uploads/app.ipa",
+  "path": "/Users/user/Library/Application Support/Catapult/IPAs/7d793....ipa",
   "info": {
     "bundle_id": "com.example.app",
     "bundle_name": "My App",
     "version": "2.1.0",
     "build": "42",
     "min_os": "16.0",
-    "executable": "MyApp"
+    "executable": "MyApp",
+    "vault": {
+      "sha256": "7d793...",
+      "path": "/Users/user/Library/Application Support/Catapult/IPAs/7d793....ipa",
+      "size": 123456789
+    }
   }
 }
 ```
@@ -149,7 +198,7 @@ Full install pipeline. Opens a WebSocket, sends one JSON message to start, recei
 ```json
 {
   "device_udid": "2F433D19-...",
-  "ipa_path": "/tmp/catapult_uploads/app.ipa"
+  "ipa_path": "/Users/user/Library/Application Support/Catapult/IPAs/7d793....ipa"
 }
 ```
 

@@ -21,6 +21,8 @@ from catapult.ipa import IpaProcessor
 from catapult.jobs import ActivityJob, job_manager
 from catapult.signer import Signer
 from catapult import refresh as _refresh
+from catapult import sync as _sync
+from catapult import vault as _vault
 
 logger = logging.getLogger(__name__)
 
@@ -58,11 +60,40 @@ DIAGNOSTICS_LOG_PATH = Path.home() / ".catapult" / "agent.log"
 @app.on_event("startup")
 async def _on_startup():
     # Restore saved session on startup
-    _refresh.restore_session(auth_client)
+    restored = _refresh.restore_session(auth_client)
+    if restored and auth_client.session:
+        asyncio.create_task(_sync_authenticated_state())
     # Start opportunistic auto-refresh background loop.
     def _components():
         return device_manager, auth_client, dev_services, signer, ipa_processor, job_manager
     asyncio.create_task(_refresh.run_refresh_loop(_components))
+
+
+async def _sync_authenticated_state() -> dict:
+    session = auth_client.session
+    if not session or not session.authenticated:
+        return {"status": "skipped", "message": "Not authenticated"}
+    team = await dev_services.get_team(session)
+    return await _sync_state_for_team(session.apple_id, team["teamId"])
+
+
+async def _sync_state_for_team(apple_id: str, team_id: str) -> dict:
+    try:
+        result = await _sync.sync_state(apple_id, team_id)
+        if result.get("status") == "ok":
+            logger.info(
+                "Sync complete via %s: %s installs, %s uploaded, %s downloaded",
+                result.get("provider"),
+                result.get("install_count"),
+                result.get("uploaded_ipas"),
+                result.get("downloaded_ipas"),
+            )
+        elif result.get("status") != "disabled":
+            logger.info("Sync state: %s", result)
+        return result
+    except Exception as e:
+        logger.exception("Cross-device sync failed")
+        return {"status": "error", "message": str(e)}
 
 
 def _asset_hash(filename: str) -> str:
@@ -313,6 +344,31 @@ async def auth_status():
     return {"authenticated": False}
 
 
+@app.get("/api/sync/status")
+async def sync_status():
+    """Return cross-device sync configuration and account context."""
+    session = auth_client.session
+    if not session or not session.authenticated:
+        return _sync.status()
+    try:
+        team = await dev_services.get_team(session)
+        return _sync.status(session.apple_id, team.get("teamId", ""))
+    except Exception:
+        logger.debug("Could not include team info in sync status", exc_info=True)
+        return _sync.status(session.apple_id, "")
+
+
+@app.post("/api/sync/run")
+async def run_sync():
+    """Manually merge local state with the configured remote sync provider."""
+    session = auth_client.session
+    if not session or not session.authenticated:
+        return JSONResponse({"status": "error", "message": "Not authenticated"}, status_code=401)
+    result = await _sync_authenticated_state()
+    status_code = 200 if result.get("status") in {"ok", "disabled", "skipped"} else 500
+    return JSONResponse(result, status_code=status_code)
+
+
 @app.post("/api/auth/logout")
 async def logout():
     """Clear session and remove Keychain tokens."""
@@ -364,6 +420,7 @@ async def _fetch_team(auth_result: dict) -> dict:
         team = await dev_services.get_team(session)
         logger.info("Team: %s (%s)", team.get("name"), team.get("teamId"))
         _refresh.save_session(session)
+        auth_result["sync"] = await _sync_state_for_team(session.apple_id, team.get("teamId", ""))
         return auth_result
     except Exception as e:
         logger.error("Team fetch failed: %s", e)
@@ -380,6 +437,7 @@ async def account_info():
     try:
         team = await dev_services.get_team(session)
         team_id = team["teamId"]
+        sync_result = await _sync_state_for_team(session.apple_id, team_id)
 
         app_ids = await dev_services._list_app_ids(session, team_id)
 
@@ -409,7 +467,8 @@ async def account_info():
         extension_metadata: dict[str, dict] = {}
         for r in install_records:
             path = r.get("ipa_path", "")
-            path_exists = bool(path and Path(path).exists())
+            resolved_path = _vault.resolve_ipa_path(r)
+            path_exists = resolved_path is not None
             display = r.get("app_name", "")
             original_id = r.get("source_bundle_id", "")
             sideload_id = ""
@@ -427,7 +486,7 @@ async def account_info():
             if not path_exists:
                 continue
             try:
-                info = await ipa_processor.inspect(path)
+                info = await ipa_processor.inspect(resolved_path)
                 original_id = info["bundle_id"]
                 sideload_id = dev_services.sideload_bundle_id(team_id, original_id)
                 recorded_id = r.get("bundle_id", "")
@@ -443,7 +502,7 @@ async def account_info():
                     if display:
                         app_display_names[bundle_key] = display
 
-                for extension in await ipa_processor.inspect_extensions(path):
+                for extension in await ipa_processor.inspect_extensions(resolved_path):
                     extension_id = extension.get("bundle_id", "")
                     if not extension_id:
                         continue
@@ -506,7 +565,7 @@ async def account_info():
 
             if rec:
                 ipa_path = rec.get("ipa_path", "")
-                saved_ipa_exists = bool(ipa_path and Path(ipa_path).exists())
+                saved_ipa_exists = _vault.resolve_ipa_path(rec) is not None
                 ts = rec.get("last_installed")
                 if ts:
                     installed_dt = datetime.fromtimestamp(ts).astimezone()
@@ -578,6 +637,7 @@ async def account_info():
             "app_limit": app_id_limit,
             "auto_refresh_window_hours": _refresh.REFRESH_WINDOW_HOURS,
             "apple_id": session.apple_id,
+            "sync": sync_result,
         }
     except Exception as e:
         logger.exception("Account info fetch failed")
@@ -596,7 +656,7 @@ async def _install_record_for_identifier(identifier: str, team_id: str) -> tuple
         reverse=True,
     )
     for rec in records:
-        ipa_path = rec.get("ipa_path", "")
+        resolved_ipa = _vault.resolve_ipa_path(rec)
         direct_ids = {
             rec.get("bundle_id", ""),
             rec.get("source_bundle_id", ""),
@@ -606,10 +666,10 @@ async def _install_record_for_identifier(identifier: str, team_id: str) -> tuple
         if identifier in direct_ids:
             return rec, False
 
-        if not ipa_path or not Path(ipa_path).exists():
+        if resolved_ipa is None:
             continue
         try:
-            ipa_info = await ipa_processor.inspect(ipa_path)
+            ipa_info = await ipa_processor.inspect(resolved_ipa)
             original_id = ipa_info["bundle_id"]
             sideload_id = dev_services.sideload_bundle_id(team_id, original_id)
             parent_ids = {
@@ -621,7 +681,7 @@ async def _install_record_for_identifier(identifier: str, team_id: str) -> tuple
             if identifier in parent_ids:
                 return rec, False
 
-            for extension in await ipa_processor.inspect_extensions(ipa_path):
+            for extension in await ipa_processor.inspect_extensions(resolved_ipa):
                 extension_id = extension.get("bundle_id", "")
                 if not extension_id:
                     continue
@@ -636,7 +696,7 @@ async def _install_record_for_identifier(identifier: str, team_id: str) -> tuple
                     if identifier == target_extension_id:
                         return rec, True
         except Exception:
-            logger.debug("Could not inspect saved install record %s", ipa_path, exc_info=True)
+            logger.debug("Could not inspect saved install record %s", rec.get("ipa_path", ""), exc_info=True)
             continue
     return None, False
 
@@ -685,7 +745,8 @@ async def reinstall_app(payload: dict):
             )
 
         ipa_path = rec.get("ipa_path", "")
-        if not ipa_path or not Path(ipa_path).exists():
+        resolved_ipa = _vault.resolve_ipa_path(rec)
+        if resolved_ipa is None:
             message = "The saved IPA file for this app is missing. Choose the IPA again, then install."
             job_manager.fail(job, message)
             return JSONResponse(
@@ -696,7 +757,7 @@ async def reinstall_app(payload: dict):
         job_manager.update(job, progress=5, message="Found saved IPA. Reinstalling...")
         result = await _install_app(
             rec["device_udid"],
-            ipa_path,
+            str(resolved_ipa),
             lambda step, progress, message: _job_progress(job, _noop_progress, step, progress, message),
             device_name_hint=rec.get("device_name", ""),
         )
@@ -762,6 +823,9 @@ async def upload_ipa(file: UploadFile):
         ipa_path = await ipa_processor.save_upload(file)
         job_manager.update(job, progress=80, message="Inspecting IPA...")
         info = await ipa_processor.inspect(ipa_path)
+        vaulted = _vault.store_ipa(ipa_path, original_filename=file.filename)
+        ipa_path = Path(vaulted["path"])
+        info["vault"] = vaulted
         logger.info("IPA upload ready: %s (%s)", info.get("bundle_name") or file.filename, info.get("bundle_id"))
         job_manager.complete(job, message="IPA upload ready.")
     except ValueError as e:
@@ -793,6 +857,9 @@ async def upload_ipa_raw(request: Request):
         ipa_path = await ipa_processor.save_raw_upload(request.stream())
         job_manager.update(job, progress=80, message="Inspecting IPA...")
         info = await ipa_processor.inspect(ipa_path)
+        vaulted = _vault.store_ipa(ipa_path, original_filename=filename)
+        ipa_path = Path(vaulted["path"])
+        info["vault"] = vaulted
         logger.info("IPA upload ready: %s (%s)", info.get("bundle_name") or filename, info.get("bundle_id"))
         job_manager.complete(job, message="IPA upload ready.")
     except ValueError as e:
@@ -858,6 +925,8 @@ async def _install_app(
     ipa_file = Path(ipa_path).expanduser()
     if not ipa_file.exists():
         raise RuntimeError(f"IPA file is missing: {ipa_file}. Choose the IPA again before installing.")
+    vaulted = _vault.store_ipa(ipa_file, original_filename=ipa_file.name)
+    ipa_file = Path(vaulted["path"])
 
     await progress("preflight", 0, "Checking IPA...")
     ipa_info = await ipa_processor.inspect(str(ipa_file))
@@ -998,7 +1067,11 @@ async def _install_app(
         bundle_id=target_bundle_id,
         source_bundle_id=original_bundle_id,
         app_name=ipa_info.get("bundle_name", ""),
+        ipa_sha256=vaulted["sha256"],
+        ipa_size=vaulted["size"],
+        original_filename=vaulted["original_filename"],
     )
+    await _sync_state_for_team(session.apple_id, team_id)
 
     return {
         "status": "ok",
@@ -1007,6 +1080,7 @@ async def _install_app(
         "bundle_id": target_bundle_id,
         "source_bundle_id": original_bundle_id,
         "app_name": ipa_info.get("bundle_name", ""),
+        "ipa_sha256": vaulted["sha256"],
     }
 
 
@@ -1064,8 +1138,8 @@ async def reinstall_ws(ws: WebSocket):
             await _send_error(ws, message, job=job)
             return
 
-        ipa_path = rec.get("ipa_path", "")
-        if not ipa_path or not Path(ipa_path).exists():
+        resolved_ipa = _vault.resolve_ipa_path(rec)
+        if resolved_ipa is None:
             message = "Saved IPA is missing. Choose the IPA again before reinstalling."
             job_manager.fail(job, message)
             await _send_error(ws, message, job=job)
@@ -1077,7 +1151,7 @@ async def reinstall_ws(ws: WebSocket):
 
         result = await _install_app(
             rec["device_udid"],
-            ipa_path,
+            str(resolved_ipa),
             lambda step, progress, message: _job_progress(
                 job,
                 lambda s, p, m: _send(ws, s, p, m, job_id=job.id),
