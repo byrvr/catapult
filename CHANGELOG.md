@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.2 - 2026-06-22
+
+- Simplified the DMG installer background to a minimal Finder-native layout without raster text or decorative panels.
+
 ## 0.3.1 - 2026-06-22
 
 - Reworked the DMG installer background with a cleaner light layout and better label contrast.

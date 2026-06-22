@@ -65,68 +65,31 @@ context.setShouldAntialias(true)
 
 let background = NSBezierPath(rect: rect(0, 0, CGFloat(width), CGFloat(height)))
 NSGradient(colors: [
-    color(0.96, 0.975, 1.0),
-    color(0.90, 0.93, 0.97),
-])?.draw(in: background, angle: -35)
+    color(0.985, 0.988, 0.993),
+    color(0.925, 0.945, 0.970),
+])?.draw(in: background, angle: -20)
 
-let topSheen = NSBezierPath(ovalIn: rect(180, 256, 400, 170))
+let subtleTop = NSBezierPath(rect: rect(0, 300, CGFloat(width), 130))
 NSGradient(colors: [
-    color(1, 1, 1, 0.78),
+    color(1, 1, 1, 0.68),
     color(1, 1, 1, 0.0),
-])?.draw(in: topSheen, relativeCenterPosition: NSPoint(x: 0, y: 0))
-
-let accent = NSBezierPath(ovalIn: rect(246, 126, 268, 140))
-NSGradient(colors: [
-    color(0.14, 0.47, 1.0, 0.14),
-    color(0.14, 0.47, 1.0, 0.0),
-])?.draw(in: accent, relativeCenterPosition: NSPoint(x: 0, y: 0))
-
-drawText(
-    "Install Catapult",
-    x: 40,
-    y: 344,
-    size: 24,
-    weight: .semibold,
-    color: color(0.10, 0.14, 0.20)
-)
-drawText(
-    "Drag Catapult into Applications.",
-    x: 40,
-    y: 314,
-    size: 13,
-    weight: .medium,
-    color: color(0.37, 0.43, 0.52)
-)
+])?.draw(in: subtleTop, angle: -90)
 
 let arrow = NSBezierPath()
-arrow.move(to: NSPoint(x: scaled(304), y: scaled(204)))
-arrow.line(to: NSPoint(x: scaled(456), y: scaled(204)))
-arrow.lineWidth = scaled(3)
+arrow.move(to: NSPoint(x: scaled(300), y: scaled(214)))
+arrow.line(to: NSPoint(x: scaled(460), y: scaled(214)))
+arrow.lineWidth = scaled(2)
 arrow.lineCapStyle = .round
-color(0.12, 0.45, 0.92, 0.54).setStroke()
+color(0.08, 0.36, 0.80, 0.22).setStroke()
 arrow.stroke()
 
 let arrowHead = NSBezierPath()
-arrowHead.move(to: NSPoint(x: scaled(474), y: scaled(204)))
-arrowHead.line(to: NSPoint(x: scaled(450), y: scaled(219)))
-arrowHead.line(to: NSPoint(x: scaled(450), y: scaled(189)))
+arrowHead.move(to: NSPoint(x: scaled(476), y: scaled(214)))
+arrowHead.line(to: NSPoint(x: scaled(454), y: scaled(228)))
+arrowHead.line(to: NSPoint(x: scaled(454), y: scaled(200)))
 arrowHead.close()
-color(0.12, 0.45, 0.92, 0.62).setFill()
+color(0.08, 0.36, 0.80, 0.28).setFill()
 arrowHead.fill()
-
-let leftPlate = NSBezierPath(roundedRect: rect(118, 118, 180, 172), xRadius: scaled(24), yRadius: scaled(24))
-color(1, 1, 1, 0.64).setFill()
-leftPlate.fill()
-color(0.34, 0.43, 0.56, 0.12).setStroke()
-leftPlate.lineWidth = scaled(1)
-leftPlate.stroke()
-
-let rightPlate = NSBezierPath(roundedRect: rect(462, 118, 180, 172), xRadius: scaled(24), yRadius: scaled(24))
-color(1, 1, 1, 0.64).setFill()
-rightPlate.fill()
-color(0.34, 0.43, 0.56, 0.12).setStroke()
-rightPlate.lineWidth = scaled(1)
-rightPlate.stroke()
 
 NSGraphicsContext.restoreGraphicsState()
 
