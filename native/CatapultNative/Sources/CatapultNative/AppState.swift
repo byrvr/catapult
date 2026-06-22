@@ -36,6 +36,7 @@ final class AppState: ObservableObject {
     @Published var pinPromptDevice: Device?
 
     let client = APIClient()
+    private var isStarting = false
     private var setupPollTask: Task<Void, Never>?
     private var cancellables: Set<AnyCancellable> = []
 
@@ -97,6 +98,12 @@ final class AppState: ObservableObject {
     }
 
     func start() async {
+        guard !isStarting else {
+            return
+        }
+        isStarting = true
+        defer { isStarting = false }
+
         await backend.start()
         guard backend.status == .ready else {
             return

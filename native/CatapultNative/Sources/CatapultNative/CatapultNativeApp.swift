@@ -17,9 +17,6 @@ struct CatapultNativeApp: App {
         MenuBarExtra {
             MenuBarStatusMenu()
                 .environmentObject(state)
-                .task {
-                    await state.start()
-                }
         } label: {
             MenuBarStatusLabel(state: state)
         }

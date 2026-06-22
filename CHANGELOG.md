@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.3 - 2026-06-22
+
+- Fixed native launch startup so the main window and menu bar extra do not both start the engine.
+- Changed packaged startup to prepare the backend environment before starting the LaunchAgent, avoiding a second foreground Python backend instance.
+
 ## 0.3.2 - 2026-06-22
 
 - Simplified the DMG installer background to a minimal Finder-native layout without raster text or decorative panels.
