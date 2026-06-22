@@ -19,6 +19,7 @@ Server startup
                            ├─ register_device
                            ├─ register_app_id
                            ├─ create_profile
+                           ├─ resolve IPA from durable vault
                            ├─ signer.sign
                            ├─ device.install
                            └─ record_install (update last_installed)
@@ -50,7 +51,10 @@ All state is stored in `~/.catapult/state.json`:
   "installs": [
     {
       "device_udid": "2F433D19-...",
-      "ipa_path": "/tmp/catapult_uploads/stremio_tvOS.ipa",
+      "ipa_path": "/Users/user/Library/Application Support/Catapult/IPAs/7d793....ipa",
+      "ipa_sha256": "7d793...",
+      "ipa_size": 123456789,
+      "original_filename": "stremio_tvOS.ipa",
       "device_name": "Living Room",
       "last_installed": 1712345678.0,
       "expires_at": 1712950478.0,
@@ -86,7 +90,10 @@ After every successful WebSocket install:
 refresh.record_install(device_udid, ipa_path, device_info["name"])
 ```
 
-This creates or updates a record. If the same device+IPA combination is installed again, `last_installed`, `expires_at`, and `refresh_after` are updated.
+This creates or updates a record. The IPA is copied into the durable
+content-addressed vault under `~/Library/Application Support/Catapult/IPAs/`
+and matched by SHA-256 on later installs. If the same device+IPA combination is
+installed again, `last_installed`, `expires_at`, and `refresh_after` are updated.
 
 ## Background Refresh Requirements
 
@@ -95,7 +102,8 @@ For auto-refresh to work while the server is running:
 1. **Apple ID session** must be valid (not expired)
 2. **tunneld** must be running (started during Setup)
 3. **Device** must be on the network and reachable
-4. **IPA file** must still exist at the recorded path
+4. **IPA file** must still exist in the durable local vault or be recoverable
+   from configured cross-device sync
 
 If any step fails, the error is logged and the loop continues. The install record is only updated on success.
 

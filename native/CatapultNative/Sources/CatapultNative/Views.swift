@@ -631,6 +631,10 @@ private struct AccountSheet: View {
                     AccountMetric(title: "Plan", value: info.team.isFree ? "Free" : info.team.type)
                 }
 
+                if let sync = info.sync {
+                    SyncSummaryRow(sync: sync)
+                }
+
                 Divider()
 
                 if info.apps.isEmpty {
@@ -690,7 +694,7 @@ private struct AccountSheet: View {
             }
         }
         .padding(24)
-        .frame(width: 620, height: 560)
+        .frame(width: 620, height: 600)
         .confirmationDialog("Delete App ID?", isPresented: Binding(
             get: { pendingDelete != nil },
             set: { if !$0 { pendingDelete = nil } }
@@ -703,6 +707,89 @@ private struct AccountSheet: View {
         } message: {
             Text("This removes the App ID and its provisioning profiles from your Apple developer account.")
         }
+    }
+}
+
+private struct SyncSummaryRow: View {
+    let sync: SyncInfo
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(color)
+                .frame(width: 22)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                Text(detail)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            Spacer()
+        }
+        .padding(10)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 9))
+    }
+
+    private var title: String {
+        if sync.status == "ok" {
+            return "Sync ready"
+        }
+        if sync.status == "needs_key" {
+            return "Sync needs recovery key"
+        }
+        if sync.status == "wrong_key" {
+            return "Sync key is wrong"
+        }
+        if sync.configured {
+            return "Sync configured"
+        }
+        return "Sync disabled"
+    }
+
+    private var detail: String {
+        if sync.status == "ok" {
+            let uploaded = sync.uploadedIPAs ?? 0
+            let downloaded = sync.downloadedIPAs ?? 0
+            let installs = sync.installCount ?? 0
+            let portability = sync.portableKey == true ? "portable key" : "local-only key"
+            return "\(providerName) · \(installs) installs · \(uploaded) uploaded · \(downloaded) downloaded · \(portability)"
+        }
+        if sync.status == "needs_key" {
+            return "\(providerName) configured · set CATAPULT_SYNC_KEY on each Mac before remote sync can run"
+        }
+        if sync.status == "wrong_key" {
+            return "\(providerName) configured · this Mac cannot decrypt the remote vault"
+        }
+        if sync.configured {
+            let portability = sync.portableKey == true ? "portable across Macs" : "needs shared CATAPULT_SYNC_KEY for another Mac"
+            return "\(providerName) configured · \(portability)"
+        }
+        return "Set CATAPULT_SYNC_PROVIDER and CATAPULT_SYNC_KEY to recover IPAs on another Mac."
+    }
+
+    private var providerName: String {
+        switch sync.provider {
+        case "r2": return "Cloudflare R2"
+        case "folder": return "Sync folder"
+        default: return sync.provider.isEmpty ? "No provider" : sync.provider
+        }
+    }
+
+    private var icon: String {
+        sync.configured ? "externaldrive.connected.to.line.below" : "externaldrive.badge.xmark"
+    }
+
+    private var color: Color {
+        if sync.status == "ok" {
+            return .green
+        }
+        if sync.status == "wrong_key" {
+            return .red
+        }
+        return sync.configured ? .orange : .secondary
     }
 }
 

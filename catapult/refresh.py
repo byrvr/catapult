@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from catapult.errors import normalize_error
+from catapult import vault
 
 logger = logging.getLogger(__name__)
 
@@ -82,19 +83,33 @@ def record_install(
     bundle_id: str = "",
     source_bundle_id: str = "",
     app_name: str = "",
+    ipa_sha256: str = "",
+    ipa_size: int | None = None,
+    original_filename: str = "",
 ):
     state = load_state()
     installs = state.get("installs", [])
     installed_at = _now_ts()
+    if ipa_path:
+        try:
+            vaulted = vault.store_ipa(ipa_path, original_filename=original_filename)
+            ipa_path = vaulted["path"]
+            ipa_sha256 = ipa_sha256 or vaulted["sha256"]
+            ipa_size = ipa_size or vaulted["size"]
+            original_filename = original_filename or vaulted["original_filename"]
+        except Exception:
+            logger.debug("Could not import IPA into durable vault: %s", ipa_path, exc_info=True)
+
     # Update existing or add new. A user can choose the same IPA from a new path
     # later; keep one refresh record per app/device so the durable path replaces
     # older temporary upload paths.
     for rec in installs:
         same_device = rec.get("device_udid") == device_udid
         same_file = same_device and rec.get("ipa_path") == ipa_path
+        same_hash = same_device and ipa_sha256 and rec.get("ipa_sha256") == ipa_sha256
         same_signed_bundle = same_device and bundle_id and rec.get("bundle_id") == bundle_id
         same_source_bundle = same_device and source_bundle_id and rec.get("source_bundle_id") == source_bundle_id
-        if same_file or same_signed_bundle or same_source_bundle:
+        if same_file or same_hash or same_signed_bundle or same_source_bundle:
             rec["ipa_path"] = ipa_path
             _stamp_refresh_schedule(rec, installed_at)
             rec["device_name"] = device_name or rec.get("device_name", "")
@@ -104,6 +119,12 @@ def record_install(
                 rec["source_bundle_id"] = source_bundle_id
             if app_name:
                 rec["app_name"] = app_name
+            if ipa_sha256:
+                rec["ipa_sha256"] = ipa_sha256
+            if ipa_size is not None:
+                rec["ipa_size"] = ipa_size
+            if original_filename:
+                rec["original_filename"] = original_filename
             rec["fail_count"] = 0
             save_state(state)
             return
@@ -114,6 +135,9 @@ def record_install(
         "bundle_id": bundle_id,
         "source_bundle_id": source_bundle_id,
         "app_name": app_name,
+        "ipa_sha256": ipa_sha256,
+        "ipa_size": ipa_size,
+        "original_filename": original_filename,
         "last_installed": installed_at,
         "expires_at": _expiry_ts(installed_at),
         "refresh_after": _refresh_after_ts(installed_at),
@@ -324,9 +348,10 @@ async def _refresh_install(rec, device_manager, auth_client, dev_services, signe
     ipa_path = rec["ipa_path"]
     logger.info("Refreshing %s on %s", ipa_path, device_udid)
     try:
-        ipa_file = Path(ipa_path).expanduser()
-        if not ipa_file.exists():
-            raise RuntimeError(f"IPA file is missing: {ipa_file}. Choose the IPA again before refreshing.")
+        ipa_file = vault.resolve_ipa_path(rec)
+        if ipa_file is None:
+            missing = ipa_path or rec.get("ipa_sha256", "")
+            raise RuntimeError(f"IPA file is missing: {missing}. Choose the IPA again before refreshing.")
 
         session = auth_client.session
         team = await dev_services.get_team(session)
@@ -408,6 +433,9 @@ async def _refresh_install(rec, device_manager, auth_client, dev_services, signe
             bundle_id=bundle_id,
             source_bundle_id=ipa_info.get("bundle_id", ""),
             app_name=ipa_info.get("bundle_name", ""),
+            ipa_sha256=rec.get("ipa_sha256", ""),
+            ipa_size=rec.get("ipa_size"),
+            original_filename=rec.get("original_filename", ""),
         )
         logger.info("Auto-refresh complete: %s", ipa_path)
         return {"status": "ok", "message": "Auto-refresh complete."}
