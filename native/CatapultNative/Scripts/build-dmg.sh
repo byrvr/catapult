@@ -7,7 +7,7 @@ REPO_ROOT="$(cd "${PACKAGE_DIR}/../.." && pwd)"
 WORKSPACE_ROOT="$(cd "${REPO_ROOT}/.." && pwd)"
 
 APP_NAME="Catapult"
-VERSION="0.3.4"
+VERSION="0.3.5"
 VOLUME_NAME="${APP_NAME}"
 OUTPUT_DIR="${WORKSPACE_ROOT}/outputs"
 APP_SOURCE="${REPO_ROOT}/dist/${APP_NAME}.app"

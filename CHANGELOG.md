@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.5 - 2026-06-23
+
+- Fixed iPhone transport labels so Wi-Fi-paired usbmux devices show as Wi-Fi instead of USB.
+- Stopped showing internal `usb:<udid>` endpoints in the native device row.
+
 ## 0.3.4 - 2026-06-23
 
 - Fixed duplicate main windows by using a single native window scene and removing automatic menu bar window opening on launch.
