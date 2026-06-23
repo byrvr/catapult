@@ -6,7 +6,7 @@ struct CatapultNativeApp: App {
     @StateObject private var state = AppState()
 
     var body: some Scene {
-        WindowGroup("Catapult", id: "main") {
+        Window("Catapult", id: "main") {
             ContentView()
                 .environmentObject(state)
                 .frame(minWidth: 860, minHeight: 620)
