@@ -308,7 +308,7 @@ private struct DeviceWorkflowRow: View {
         guard let device = state.selectedDevice else {
             return "Choose a ready device from the list below."
         }
-        return "\(device.platformLabel) · \(device.host)"
+        return device.displayDetail
     }
 }
 
@@ -461,7 +461,7 @@ private struct DeviceChoiceRow: View {
                 Text(device.name)
                     .font(.callout.weight(.medium))
                     .lineLimit(1)
-                Text("\(device.platformLabel) · \(device.host)")
+                Text(device.displayDetail)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)

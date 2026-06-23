@@ -38,8 +38,11 @@ struct Device: Codable, Hashable, Identifiable, Sendable {
         if service.contains("mobdev2") {
             return "Direct install"
         }
-        if service == "usbmux" || connection == "usb" {
+        if isPhysicalUSB {
             return "USB install"
+        }
+        if service == "usbmux" {
+            return "Wi-Fi install"
         }
         if service.contains("airplay") {
             return "AirPlay only"
@@ -80,8 +83,11 @@ struct Device: Codable, Hashable, Identifiable, Sendable {
 
     var statusLabel: String {
         if canInstallNow {
-            if service == "usbmux" || connection == "usb" {
+            if isPhysicalUSB {
                 return "Ready · USB"
+            }
+            if service == "usbmux" {
+                return "Ready · Wi-Fi"
             }
             return service.contains("mobdev2") ? "Ready · Direct" : "Ready"
         }
@@ -92,6 +98,21 @@ struct Device: Codable, Hashable, Identifiable, Sendable {
             return "Paired"
         }
         return serviceLabel
+    }
+
+    var displayDetail: String {
+        "\(platformLabel) · \(displayEndpoint)"
+    }
+
+    private var displayEndpoint: String {
+        if host.hasPrefix("usb:") {
+            return isPhysicalUSB ? "USB" : "Wi-Fi"
+        }
+        return host
+    }
+
+    private var isPhysicalUSB: Bool {
+        connection?.lowercased() == "usb"
     }
 
     private var isAppleTVSetupCandidate: Bool {

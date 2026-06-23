@@ -40,6 +40,17 @@ TUNNELD_DAEMON_PLIST = Path("/Library/LaunchDaemons") / f"{TUNNELD_DAEMON_LABEL}
 TUNNELD_LOG_PATH = "/tmp/catapult_tunneld.log"
 
 
+def _normalize_usbmux_connection(connection_type: object) -> str:
+    raw = str(connection_type or "").strip().lower()
+    if "usb" in raw:
+        return "usb"
+    if any(token in raw for token in ("network", "wifi", "wi-fi", "tcp")):
+        return "network"
+    # usbmuxd can expose Wi-Fi-paired iOS devices. Avoid calling an unknown
+    # transport physical USB unless the mux record explicitly says USB.
+    return "network"
+
+
 def scan_network(timeout: float = 6.0) -> list[dict]:
     zc = Zeroconf()
     listener = _Listener()
@@ -214,18 +225,18 @@ class DeviceManager:
         return devices
 
     async def _scan_usb_devices(self) -> list[dict]:
-        """Discover trusted iPhone/iPad devices connected through usbmuxd."""
+        """Discover trusted iPhone/iPad devices exposed through usbmuxd."""
         try:
             from pymobiledevice3.lockdown import create_using_usbmux
             from pymobiledevice3.usbmux import list_devices
         except Exception as e:
-            logger.debug("USB discovery unavailable: %s", e)
+            logger.debug("usbmux discovery unavailable: %s", e)
             return []
 
         try:
             mux_devices = await list_devices()
         except Exception as e:
-            logger.info("USB discovery failed: %s", e)
+            logger.info("usbmux discovery failed: %s", e)
             return []
 
         devices: list[dict] = []
@@ -234,9 +245,11 @@ class DeviceManager:
             if not udid:
                 continue
 
-            connection_type = str(getattr(mux_device, "connection_type", "") or "USB")
+            connection_type_raw = getattr(mux_device, "connection_type", "")
+            connection = _normalize_usbmux_connection(connection_type_raw)
+            connection_type = str(connection_type_raw or connection).strip()
             info = {
-                "DeviceName": "iPhone" if connection_type.upper() == "USB" else "Apple Device",
+                "DeviceName": "iPhone",
                 "ProductType": "",
                 "ProductVersion": "",
                 "DeviceClass": "iPhone",
@@ -254,7 +267,7 @@ class DeviceManager:
                         info[key] = str(value)
                 trusted = True
             except Exception as e:
-                logger.info("USB device %s is visible but not ready: %s", udid, e)
+                logger.info("usbmux device %s is visible but not ready: %s", udid, e)
 
             device_class = "ios"
             if str(info.get("DeviceClass", "")).lower() == "ipad" or str(info.get("ProductType", "")).startswith("iPad"):
@@ -268,7 +281,7 @@ class DeviceManager:
                 "port": 62078,
                 "service": "usbmux",
                 "device_class": device_class,
-                "connection": connection_type.lower(),
+                "connection": connection,
                 "installable": trusted,
                 "needs_setup": not trusted,
                 "paired": trusted,

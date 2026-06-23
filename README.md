@@ -43,7 +43,7 @@ Build outputs are written next to the repository:
 ```text
 ../outputs/Catapult.app
 ../outputs/Catapult.app.zip
-../outputs/Catapult-0.3.4.dmg
+../outputs/Catapult-0.3.5.dmg
 ```
 
 To run the native app directly during development:

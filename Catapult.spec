@@ -102,8 +102,8 @@ app = BUNDLE(
     info_plist={
         'CFBundleName': 'Catapult',
         'CFBundleDisplayName': 'Catapult',
-        'CFBundleVersion': '0.3.4',
-        'CFBundleShortVersionString': '0.3.4',
+        'CFBundleVersion': '0.3.5',
+        'CFBundleShortVersionString': '0.3.5',
         'NSHighResolutionCapable': True,
         'LSMinimumSystemVersion': '13.0',
         'NSLocalNetworkUsageDescription': 'Catapult needs local network access to discover and communicate with iOS/tvOS devices.',
