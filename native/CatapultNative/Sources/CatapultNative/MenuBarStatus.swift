@@ -3,8 +3,6 @@ import AppKit
 
 struct MenuBarStatusLabel: View {
     @ObservedObject var state: AppState
-    @Environment(\.openWindow) private var openWindow
-    @State private var didOpenMainWindow = false
 
     var body: some View {
         Label {
@@ -12,14 +10,6 @@ struct MenuBarStatusLabel: View {
         } icon: {
             CatapultMenuBarIcon()
         }
-        .task {
-            guard !didOpenMainWindow else {
-                return
-                }
-                didOpenMainWindow = true
-                openWindow(id: "main")
-                NSApp.activate(ignoringOtherApps: true)
-            }
     }
 }
 

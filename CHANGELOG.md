@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.4 - 2026-06-23
+
+- Fixed duplicate main windows by using a single native window scene and removing automatic menu bar window opening on launch.
+
 ## 0.3.3 - 2026-06-22
 
 - Fixed native launch startup so the main window and menu bar extra do not both start the engine.
