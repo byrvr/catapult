@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import secrets
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote, urlparse
@@ -30,6 +31,43 @@ logger = logging.getLogger(__name__)
 
 SYNC_KEYCHAIN_SERVICE_ACCOUNT_PREFIX = "sync-key"
 SYNC_MANIFEST_VERSION = 1
+CONFIG_ENV_PATH = Path.home() / ".catapult" / "config.env"
+
+
+def _parse_config_env() -> dict[str, str]:
+    try:
+        lines = CONFIG_ENV_PATH.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return {}
+    except OSError as e:
+        logger.warning("Could not read sync config %s: %s", CONFIG_ENV_PATH, e)
+        return {}
+
+    values: dict[str, str] = {}
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        key = key.strip()
+        if not key.startswith("CATAPULT_"):
+            continue
+        value = value.strip()
+        try:
+            parsed = shlex.split(value)
+            if len(parsed) == 1:
+                value = parsed[0]
+        except ValueError:
+            value = value.strip("\"'")
+        values[key] = value
+    return values
+
+
+def _sync_setting(name: str, default: str = "") -> str:
+    env_value = os.environ.get(name)
+    if env_value:
+        return env_value.strip()
+    return _parse_config_env().get(name, default).strip()
 
 
 @dataclass(frozen=True)
@@ -43,15 +81,15 @@ class SyncConfig:
 
     @classmethod
     def from_env(cls) -> "SyncConfig":
-        provider = os.environ.get("CATAPULT_SYNC_PROVIDER", "disabled").strip().lower()
-        folder = os.environ.get("CATAPULT_SYNC_FOLDER", "").strip()
+        provider = _sync_setting("CATAPULT_SYNC_PROVIDER", "disabled").lower()
+        folder = os.path.expandvars(_sync_setting("CATAPULT_SYNC_FOLDER"))
         return cls(
             provider=provider or "disabled",
             folder=Path(folder).expanduser() if folder else None,
-            r2_endpoint=os.environ.get("CATAPULT_R2_ENDPOINT", "").strip().rstrip("/"),
-            r2_bucket=os.environ.get("CATAPULT_R2_BUCKET", "").strip(),
-            r2_access_key_id=os.environ.get("CATAPULT_R2_ACCESS_KEY_ID", "").strip(),
-            r2_secret_access_key=os.environ.get("CATAPULT_R2_SECRET_ACCESS_KEY", "").strip(),
+            r2_endpoint=_sync_setting("CATAPULT_R2_ENDPOINT").rstrip("/"),
+            r2_bucket=_sync_setting("CATAPULT_R2_BUCKET"),
+            r2_access_key_id=_sync_setting("CATAPULT_R2_ACCESS_KEY_ID"),
+            r2_secret_access_key=_sync_setting("CATAPULT_R2_SECRET_ACCESS_KEY"),
         )
 
     @property
@@ -95,7 +133,7 @@ def get_sync_key(apple_id: str, team_id: str) -> tuple[bytes, bool]:
     portable=True means the key came from CATAPULT_SYNC_KEY and can be reused on
     another Mac by setting the same value. Keychain-generated keys are local.
     """
-    env_key = os.environ.get("CATAPULT_SYNC_KEY", "")
+    env_key = _sync_setting("CATAPULT_SYNC_KEY")
     if env_key:
         return _normalize_key(env_key), True
 
@@ -328,7 +366,7 @@ async def sync_state(apple_id: str, team_id: str) -> dict:
             "provider": config.provider,
             "configured": config.configured,
         }
-    if not os.environ.get("CATAPULT_SYNC_KEY", ""):
+    if not _sync_setting("CATAPULT_SYNC_KEY"):
         return {
             "status": "needs_key",
             "provider": config.provider,
@@ -406,7 +444,7 @@ async def sync_state(apple_id: str, team_id: str) -> dict:
 
 def status(apple_id: str = "", team_id: str = "") -> dict:
     config = SyncConfig.from_env()
-    portable_key = bool(os.environ.get("CATAPULT_SYNC_KEY", ""))
+    portable_key = bool(_sync_setting("CATAPULT_SYNC_KEY"))
     return {
         "provider": config.provider,
         "configured": config.configured,

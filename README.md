@@ -43,7 +43,7 @@ Build outputs are written next to the repository:
 ```text
 ../outputs/Catapult.app
 ../outputs/Catapult.app.zip
-../outputs/Catapult-0.3.5.dmg
+../outputs/Catapult-0.3.6.dmg
 ```
 
 To run the native app directly during development:
@@ -60,6 +60,8 @@ The Swift app supervises a local FastAPI backend at `127.0.0.1:9450`. The backen
 Installed apps are recorded in `~/.catapult/state.json`. Apple auth secrets are stored in the macOS Keychain where possible; the app uses saved session data so you do not need to sign in every time.
 
 For cross-device recovery, Catapult can store encrypted IPA blobs and an encrypted refresh manifest in a sync folder or Cloudflare R2-compatible bucket. The second Mac still needs the same Apple ID and the same `CATAPULT_SYNC_KEY` to decrypt the vault.
+
+Finder-launched builds also read persistent sync settings from `~/.catapult/config.env`, so Catapult can keep its sync configuration after normal relaunches.
 
 ## Docs
 

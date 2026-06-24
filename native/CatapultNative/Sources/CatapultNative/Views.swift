@@ -767,7 +767,7 @@ private struct SyncSummaryRow: View {
             let portability = sync.portableKey == true ? "portable across Macs" : "needs shared CATAPULT_SYNC_KEY for another Mac"
             return "\(providerName) configured · \(portability)"
         }
-        return "Set CATAPULT_SYNC_PROVIDER and CATAPULT_SYNC_KEY to recover IPAs on another Mac."
+        return "Set sync settings in ~/.catapult/config.env to recover IPAs on another Mac."
     }
 
     private var providerName: String {
