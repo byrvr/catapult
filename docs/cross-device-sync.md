@@ -90,6 +90,15 @@ export CATAPULT_SYNC_KEY=<shared recovery key>
 export CATAPULT_SYNC_FOLDER="$HOME/Library/Mobile Documents/com~apple~CloudDocs/Catapult"
 ```
 
+When Catapult is launched from Finder, shell exports are usually not inherited.
+Use `~/.catapult/config.env` for persistent local configuration:
+
+```text
+CATAPULT_SYNC_PROVIDER=folder
+CATAPULT_SYNC_KEY=<shared recovery key>
+CATAPULT_SYNC_FOLDER=/Users/you/Library/Mobile Documents/com~apple~CloudDocs/Catapult
+```
+
 ### Supabase
 
 Supabase is still useful for a future hosted product because it provides auth,

@@ -69,6 +69,15 @@ export CATAPULT_SYNC_KEY="choose-a-long-shared-recovery-key"
 export CATAPULT_SYNC_FOLDER="$HOME/Library/Mobile Documents/com~apple~CloudDocs/Catapult"
 ```
 
+For Finder-launched packaged apps, put the same values in
+`~/.catapult/config.env` so the background engine can read them after relaunch:
+
+```text
+CATAPULT_SYNC_PROVIDER=folder
+CATAPULT_SYNC_KEY=choose-a-long-shared-recovery-key
+CATAPULT_SYNC_FOLDER=/Users/you/Library/Mobile Documents/com~apple~CloudDocs/Catapult
+```
+
 ### Cloudflare R2
 
 ```bash

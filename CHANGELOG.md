@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.6 - 2026-06-24
+
+- Added persistent `~/.catapult/config.env` support for sync settings in Finder-launched packaged apps.
+
 ## 0.3.5 - 2026-06-23
 
 - Fixed iPhone transport labels so Wi-Fi-paired usbmux devices show as Wi-Fi instead of USB.
