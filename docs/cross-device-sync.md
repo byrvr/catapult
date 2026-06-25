@@ -99,6 +99,23 @@ CATAPULT_SYNC_KEY=<shared recovery key>
 CATAPULT_SYNC_FOLDER=/Users/you/Library/Mobile Documents/com~apple~CloudDocs/Catapult
 ```
 
+### Personal Encrypted DMG
+
+A trusted personal handoff DMG can contain:
+
+- `Catapult.app`
+- `Configure Catapult Sync.command`
+- a hidden encrypted R2 config blob
+
+The R2 access keys are encrypted with `CATAPULT_SYNC_KEY` using OpenSSL
+AES-256-CBC with PBKDF2. The sync key itself is not stored in the DMG. On the
+other Mac, copy the app to Applications, run the setup command from the mounted
+DMG, paste the same `CATAPULT_SYNC_KEY`, then open Catapult and sign into the
+same Apple ID/team.
+
+This is for personal/private distribution only. Public release DMGs must not
+include user-specific R2 credentials, encrypted or otherwise.
+
 ### Supabase
 
 Supabase is still useful for a future hosted product because it provides auth,

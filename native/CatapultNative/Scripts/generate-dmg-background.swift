@@ -15,7 +15,7 @@ try fileManager.createDirectory(
 )
 
 let width = 760
-let height = 430
+let height = 500
 let renderScale: CGFloat = 1
 let canvas = NSSize(width: CGFloat(width), height: CGFloat(height))
 
@@ -69,7 +69,7 @@ NSGradient(colors: [
     color(0.925, 0.945, 0.970),
 ])?.draw(in: background, angle: -20)
 
-let subtleTop = NSBezierPath(rect: rect(0, 300, CGFloat(width), 130))
+let subtleTop = NSBezierPath(rect: rect(0, 350, CGFloat(width), 150))
 NSGradient(colors: [
     color(1, 1, 1, 0.68),
     color(1, 1, 1, 0.0),

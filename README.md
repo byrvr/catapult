@@ -2,6 +2,11 @@
 
 Native macOS sideloading workspace for iOS and tvOS devices.
 
+[![macOS 14+](https://img.shields.io/badge/macOS-14%2B-0A84FF)](https://www.apple.com/macos/)
+[![SwiftUI](https://img.shields.io/badge/UI-SwiftUI-F05138)](native/CatapultNative)
+[![Python](https://img.shields.io/badge/backend-Python-3776AB)](catapult)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
 Catapult installs `.ipa` files onto nearby iPhone, iPad, and Apple TV devices by wrapping Apple Developer provisioning, IPA signing, device discovery, pairing, tunneling, and installation in one Mac app. It is built for free Apple Developer accounts and refreshes installed apps before the 7-day signing window expires.
 
 ## Highlights
@@ -12,15 +17,18 @@ Catapult installs `.ipa` files onto nearby iPhone, iPad, and Apple TV devices by
 - Apple TV pairing and tunnel setup through `pymobiledevice3`
 - IPA upload, signing progress, install progress, and actionable failure messages
 - Developer account view with App ID usage, expiry timestamps, delete, and reinstall controls
+- Expired/history installs remain visible and reinstallable when Catapult still has the saved IPA
 - Opportunistic auto-refresh starting 72 hours before app expiry
 - Optional encrypted cross-device IPA vault sync
 - Styled macOS DMG release package
 
 ## Download
 
-Download the latest `Catapult-*.dmg` from [GitHub Releases](https://github.com/byrvr/catapult/releases).
+Download the latest public `Catapult-*.dmg` from [GitHub Releases](https://github.com/byrvr/catapult/releases).
 
 The current release is ad-hoc signed for local use. If macOS Gatekeeper blocks the first launch, open it from Finder with Control-click -> Open.
+
+Public releases do not include Apple ID credentials, R2 keys, sync keys, IPA files, signing identities, or device-specific configuration.
 
 ## Requirements
 
@@ -35,6 +43,7 @@ The current release is ad-hoc signed for local use. If macOS Gatekeeper blocks t
 ```bash
 git clone https://github.com/byrvr/catapult.git
 cd catapult
+uv sync
 ./native/CatapultNative/Scripts/build-dmg.sh
 ```
 
@@ -43,7 +52,7 @@ Build outputs are written next to the repository:
 ```text
 ../outputs/Catapult.app
 ../outputs/Catapult.app.zip
-../outputs/Catapult-0.3.6.dmg
+../outputs/Catapult-0.3.7.dmg
 ```
 
 To run the native app directly during development:
@@ -63,6 +72,15 @@ For cross-device recovery, Catapult can store encrypted IPA blobs and an encrypt
 
 Finder-launched builds also read persistent sync settings from `~/.catapult/config.env`, so Catapult can keep its sync configuration after normal relaunches.
 
+## Safety Model
+
+Catapult is local-first:
+
+- Apple ID session material is kept on the Mac and stored in Keychain where possible.
+- Signing certificates, provisioning profiles, and plaintext IPAs are not uploaded by default.
+- Optional sync encrypts IPA blobs and manifests before writing to a sync folder or Cloudflare R2.
+- Public release artifacts must never include user-specific sync credentials.
+
 ## Docs
 
 - [Running Catapult](docs/running.md)
@@ -72,6 +90,8 @@ Finder-launched builds also read persistent sync settings from `~/.catapult/conf
 - [Device pairing and tunnel notes](docs/device-pairing-tunnel.md)
 - [REST and WebSocket API](docs/api.md)
 - [Architecture overview](docs/architecture.md)
+- [Contributing](CONTRIBUTING.md)
+- [Security policy](SECURITY.md)
 
 ## Notes
 
