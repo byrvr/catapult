@@ -465,6 +465,108 @@ async def account_info():
         install_by_bundle: dict[str, dict] = {}  # sideload_id -> best record
         app_display_names: dict[str, str] = {}   # sideload_id -> real app name
         extension_metadata: dict[str, dict] = {}
+
+        def _record_score(record: dict) -> tuple[float, int, int]:
+            return (
+                float(record.get("last_installed") or 0),
+                1 if record.get("ipa_sha256") else 0,
+                1 if _vault.resolve_ipa_path(record) is not None else 0,
+            )
+
+        def _remember_install(bundle_key: str, record: dict):
+            if not bundle_key:
+                return
+            existing = install_by_bundle.get(bundle_key)
+            if not existing or _record_score(record) > _record_score(existing):
+                install_by_bundle[bundle_key] = record
+
+        def _record_timing(record: dict | None) -> dict:
+            installed_str = None
+            days_left = None
+            exp_str = None
+            expires_at = None
+            time_left = None
+            auto_refresh_after = None
+            auto_refresh_eligible = False
+            is_expired = False
+
+            if record:
+                ts = record.get("last_installed")
+                if ts:
+                    installed_dt = datetime.fromtimestamp(ts).astimezone()
+                    # Free accounts: profile expires 7 days after signing
+                    expiry_dt = installed_dt + timedelta(days=7)
+                    delta = expiry_dt - now
+                    days_left = max(0, delta.days)
+                    exp_str = expiry_dt.strftime("%b %d, %Y %H:%M")
+                    expires_at = expiry_dt.isoformat()
+                    time_left = _format_time_left(delta)
+                    installed_str = installed_dt.strftime("%b %d, %Y %H:%M")
+                    is_expired = delta.total_seconds() <= 0
+                    refresh_after_ts = record.get("refresh_after") or (ts + _refresh.REFRESH_AFTER_SECONDS)
+                    auto_refresh_dt = datetime.fromtimestamp(refresh_after_ts).astimezone()
+                    auto_refresh_after = auto_refresh_dt.isoformat()
+                    auto_refresh_eligible = refresh_after_ts <= now_ts
+
+            return {
+                "installed": installed_str,
+                "days_left": days_left,
+                "expiry": exp_str,
+                "expires_at": expires_at,
+                "time_left": time_left,
+                "auto_refresh_after": auto_refresh_after,
+                "auto_refresh_eligible": auto_refresh_eligible,
+                "is_expired": is_expired,
+            }
+
+        def _install_row(
+            *,
+            name: str,
+            identifier: str,
+            app_id_id: str = "",
+            is_catapult: bool = False,
+            is_extension: bool = False,
+            extension_info: dict | None = None,
+            rec: dict | None = None,
+            account_slot_exists: bool = True,
+        ) -> dict:
+            timing = _record_timing(rec)
+            saved_ipa_exists = _vault.resolve_ipa_path(rec) is not None if rec else False
+            reinstall_blocked_reason = None
+            if is_extension:
+                reinstall_blocked_reason = "Reinstall the parent app to refresh this extension."
+            elif not rec:
+                reinstall_blocked_reason = "No saved install was found. Install from an IPA first."
+            elif not saved_ipa_exists:
+                reinstall_blocked_reason = "Saved IPA is missing. Choose the IPA again before reinstalling."
+
+            row_id = app_id_id or ":".join([
+                "history",
+                identifier,
+                rec.get("device_udid", "") if rec else "",
+                str(rec.get("last_installed", "")) if rec else "",
+            ])
+
+            return {
+                "row_id": row_id,
+                "name": name,
+                "identifier": identifier,
+                "app_id_id": app_id_id,
+                "is_catapult": is_catapult,
+                "is_extension": is_extension,
+                "parent_identifier": extension_info.get("parent_identifier") if extension_info else None,
+                "parent_name": extension_info.get("parent_name") if extension_info else None,
+                "extension_name": extension_info.get("extension_name") if extension_info else None,
+                **timing,
+                "installed_device": rec.get("device_name", "") if rec else None,
+                "saved_device_name": rec.get("device_name", "") if rec else None,
+                "saved_ipa_exists": saved_ipa_exists,
+                "reinstall_blocked_reason": reinstall_blocked_reason,
+                "can_reinstall": bool(rec and saved_ipa_exists and not is_extension),
+                "account_slot_exists": account_slot_exists,
+                "history_only": not account_slot_exists,
+            }
+
         for r in install_records:
             path = r.get("ipa_path", "")
             resolved_path = _vault.resolve_ipa_path(r)
@@ -476,11 +578,7 @@ async def account_info():
             if original_id:
                 sideload_id = dev_services.sideload_bundle_id(team_id, original_id)
             for bundle_key in {original_id, sideload_id, recorded_id}:
-                if not bundle_key:
-                    continue
-                existing = install_by_bundle.get(bundle_key)
-                if not existing or r.get("last_installed", 0) > existing.get("last_installed", 0):
-                    install_by_bundle[bundle_key] = r
+                _remember_install(bundle_key, r)
                 if display:
                     app_display_names[bundle_key] = display
             if not path_exists:
@@ -492,11 +590,7 @@ async def account_info():
                 recorded_id = r.get("bundle_id", "")
                 # Keep the most recent install record per bundle ID.
                 for bundle_key in {original_id, sideload_id, recorded_id}:
-                    if not bundle_key:
-                        continue
-                    existing = install_by_bundle.get(bundle_key)
-                    if not existing or r.get("last_installed", 0) > existing.get("last_installed", 0):
-                        install_by_bundle[bundle_key] = r
+                    _remember_install(bundle_key, r)
                     # Use the IPA's display name (e.g. "Stremio") not Apple's generic name
                     display = info.get("bundle_name") or info.get("bundle_id", "")
                     if display:
@@ -528,8 +622,11 @@ async def account_info():
 
         catapult_prefix = f"com.catapult.{team_id}."
         apps = []
+        live_identifiers: set[str] = set()
         for a in app_ids:
             identifier = a.get("identifier", "")
+            if identifier:
+                live_identifiers.add(identifier)
             apple_name = a.get("name", "")
             app_id_id = a.get("appIdId", "")
             is_catapult = identifier.startswith(catapult_prefix)
@@ -552,69 +649,58 @@ async def account_info():
             rec = install_by_bundle.get(identifier)
             if not rec and is_extension:
                 rec = install_by_bundle.get(extension_info.get("parent_identifier", ""))
-            installed_str = None
-            installed_device = None
-            days_left = None
-            exp_str = None
-            expires_at = None
-            time_left = None
-            auto_refresh_after = None
-            auto_refresh_eligible = False
-            saved_ipa_exists = False
-            reinstall_blocked_reason = None
 
-            if rec:
-                ipa_path = rec.get("ipa_path", "")
-                saved_ipa_exists = _vault.resolve_ipa_path(rec) is not None
-                ts = rec.get("last_installed")
-                if ts:
-                    installed_dt = datetime.fromtimestamp(ts).astimezone()
-                    # Free accounts: profile expires 7 days after signing
-                    expiry_dt = installed_dt + timedelta(days=7)
-                    delta = expiry_dt - now
-                    days_left = max(0, delta.days)
-                    exp_str = expiry_dt.strftime("%b %d, %Y %H:%M")
-                    expires_at = expiry_dt.isoformat()
-                    time_left = _format_time_left(delta)
-                    installed_str = installed_dt.strftime("%b %d, %Y %H:%M")
-                    refresh_after_ts = rec.get("refresh_after") or (ts + _refresh.REFRESH_AFTER_SECONDS)
-                    auto_refresh_dt = datetime.fromtimestamp(refresh_after_ts).astimezone()
-                    auto_refresh_after = auto_refresh_dt.isoformat()
-                    auto_refresh_eligible = refresh_after_ts <= now_ts
-                installed_device = rec.get("device_name", "")
+            apps.append(_install_row(
+                name=name,
+                identifier=identifier,
+                app_id_id=app_id_id,
+                is_catapult=is_catapult,
+                is_extension=is_extension,
+                extension_info=extension_info,
+                rec=rec,
+                account_slot_exists=True,
+            ))
 
-            if is_extension:
-                reinstall_blocked_reason = "Reinstall the parent app to refresh this extension."
-            elif not rec:
-                reinstall_blocked_reason = "No saved install was found. Install from an IPA first."
-            elif not saved_ipa_exists:
-                reinstall_blocked_reason = "Saved IPA is missing. Choose the IPA again before reinstalling."
-
-            apps.append({
-                "name": name,
-                "identifier": identifier,
-                "app_id_id": app_id_id,
-                "is_catapult": is_catapult,
-                "is_extension": is_extension,
-                "parent_identifier": extension_info.get("parent_identifier") if extension_info else None,
-                "parent_name": extension_info.get("parent_name") if extension_info else None,
-                "extension_name": extension_info.get("extension_name") if extension_info else None,
-                "expiry": exp_str,
-                "expires_at": expires_at,
-                "time_left": time_left,
-                "days_left": days_left,
-                "installed": installed_str,
-                "installed_device": installed_device,
-                "auto_refresh_after": auto_refresh_after,
-                "auto_refresh_eligible": auto_refresh_eligible,
-                "saved_device_name": rec.get("device_name", "") if rec else None,
-                "saved_ipa_exists": saved_ipa_exists,
-                "reinstall_blocked_reason": reinstall_blocked_reason,
-                "can_reinstall": bool(rec and saved_ipa_exists and not is_extension),
-            })
+        # Apple only reports current App IDs. Keep local install history visible
+        # even after an app expires, the App ID is deleted, or another Mac syncs
+        # the install record before Apple has recreated the slot.
+        history_seen: set[tuple[str, str]] = set()
+        for rec in sorted(install_records, key=lambda item: _record_score(item), reverse=True):
+            identifier = (
+                rec.get("bundle_id")
+                or (
+                    dev_services.sideload_bundle_id(team_id, rec["source_bundle_id"])
+                    if rec.get("source_bundle_id")
+                    else ""
+                )
+                or rec.get("source_bundle_id", "")
+            )
+            if not identifier or identifier in live_identifiers:
+                continue
+            history_key = (identifier, rec.get("device_udid", ""))
+            if history_key in history_seen:
+                continue
+            history_seen.add(history_key)
+            name = (
+                rec.get("app_name")
+                or app_display_names.get(identifier)
+                or rec.get("source_bundle_id")
+                or identifier
+            )
+            apps.append(_install_row(
+                name=name,
+                identifier=identifier,
+                app_id_id="",
+                is_catapult=identifier.startswith(catapult_prefix),
+                is_extension=False,
+                extension_info=None,
+                rec=rec,
+                account_slot_exists=False,
+            ))
 
         apps.sort(
             key=lambda item: (
+                1 if item.get("is_expired") else 0,
                 (item.get("parent_name") or item.get("name") or item.get("identifier") or "").lower(),
                 1 if item.get("is_extension") else 0,
                 (item.get("name") or item.get("identifier") or "").lower(),

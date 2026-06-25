@@ -841,7 +841,7 @@ private struct ProvisionedAppRow: View {
                     if let expiryDetail {
                         Text(expiryDetail)
                             .font(.caption2)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(expiryColor)
                             .lineLimit(1)
                     }
                     if let autoRefreshDetail {
@@ -854,6 +854,10 @@ private struct ProvisionedAppRow: View {
                 Spacer()
                 if app.extensionSlot {
                     InlineStatusPill(title: "Parent-managed", color: .secondary)
+                } else if app.expired {
+                    InlineStatusPill(title: "Expired", color: .red)
+                } else if app.historyOnlyRow {
+                    InlineStatusPill(title: "History", color: .secondary)
                 } else if app.reinstallBlockedReason != nil && !app.reinstallable {
                     InlineStatusPill(title: "Blocked", color: .orange)
                 }
@@ -938,7 +942,8 @@ private struct ProvisionedAppRow: View {
             return "Extension App ID · refreshes with \(parent)"
         }
         if let installed = app.installed, !installed.isEmpty {
-            return app.installedDevice?.isEmpty == false ? "\(installed) · \(app.installedDevice!)" : installed
+            let location = app.installedDevice?.isEmpty == false ? "\(installed) · \(app.installedDevice!)" : installed
+            return app.historyOnlyRow ? "\(location) · not in current App IDs" : location
         }
         return app.identifier
     }
@@ -946,10 +951,16 @@ private struct ProvisionedAppRow: View {
     private var expiryDetail: String? {
         if let expiresAt = app.expiresAt, let expiryDate = Self.parseExpiryDate(expiresAt) {
             let expiry = Self.expiryDateFormatter.string(from: expiryDate)
+            if expiryDate.timeIntervalSinceNow <= 0 {
+                return "Expired \(expiry)"
+            }
             return "Expires \(expiry) · \(preciseTimeLeft(until: expiryDate))"
         }
         if let expiry = app.expiry, !expiry.isEmpty {
             if let timeLeft = app.timeLeft, !timeLeft.isEmpty {
+                if app.expired {
+                    return "Expired \(expiry)"
+                }
                 return "Expires \(expiry) · \(timeLeft)"
             }
             return "Expires \(expiry)"
@@ -972,6 +983,9 @@ private struct ProvisionedAppRow: View {
     }
 
     private var expiryColor: Color {
+        if app.expired {
+            return .red
+        }
         guard let daysLeft = app.daysLeft else {
             return .secondary
         }

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.7 - 2026-06-25
+
+- Show expired and history-only installs in the Developer Account view even when Apple no longer lists the App ID.
+- Keep recovered local/synced installs reinstallable when their saved IPA is still available.
+- Label expired/history rows clearly in the native account sheet.
+- Keep public DMGs free of user-specific R2 credentials while supporting private encrypted sync handoff packages.
+
 ## 0.3.6 - 2026-06-24
 
 - Added persistent `~/.catapult/config.env` support for sync settings in Finder-launched packaged apps.

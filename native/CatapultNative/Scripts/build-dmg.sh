@@ -7,7 +7,7 @@ REPO_ROOT="$(cd "${PACKAGE_DIR}/../.." && pwd)"
 WORKSPACE_ROOT="$(cd "${REPO_ROOT}/.." && pwd)"
 
 APP_NAME="Catapult"
-VERSION="0.3.6"
+VERSION="0.3.7"
 VOLUME_NAME="${APP_NAME}"
 OUTPUT_DIR="${WORKSPACE_ROOT}/outputs"
 APP_SOURCE="${REPO_ROOT}/dist/${APP_NAME}.app"
@@ -15,6 +15,8 @@ APP_OUTPUT="${OUTPUT_DIR}/${APP_NAME}.app"
 ZIP_OUTPUT="${OUTPUT_DIR}/${APP_NAME}.app.zip"
 DMG_OUTPUT="${OUTPUT_DIR}/${APP_NAME}-${VERSION}.dmg"
 BACKGROUND_OUTPUT="${REPO_ROOT}/dist/dmg-background.png"
+SYNC_SETUP="${CATAPULT_DMG_SYNC_SETUP:-}"
+ENCRYPTED_SYNC="${CATAPULT_DMG_ENCRYPTED_SYNC:-}"
 
 swift "${SCRIPT_DIR}/generate-icons.swift"
 swift "${SCRIPT_DIR}/generate-dmg-background.swift"
@@ -33,6 +35,8 @@ uvx --from dmgbuild dmgbuild \
   --settings "${SCRIPT_DIR}/dmg-settings.py" \
   -Dapp="${APP_SOURCE}" \
   -Dbackground="${BACKGROUND_OUTPUT}" \
+  -Dsync_setup="${SYNC_SETUP}" \
+  -Dencrypted_sync="${ENCRYPTED_SYNC}" \
   --detach-retries 10
 
 echo "Built ${APP_OUTPUT}"

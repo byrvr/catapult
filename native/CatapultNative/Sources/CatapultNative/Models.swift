@@ -270,6 +270,7 @@ struct TeamInfo: Codable, Sendable {
 }
 
 struct ProvisionedApp: Codable, Hashable, Identifiable, Sendable {
+    let rowID: String?
     let name: String
     let identifier: String
     let appIDID: String
@@ -290,12 +291,19 @@ struct ProvisionedApp: Codable, Hashable, Identifiable, Sendable {
     let savedDeviceName: String?
     let savedIPAExists: Bool?
     let reinstallBlockedReason: String?
+    let accountSlotExists: Bool?
+    let historyOnly: Bool?
+    let isExpired: Bool?
 
-    var id: String { appIDID.isEmpty ? identifier : appIDID }
+    var id: String { rowID?.isEmpty == false ? rowID! : (appIDID.isEmpty ? identifier : appIDID) }
     var extensionSlot: Bool { isExtension == true }
     var reinstallable: Bool { canReinstall == true }
+    var hasAccountSlot: Bool { accountSlotExists != false }
+    var historyOnlyRow: Bool { historyOnly == true }
+    var expired: Bool { isExpired == true }
 
     enum CodingKeys: String, CodingKey {
+        case rowID = "row_id"
         case name
         case identifier
         case appIDID = "app_id_id"
@@ -316,6 +324,9 @@ struct ProvisionedApp: Codable, Hashable, Identifiable, Sendable {
         case savedDeviceName = "saved_device_name"
         case savedIPAExists = "saved_ipa_exists"
         case reinstallBlockedReason = "reinstall_blocked_reason"
+        case accountSlotExists = "account_slot_exists"
+        case historyOnly = "history_only"
+        case isExpired = "is_expired"
     }
 }
 
