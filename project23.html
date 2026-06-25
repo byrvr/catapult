@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Project 23 — Explained Simply 🫁🤖</title>
+<style>
+  :root{
+    --bg:#0e1726;
+    --panel:#15203250;
+    --card:#1b2740;
+    --ink:#eaf1ff;
+    --muted:#9fb2d6;
+    --accent:#4cc9f0;
+    --accent2:#b388ff;
+    --pink:#ff6ec7;
+    --green:#4ade80;
+    --yellow:#ffd166;
+    --line:#2a3a5c;
+    --radius:18px;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0;
+    font-family:"Segoe UI",system-ui,-apple-system,Roboto,Helvetica,Arial,sans-serif;
+    background:
+      radial-gradient(1200px 600px at 10% -10%, #1d2f55 0%, transparent 55%),
+      radial-gradient(1000px 500px at 100% 0%, #2a1a45 0%, transparent 50%),
+      var(--bg);
+    color:var(--ink);
+    line-height:1.6;
+  }
+  a{color:var(--accent)}
+
+  /* HERO */
+  header.hero{
+    text-align:center;
+    padding:70px 22px 50px;
+    position:relative;
+  }
+  .badge{
+    display:inline-block;
+    background:linear-gradient(90deg,var(--accent),var(--accent2));
+    color:#0b1220;
+    font-weight:800;
+    letter-spacing:.5px;
+    padding:7px 16px;
+    border-radius:999px;
+    font-size:.8rem;
+    text-transform:uppercase;
+  }
+  .hero h1{
+    font-size:clamp(1.8rem,5vw,3.2rem);
+    margin:18px auto 10px;
+    max-width:900px;
+    line-height:1.15;
+    background:linear-gradient(90deg,#fff,#b8d4ff);
+    -webkit-background-clip:text;background-clip:text;color:transparent;
+  }
+  .hero p.sub{
+    color:var(--muted);
+    max-width:680px;
+    margin:0 auto;
+    font-size:1.05rem;
+  }
+  .hero .emoji{font-size:3.4rem;margin-bottom:6px}
+
+  /* NAV */
+  nav{
+    position:sticky;top:0;z-index:50;
+    background:rgba(14,23,38,.82);
+    backdrop-filter:blur(10px);
+    border-bottom:1px solid var(--line);
+    padding:10px 14px;
+    display:flex;gap:8px;flex-wrap:wrap;justify-content:center;
+  }
+  nav a{
+    color:var(--muted);text-decoration:none;font-size:.85rem;
+    padding:6px 12px;border-radius:999px;border:1px solid transparent;
+    transition:.2s;white-space:nowrap;
+  }
+  nav a:hover{color:var(--ink);border-color:var(--line);background:var(--card)}
+
+  /* LAYOUT */
+  main{max-width:980px;margin:0 auto;padding:30px 20px 80px}
+  section{
+    background:var(--panel);
+    border:1px solid var(--line);
+    border-radius:var(--radius);
+    padding:26px 26px 30px;
+    margin:26px 0;
+    scroll-margin-top:70px;
+  }
+  section h2{
+    font-size:1.5rem;margin:0 0 4px;
+    display:flex;align-items:center;gap:12px;
+  }
+  section h2 .n{
+    background:var(--card);border:1px solid var(--line);
+    width:38px;height:38px;border-radius:12px;
+    display:inline-flex;align-items:center;justify-content:center;
+    font-size:1.2rem;flex:0 0 auto;
+  }
+  h3{color:var(--accent);margin:24px 0 8px;font-size:1.1rem}
+
+  /* KID BOX */
+  .kid{
+    border-left:5px solid var(--yellow);
+    background:linear-gradient(90deg,rgba(255,209,102,.12),transparent);
+    border-radius:10px;
+    padding:14px 16px;
+    margin:14px 0 18px;
+  }
+  .kid b{color:var(--yellow)}
+  .kid::before{content:"🧒 Explain it like I'm a kid";display:block;font-weight:800;color:var(--yellow);font-size:.8rem;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px}
+
+  .grown{color:var(--muted);font-size:.82rem;font-weight:800;letter-spacing:.5px;text-transform:uppercase;margin:18px 0 6px}
+
+  /* CARDS GRID */
+  .grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));margin-top:6px}
+  .c{
+    background:var(--card);border:1px solid var(--line);
+    border-radius:14px;padding:16px;
+  }
+  .c .t{font-weight:700;margin-bottom:4px;display:flex;align-items:center;gap:8px}
+  .c .m{color:var(--muted);font-size:.92rem}
+
+  ul.clean{list-style:none;padding:0;margin:10px 0}
+  ul.clean li{padding:8px 0 8px 30px;position:relative;border-bottom:1px dashed var(--line)}
+  ul.clean li:last-child{border-bottom:none}
+  ul.clean li::before{content:"✅";position:absolute;left:0}
+
+  ul.dot{margin:8px 0;padding-left:20px}
+  ul.dot li{margin:5px 0}
+
+  /* PEOPLE */
+  .person{display:flex;gap:14px;align-items:flex-start;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;margin:10px 0}
+  .person .av{width:48px;height:48px;border-radius:50%;flex:0 0 auto;display:flex;align-items:center;justify-content:center;font-size:1.5rem;background:linear-gradient(135deg,var(--accent),var(--accent2))}
+  .person .who b{display:block}
+  .person .who .role{color:var(--muted);font-size:.9rem}
+  .person .who .tag{display:inline-block;margin-top:6px;font-size:.72rem;background:#0b1220;border:1px solid var(--line);padding:3px 9px;border-radius:999px;color:var(--accent)}
+
+  /* TIMELINE */
+  .tl{position:relative;margin:18px 0 0;padding-left:26px}
+  .tl::before{content:"";position:absolute;left:7px;top:6px;bottom:6px;width:3px;background:linear-gradient(var(--accent),var(--accent2))}
+  .tl .step{position:relative;margin:0 0 16px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 16px}
+  .tl .step::before{content:"";position:absolute;left:-23px;top:18px;width:14px;height:14px;border-radius:50%;background:var(--accent);border:3px solid var(--bg)}
+  .tl .yr{font-weight:800;color:var(--accent)}
+
+  /* stat row */
+  .stats{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(140px,1fr))}
+  .stat{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;text-align:center}
+  .stat .big{font-size:1.7rem;font-weight:800;color:var(--accent)}
+  .stat .lbl{color:var(--muted);font-size:.85rem}
+
+  .pill{display:inline-block;background:var(--card);border:1px solid var(--line);padding:5px 12px;border-radius:999px;margin:4px 4px 0 0;font-size:.85rem}
+
+  footer{text-align:center;color:var(--muted);padding:30px 20px 60px;font-size:.9rem}
+  .glossary dt{font-weight:700;color:var(--accent2);margin-top:12px}
+  .glossary dd{margin:2px 0 0;color:var(--muted)}
+  .hr{height:1px;background:var(--line);border:none;margin:22px 0}
+  mark{background:rgba(76,201,240,.22);color:var(--ink);padding:0 4px;border-radius:4px}
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="emoji">🫁🤖🔬</div>
+  <span class="badge">Project BBSRC‑DFA_2026_23 · CASE</span>
+  <h1>Teaching a Computer to Read a Map of the Lung</h1>
+  <p class="sub">A 4‑year PhD project that builds smart AI to look <em>inside</em> lung tissue, find where healthy and sick parts meet, and watch how one slowly turns into the other.</p>
+</header>
+
+<nav>
+  <a href="#big">🎯 Big Idea</a>
+  <a href="#team">👩‍🔬 The Team</a>
+  <a href="#problem">🤔 Problem</a>
+  <a href="#solution">💡 Solution</a>
+  <a href="#aims">🧩 The 4 Aims</a>
+  <a href="#how">⚙️ How</a>
+  <a href="#data">📦 The Data</a>
+  <a href="#timeline">🗓️ Timeline</a>
+  <a href="#case">🏭 AstraZeneca</a>
+  <a href="#learn">🎓 Training</a>
+  <a href="#words">📖 Word Helper</a>
+</nav>
+
+<main>
+
+  <!-- BIG IDEA -->
+  <section id="big">
+    <h2><span class="n">🎯</span> The Big Idea (in one breath)</h2>
+    <div class="kid">
+      Imagine your lung is a giant <b>LEGO city</b>. Some streets are healthy and tidy, some are messy and sick. Right now, doctors can take a photo of the city, but a computer can only say "this block is good, that block is bad" — like coloring with only 2 crayons. This project teaches the computer to use <b>all the crayons</b>, so it can see the <b>slow change</b> from a tidy street into a messy one, block by block. That helps scientists understand lung diseases and find better medicine. 🦸
+    </div>
+    <p class="grown">The grown‑up version</p>
+    <p>Modern machines can map every gene "switch" inside a real piece of lung tissue without breaking it apart. But today's software is clumsy: it chops the tissue into hard, separate labels and misses the <strong>gradual gradients</strong> — the smooth transitions where one tissue type blends into another. This project builds new <strong>deep‑learning AI</strong> that captures those smooth transitions and turns them into <strong>free, open‑source tools</strong> any scientist can reuse.</p>
+    <div class="stats">
+      <div class="stat"><div class="big">4</div><div class="lbl">Years</div></div>
+      <div class="stat"><div class="big">4</div><div class="lbl">Big Aims</div></div>
+      <div class="stat"><div class="big">15</div><div class="lbl">Lung samples</div></div>
+      <div class="stat"><div class="big">100%</div><div class="lbl">Open‑source</div></div>
+    </div>
+  </section>
+
+  <!-- TEAM -->
+  <section id="team">
+    <h2><span class="n">👩‍🔬</span> The Team (the dream squad)</h2>
+    <div class="kid">
+      You need <b>two kinds of superheroes</b> to win: <b>Computer Wizards</b> 🧙 who teach the AI, and <b>Body Doctors</b> 🩺 who know how lungs work. This team has two of each — plus helpers from a big medicine company. Together they're unstoppable!
+    </div>
+
+    <h3>🎓 University Supervisors (Queen Mary University of London)</h3>
+    <div class="person"><div class="av">🧙</div><div class="who">
+      <b>Greg Slabaugh</b><span class="role">Primary Supervisor · Institute: DERI · g.slabaugh@qmul.ac.uk</span>
+      <span class="tag">Computer Wizard — multimodal deep‑learning for imaging</span>
+    </div></div>
+    <div class="person"><div class="av">🩺</div><div class="who">
+      <b>Dianne Cooper</b><span class="role">Secondary Supervisor · Institute: WHRI · d.cooper@qmul.ac.uk</span>
+      <span class="tag">Body Doctor — inflammation &amp; tissue signalling</span>
+    </div></div>
+
+    <h3>🏭 Industry Partners (AstraZeneca)</h3>
+    <div class="person"><div class="av">📊</div><div class="who">
+      <b>Yinhai Wang</b><span class="role">Director of Data Science &amp; Quantitative Biology</span>
+      <span class="tag">Computer Wizard — AI/ML for bio‑imaging</span>
+    </div></div>
+    <div class="person"><div class="av">🧪</div><div class="who">
+      <b>James Garnett</b><span class="role">Executive Director · Head of Bioscience in COPD/IPF</span>
+      <span class="tag">Body Doctor — medicine discovery for lung disease</span>
+    </div></div>
+    <p class="grown">Why this mix matters</p>
+    <p>Two AI experts (Slabaugh, Wang) + two bioscience experts (Cooper, Garnett). The AI side builds the methods; the biology side makes sure the answers are real and useful for diseases like <strong>COPD</strong> and <strong>IPF</strong>.</p>
+  </section>
+
+  <!-- PROBLEM -->
+  <section id="problem">
+    <h2><span class="n">🤔</span> The Problem We're Solving</h2>
+    <div class="kid">
+      The fancy lung scanner gives us a <b>mountain of clues</b> 🏔️ about every tiny cell. But the computer reading those clues is a bit short‑sighted: it only looks at one spot at a time, so it <b>misses the big picture</b> and the slow "fade" from healthy to sick. It's like trying to understand a sunset by looking at one single pixel. 🌅
+    </div>
+    <ul class="dot">
+      <li>High‑plex spatial transcriptomics gives <strong>single‑cell‑resolution</strong> gene expression <em>inside</em> intact tissue.</li>
+      <li>Today's tools mostly use <strong>convolutional neural networks (CNNs)</strong> or simple clustering.</li>
+      <li>Those methods struggle with <strong>long‑range dependencies</strong>, <strong>irregular cell relationships</strong>, and <strong>continuous transitions</strong> across tissue borders.</li>
+      <li>Result: rich, smooth biology gets squashed into <strong>hard discrete labels</strong> — hiding the gradual molecular gradients.</li>
+    </ul>
+    <div style="background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-top:10px">
+      🧠 <strong>The Hypothesis (the team's bet):</strong> tissue borders are actually smooth <em>"transition manifolds,"</em> not sharp lines. AI that combines <em>where</em> genes are, <em>what the tissue looks like</em>, and <em>which cells are neighbours</em> will model the lung far better than old CNNs.
+    </div>
+  </section>
+
+  <!-- SOLUTION -->
+  <section id="solution">
+    <h2><span class="n">💡</span> The Solution (the clever fix)</h2>
+    <div class="kid">
+      Instead of one short‑sighted helper, we build a <b>team of smart AI helpers</b> who each notice something different — colors, shapes, and which cells are friends — and then <b>share notes</b> to draw the best possible map. 🗺️✨
+    </div>
+    <div class="grid">
+      <div class="c"><div class="t">🛰️ See far away</div><div class="m">Use <strong>state‑space + attention</strong> models (like Mamba/Transformers) so the AI notices things that are <em>far apart</em>, not just nearby.</div></div>
+      <div class="c"><div class="t">🧬 Mix the clues</div><div class="m">Fuse gene locations, cell‑state info, and the tissue's look (H&amp;E histology) into one shared picture.</div></div>
+      <div class="c"><div class="t">🕸️ Map the friendships</div><div class="m"><strong>Graph neural networks</strong> treat each cell as a dot, linked to its neighbours — capturing the whole social network of the tissue.</div></div>
+      <div class="c"><div class="t">🌈 Catch the fade</div><div class="m">Model <strong>continuous gradients</strong> so we see the smooth change across borders instead of hard on/off labels.</div></div>
+    </div>
+  </section>
+
+  <!-- AIMS -->
+  <section id="aims">
+    <h2><span class="n">🧩</span> The 4 Aims (the to‑do list)</h2>
+    <div class="kid">
+      Every big quest has steps. Here are the four levels of the game 🎮 — beat them in order and you win!
+    </div>
+    <ul class="clean">
+      <li><strong>Aim 1 — Build the smart eyes.</strong> Create state‑space &amp; attention segmentation models (building on <em>CAMS</em>) that see long‑range patterns, and blend coordinates, cell states, morphology &amp; expert notes into one representation. Compare ("benchmark") against older methods.</li>
+      <li><strong>Aim 2 — Map the friendships.</strong> Build spatial graph neural networks where tissue is a cell‑level graph (links = spatial closeness + molecular similarity) to capture higher‑order neighbourhood structure.</li>
+      <li><strong>Aim 3 — Watch the fade.</strong> Create continuous spatial gradient models (exploring <em>neural differential equations</em> or <em>diffusion</em>) to measure how strong a gradient is and how regions transition.</li>
+      <li><strong>Aim 4 — Share the toolbox.</strong> Deliver modular, version‑controlled, open‑source software that follows <strong>FAIR</strong> principles (Findable, Accessible, Interoperable, Reusable).</li>
+    </ul>
+  </section>
+
+  <!-- HOW -->
+  <section id="how">
+    <h2><span class="n">⚙️</span> How It Actually Works</h2>
+    <div class="kid">
+      First we <b>tidy up</b> the data (no messy clues allowed). Then the AI <b>looks at the picture and the genes together</b>, draws a <b>web of cell‑friends</b>, and finally colors in the <b>smooth rainbow</b> of change. And it even <b>explains its thinking</b> so scientists can trust it! 🌈🔍
+    </div>
+
+    <h3>🧹 Step 1 — Preprocessing (tidy the data)</h3>
+    <ul class="dot">
+      <li>Strict <strong>quality control</strong>, aligning spatial coordinates, normalizing gene expression.</li>
+      <li>Build a <strong>spatial adjacency graph</strong> (who's next to whom).</li>
+      <li>Split data <strong>by sample</strong> into train / validation / test sets so the AI can't "cheat" (no information leakage).</li>
+    </ul>
+
+    <h3>👀 Step 2 — Segmentation (see the regions)</h3>
+    <p>State‑space &amp; attention models fuse transcript features with the H&amp;E look using <strong>cross‑attention</strong> — letting genes and pictures "talk" to each other.</p>
+
+    <h3>🕸️ Step 3 — Graph &amp; Gradient modelling</h3>
+    <p>Graph neural networks map irregular cell interactions (going beyond pixel grids). <strong>Continuous embedding spaces</strong> replace hard region labels, so gradual change is tracked smoothly.</p>
+
+    <h3>🔍 Step 4 — Interpretability (show your work)</h3>
+    <p>Built right into the graph model (building on the <strong>ProtoPathway</strong> approach) to spot characteristic cellular "neighbourhood motifs" — instead of only explaining after the fact.</p>
+  </section>
+
+  <!-- DATA -->
+  <section id="data">
+    <h2><span class="n">📦</span> The Data (the treasure chest)</h2>
+    <div class="kid">
+      We already have <b>15 real lung samples</b> 🫁 — 10 that are unusual/sick and 5 healthy ones to compare against. They come with super‑zoomed photos and notes from expert scientists. The chest is locked and ready to open in <b>September 2026</b>! 🗝️
+    </div>
+    <div class="grid">
+      <div class="c"><div class="t">🔬 Platform</div><div class="m">10x Genomics <strong>Xenium</strong>, from FFPE human lung tissue.</div></div>
+      <div class="c"><div class="t">🧫 Samples</div><div class="m"><strong>15 total</strong> — 10 structurally heterogeneous + 5 controls.</div></div>
+      <div class="c"><div class="t">📅 Availability</div><div class="m">Already generated; fully accessible from <strong>September 2026</strong>.</div></div>
+      <div class="c"><div class="t">🖼️ Modality</div><div class="m">Matched high‑res <strong>H&amp;E whole‑slide images</strong> + expert region annotations.</div></div>
+      <div class="c"><div class="t">🗂️ Formats</div><div class="m">CSV/TSV expression matrices, spatial coordinates, metadata tables, WSI slides.</div></div>
+      <div class="c"><div class="t">💾 Size</div><div class="m">H&amp;E images &lt; 20GB each; Xenium ≈ 20GB per sample.</div></div>
+      <div class="c"><div class="t">✅ Restrictions</div><div class="m">De‑identified, ethically approved — <strong>no restrictions</strong>. AstraZeneca may add more data.</div></div>
+      <div class="c"><div class="t">🩻 Tissue type</div><div class="m">Human lung — both <strong>fibrotic</strong> and <strong>normal</strong>.</div></div>
+    </div>
+  </section>
+
+  <!-- TIMELINE -->
+  <section id="timeline">
+    <h2><span class="n">🗓️</span> The 4‑Year Timeline</h2>
+    <div class="kid">
+      Like growing up year by year 🌱→🌳: first you learn the basics, then you make friends‑maps, then you master the rainbow <em>and</em> go work at a real company, and finally you wrap it all into one neat toolbox and write your story (thesis). 📚
+    </div>
+    <div class="tl">
+      <div class="step"><span class="yr">Year 1 — Learn &amp; benchmark</span><br>Review state‑of‑the‑art; build &amp; benchmark baseline models (CNN, Vision Transformer, Mamba‑based) on histology; start integrating spatial transcriptomic features.</div>
+      <div class="step"><span class="yr">Year 2 — Go graph</span><br>Develop graph neural networks (incl. Graph Attention Networks) for neighbourhood structure; build interpretable prototype‑driven models.</div>
+      <div class="step"><span class="yr">Year 3 — Gradients + industry</span><br>Focus on continuous gradient modelling (neural differential equations / diffusion); complete a <strong>6–12 month internship at AstraZeneca</strong>.</div>
+      <div class="step"><span class="yr">Year 4 — Polish &amp; release</span><br>Refine into a unified software framework; test generalizability on extra datasets; finalize open‑source release, docs &amp; thesis.</div>
+    </div>
+    <p class="grown">References cited</p>
+    <ul class="dot">
+      <li>Mitchel et al., <em>Nature Genetics</em> (2026)</li>
+      <li>Khan et al., <em>Winter Applications of Computer Vision</em> (2025)</li>
+      <li>Amaya Gallagher‑Syed, PhD thesis (2026)</li>
+    </ul>
+  </section>
+
+  <!-- CASE -->
+  <section id="case">
+    <h2><span class="n">🏭</span> The AstraZeneca Connection (CASE project)</h2>
+    <div class="kid">
+      This isn't just a school project — a <b>real medicine company</b> 💊 is a partner! The student even gets to <b>go work there</b> for a while and gets <b>extra pocket money</b> (a stipend top‑up) during that time. 🎒✈️
+    </div>
+    <ul class="dot">
+      <li><strong>Partnership:</strong> Yes — a CASE project <em>with</em> AstraZeneca.</li>
+      <li><strong>Co‑supervisors:</strong> Prof Yinhai Wang &amp; Dr James Garnett.</li>
+      <li><strong>Garnett:</strong> in‑vitro cell biology (COPD/IPF) + coordinates the Xenium datasets.</li>
+      <li><strong>Wang:</strong> advises on scalable processing, modeling strategy, industrial‑grade validation.</li>
+      <li><strong>Placement:</strong> 6–12 months in Year 3 at AstraZeneca (Cambridge, UK <em>or</em> Gothenburg, Sweden). UKRI stipend is <strong>topped up</strong> during the internship.</li>
+    </ul>
+  </section>
+
+  <!-- LEARN -->
+  <section id="learn">
+    <h2><span class="n">🎓</span> What the Student Learns (Skills Training)</h2>
+    <div class="kid">
+      You don't just do the project — you <b>level up</b> 🆙 with new skills: coding super‑AI, working at a real lab, learning about lungs, and meeting other clever people every week.
+    </div>
+    <div class="grid">
+      <div class="c"><div class="t">💻 Technical (Slabaugh Lab)</div><div class="m">Daily deep learning, multimodal fusion, graph neural networks &amp; state‑space modelling alongside postdocs and PhD students.</div></div>
+      <div class="c"><div class="t">🏢 Industry (AstraZeneca)</div><div class="m">Pharma research environment, HPC infrastructure, real computational workflows.</div></div>
+      <div class="c"><div class="t">🧬 Biological</div><div class="m">Lab visits &amp; supervision on lung fibrosis and sample processing.</div></div>
+      <div class="c"><div class="t">🗓️ Supervision</div><div class="m">Weekly meetings for the first 9 months → then biweekly.</div></div>
+      <div class="c"><div class="t">👥 Group activities</div><div class="m">Monthly DERI Vision Group &amp; Paper Club; biweekly DERI Seminar Series.</div></div>
+      <div class="c"><div class="t">🌞 External</div><div class="m">Encouraged to attend an external computer‑vision summer school in Year 1.</div></div>
+    </div>
+  </section>
+
+  <!-- WORDS -->
+  <section id="words">
+    <h2><span class="n">📖</span> Word Helper (big words, tiny meanings)</h2>
+    <dl class="glossary">
+      <dt>Spatial transcriptomics</dt><dd>A way to see which genes are "on" <em>and</em> exactly <em>where</em> they are inside a tissue.</dd>
+      <dt>High‑plex</dt><dd>Measuring <em>lots</em> of things at once (many genes together).</dd>
+      <dt>Segmentation</dt><dd>Drawing outlines around the different regions in an image — like coloring inside the lines.</dd>
+      <dt>Convolutional Neural Network (CNN)</dt><dd>An older AI good at nearby patterns, but short‑sighted about far‑apart ones.</dd>
+      <dt>Attention / Transformer</dt><dd>AI that learns which parts to "pay attention" to, even far away.</dd>
+      <dt>State‑space model (Mamba)</dt><dd>A newer AI that handles long sequences efficiently — great for long‑range patterns.</dd>
+      <dt>Graph Neural Network (GNN)</dt><dd>AI that works on dots‑and‑lines (cells and their neighbours), like a social network.</dd>
+      <dt>Gradient / transition manifold</dt><dd>A smooth fade from one state to another, instead of a hard switch.</dd>
+      <dt>H&amp;E histology</dt><dd>A classic stained photo of tissue that shows its shape and structure.</dd>
+      <dt>Xenium (10x Genomics)</dt><dd>The machine/platform that produces the high‑plex spatial data.</dd>
+      <dt>FFPE</dt><dd>"Formalin‑Fixed Paraffin‑Embedded" — a standard way to preserve tissue samples.</dd>
+      <dt>COPD / IPF</dt><dd>Serious lung diseases (chronic obstructive pulmonary disease / idiopathic pulmonary fibrosis).</dd>
+      <dt>FAIR principles</dt><dd>Software/data that is Findable, Accessible, Interoperable &amp; Reusable.</dd>
+      <dt>CASE project</dt><dd>A PhD done in partnership with a company (here, AstraZeneca), with an industry placement.</dd>
+    </dl>
+  </section>
+
+  <section style="text-align:center">
+    <h2 style="justify-content:center"><span class="n">🌟</span> The One‑Sentence Takeaway</h2>
+    <p style="font-size:1.15rem;max-width:760px;margin:8px auto">
+      <mark>Build clever AI that reads a detailed molecular map of lung tissue, sees the <em>smooth</em> change where healthy meets diseased, and hands scientists a free, trustworthy toolbox to help fight lung disease.</mark>
+    </p>
+  </section>
+
+</main>
+
+<footer>
+  Made simple for everyone · Project <strong>BBSRC‑DFA_2026_23 (CASE)</strong> · Queen Mary University of London × AstraZeneca 🫁🤖
+</footer>
+
+</body>
+</html>
