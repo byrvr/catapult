@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.8 - 2026-07-17
+
+- Automatically restart a wedged tunnel helper instead of trusting it: a long-running tunneld could silently stop discovering devices while still answering on its port, making Apple TV "Connect" time out with a misleading "device may need re-pairing".
+- Widen the tunnel poll window after a helper (re)start so a cold tunneld has time to rediscover and re-tunnel the device before giving up.
+
 ## 0.3.7 - 2026-06-25
 
 - Show expired and history-only installs in the Developer Account view even when Apple no longer lists the App ID.
