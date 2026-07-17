@@ -38,6 +38,40 @@ PAIRED_DEVICES_PATH = STATE_DIR / "paired_devices.json"
 TUNNELD_DAEMON_LABEL = "com.catapult.tunneld"
 TUNNELD_DAEMON_PLIST = Path("/Library/LaunchDaemons") / f"{TUNNELD_DAEMON_LABEL}.plist"
 TUNNELD_LOG_PATH = "/tmp/catapult_tunneld.log"
+# A healthy tunneld re-discovers Wi-Fi devices within seconds. If an adopted
+# daemon has been up longer than this and still can't produce a tunnel while we
+# are actively connecting, treat it as wedged and force a restart rather than
+# blindly trusting its HTTP port. (A long-lived daemon can silently stop
+# discovering devices after sleep/wake or network changes.)
+STALE_TUNNELD_UPTIME_S = 3600
+# Poll windows (each attempt waits 2s). An already-running healthy daemon
+# usually has the tunnel up already, so a short window is enough. A freshly
+# (re)started daemon is cold — it must browse mDNS, discover the device, and
+# build the QUIC tunnel from scratch, which can take well over a minute — so it
+# gets a much more generous window.
+TUNNELD_POLL_ATTEMPTS = 30
+TUNNELD_COLD_START_POLL_ATTEMPTS = 90
+
+
+def _parse_ps_etime(value: str) -> float | None:
+    """Parse macOS ``ps -o etime`` (``[[dd-]hh:]mm:ss``) into seconds."""
+    value = value.strip()
+    if not value:
+        return None
+    days = 0
+    if "-" in value:
+        day_part, value = value.split("-", 1)
+        if not day_part.isdigit():
+            return None
+        days = int(day_part)
+    try:
+        nums = [int(p) for p in value.split(":")]
+    except ValueError:
+        return None
+    while len(nums) < 3:
+        nums.insert(0, 0)
+    hours, minutes, seconds = nums[-3], nums[-2], nums[-1]
+    return days * 86400 + hours * 3600 + minutes * 60 + seconds
 
 
 def _normalize_usbmux_connection(connection_type: object) -> str:
@@ -1106,6 +1140,86 @@ echo installed
             self._tunnel_udid,
         )
 
+    async def _poll_for_tunnel(self, target: dict | None, attempts: int = 30) -> bool:
+        """Poll tunneld for a matching RSD, caching it on success.
+
+        tunneld auto-discovers Wi-Fi devices, so an empty result during the first
+        few polls is normal while it warms up. Returns True once a tunnel for
+        ``target`` is active.
+        """
+        from pymobiledevice3.tunneld.api import get_tunneld_devices
+
+        for i in range(attempts):
+            rsds = []
+            try:
+                rsds = await get_tunneld_devices()
+                logger.info("tunneld RSDs: %s", [getattr(rsd, "udid", "?") for rsd in rsds])
+                selected = self._select_rsd(rsds, target, allow_single_fallback=True)
+                if selected:
+                    self._cache_active_tunnel(selected, target)
+                    return True
+            except Exception as e:
+                logger.debug("tunneld poll %d: %s", i, e)
+            finally:
+                for rsd in rsds:
+                    try:
+                        await rsd.close()
+                    except Exception:
+                        pass
+            await asyncio.sleep(2)
+        return False
+
+    async def _tunneld_daemon_pid(self) -> int | None:
+        """PID of the tunneld LaunchDaemon, read from launchctl.
+
+        The daemon runs as root so its listening socket is invisible to lsof run
+        as the user; launchctl can read the system domain and reports the pid.
+        """
+        proc = await asyncio.create_subprocess_exec(
+            "/bin/launchctl",
+            "print",
+            f"system/{TUNNELD_DAEMON_LABEL}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await proc.communicate()
+        for line in stdout.decode(errors="replace").splitlines():
+            line = line.strip()
+            if line.startswith("pid ="):
+                val = line.split("=", 1)[1].strip()
+                if val.isdigit():
+                    return int(val)
+        return None
+
+    async def _tunneld_process_uptime(self) -> float | None:
+        """Elapsed seconds since the tunneld daemon process started, or None."""
+        pid = await self._tunneld_daemon_pid()
+        if pid is None:
+            return None
+        ps = await asyncio.create_subprocess_exec(
+            "/bin/ps",
+            "-o",
+            "etime=",
+            "-p",
+            str(pid),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await ps.communicate()
+        return _parse_ps_etime(out.decode().strip())
+
+    async def _restart_stale_tunneld(self) -> dict:
+        """Force-reinstall and kickstart the tunneld daemon.
+
+        A long-lived tunneld can wedge — reachable on its HTTP port but no longer
+        discovering devices, so every poll returns an empty tunnel map.
+        Reinstalling boots out the stale process and kickstarts a fresh one
+        (prompting once for admin, same as first-time setup).
+        """
+        logger.warning("tunneld reachable but no tunnel established; forcing daemon restart")
+        self._tunneld_owned = False
+        return await self._install_tunneld_launchdaemon()
+
     async def _start_tunnel_inner(
         self,
         device_udid: str | None = None,
@@ -1142,34 +1256,40 @@ echo installed
             self._tunnel_udid = None
 
         # Start tunneld if not running
+        freshly_started = False
         if not await self._ensure_tunneld():
             result = await self._start_tunneld()
             if result["status"] != "ok":
                 return result
+            freshly_started = True
             # Wait for tunneld to be ready
             await asyncio.sleep(2)
 
-        # Poll tunneld for tunnels (it auto-discovers WiFi devices)
+        # Poll tunneld for tunnels (it auto-discovers WiFi devices). A daemon we
+        # just started is cold and needs the longer window; an adopted one that is
+        # healthy usually has the tunnel up already.
         logger.info("Waiting for tunneld to establish tunnel...")
-        for i in range(30):
-            rsds = []
-            try:
-                rsds = await get_tunneld_devices()
-                logger.info("tunneld RSDs: %s", [getattr(rsd, "udid", "?") for rsd in rsds])
-                selected = self._select_rsd(rsds, target, allow_single_fallback=True)
-                if selected:
-                    self._cache_active_tunnel(selected, target)
-                    message = f"Tunnel active at {self._tunnel_address}:{self._tunnel_port}"
-                    return {"status": "ok", "message": message}
-            except Exception as e:
-                logger.debug("tunneld poll %d: %s", i, e)
-            finally:
-                for rsd in rsds:
-                    try:
-                        await rsd.close()
-                    except Exception:
-                        pass
-            await asyncio.sleep(2)
+        attempts = TUNNELD_COLD_START_POLL_ATTEMPTS if freshly_started else TUNNELD_POLL_ATTEMPTS
+        if await self._poll_for_tunnel(target, attempts=attempts):
+            message = f"Tunnel active at {self._tunnel_address}:{self._tunnel_port}"
+            return {"status": "ok", "message": message}
+
+        # No tunnel after the poll window. If we adopted an already-running daemon
+        # that has been up long enough to be considered wedged (rather than one we
+        # just started that is still warming up), force a restart and poll again
+        # with the generous cold-start window — a freshly restarted tunneld can
+        # take well over a minute to rediscover and re-tunnel the device. This
+        # recovers a tunneld that is reachable on its HTTP port but has silently
+        # stopped discovering devices, without the user having to restart it by hand.
+        if not freshly_started:
+            uptime = await self._tunneld_process_uptime()
+            if uptime is None or uptime >= STALE_TUNNELD_UPTIME_S:
+                restart = await self._restart_stale_tunneld()
+                if restart.get("status") == "ok":
+                    await asyncio.sleep(2)
+                    if await self._poll_for_tunnel(target, attempts=TUNNELD_COLD_START_POLL_ATTEMPTS):
+                        message = f"Tunnel active at {self._tunnel_address}:{self._tunnel_port}"
+                        return {"status": "ok", "message": message}
 
         self._tunnel_address = None
         self._tunnel_port = None
