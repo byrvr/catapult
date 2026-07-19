@@ -331,6 +331,15 @@ class DeviceManager:
         return devices
 
     async def _scan_in_subprocess(self, timeout: float) -> list[dict]:
+        # The catapult package is not installed into the venv, so the child can
+        # only resolve it through its working directory. The inherited cwd may
+        # be a deleted directory (app bundle rebuilt while the server runs), so
+        # pin cwd and PYTHONPATH to the backend root this module lives in.
+        backend_root = Path(__file__).resolve().parents[1]
+        env = dict(os.environ)
+        env["PYTHONPATH"] = os.pathsep.join(
+            [str(backend_root)] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])
+        )
         proc = await asyncio.create_subprocess_exec(
             sys.executable,
             "-m",
@@ -338,6 +347,8 @@ class DeviceManager:
             str(timeout),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            cwd=backend_root,
+            env=env,
         )
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout + 5)
