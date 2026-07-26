@@ -68,6 +68,16 @@ async def _on_startup():
         return device_manager, auth_client, dev_services, signer, ipa_processor, job_manager
     asyncio.create_task(_refresh.run_refresh_loop(_components))
 
+    # Warm the first device scan off the request path: right after boot it
+    # competes with session restore and tunneld startup and can run well past
+    # the endpoints' deadlines, 504ing the UI's first refresh.
+    async def _warm_scan():
+        try:
+            await device_manager.discover()
+        except Exception:
+            logger.debug("Startup warm scan failed", exc_info=True)
+    asyncio.create_task(_warm_scan())
+
 
 async def _sync_authenticated_state() -> dict:
     session = auth_client.session
@@ -217,7 +227,9 @@ def _annotate_job(payload: dict, job: ActivityJob | None) -> dict:
 @app.get("/api/devices")
 async def list_devices():
     try:
-        devices = await asyncio.wait_for(device_manager.discover(), timeout=15)
+        devices = await asyncio.wait_for(
+            device_manager.discover(allow_stale=True), timeout=15
+        )
         return {"devices": devices}
     except asyncio.TimeoutError:
         logger.exception("Device scan timed out")

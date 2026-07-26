@@ -6,6 +6,7 @@ import logging
 import os
 import sys
 import threading
+import time
 from pathlib import Path
 
 from zeroconf import ServiceBrowser, ServiceListener, Zeroconf
@@ -178,14 +179,59 @@ class DeviceManager:
         self._pairing_lock = threading.Lock()
         self._tunnel_lock: asyncio.Lock | None = None  # created lazily in async context
         self._scan_lock: asyncio.Lock | None = None
+        self._last_scan_result: list[dict] | None = None
+        self._last_scan_at: float = 0.0
 
-    async def discover(self, timeout: float = 6.0) -> list[dict]:
+    SCAN_CACHE_TTL = 5.0
+
+    def _cached_scan(self) -> list[dict] | None:
+        if self._last_scan_result is None:
+            return None
+        if time.monotonic() - self._last_scan_at > self.SCAN_CACHE_TTL:
+            return None
+        return self._last_scan_result
+
+    async def discover(self, timeout: float = 6.0, *, allow_stale: bool = False) -> list[dict]:
+        # Single-flight: callers arriving while a scan is running (UI poll,
+        # install preflight, diagnostics) reuse its result instead of each
+        # queuing a full scan behind the lock — stacked scans were blowing
+        # the endpoints' 8/15s deadlines.
+        if self._scan_lock is None:
+            self._scan_lock = asyncio.Lock()
+        cached = self._cached_scan()
+        if cached is not None:
+            return cached
+        # Stale-while-revalidate: if a prior result exists (just past TTL) and
+        # the caller tolerates it, return it now and refresh in the background.
+        # The UI device list uses this so a slow cold scan never 504s the poll;
+        # install preflight passes allow_stale=False for an accurate snapshot.
+        if allow_stale and self._last_scan_result is not None:
+            self._ensure_background_scan(timeout)
+            return self._last_scan_result
+        async with self._scan_lock:
+            cached = self._cached_scan()
+            if cached is not None:
+                return cached
+            devices = await self._discover_uncached(timeout)
+            self._last_scan_result = devices
+            self._last_scan_at = time.monotonic()
+            return devices
+
+    def _ensure_background_scan(self, timeout: float) -> None:
+        task = getattr(self, "_bg_scan_task", None)
+        if task is not None and not task.done():
+            return
+        async def _run():
+            try:
+                await self.discover(timeout)
+            except Exception:
+                logger.debug("Background rescan failed", exc_info=True)
+        self._bg_scan_task = asyncio.create_task(_run())
+
+    async def _discover_uncached(self, timeout: float) -> list[dict]:
         logger.info("Scanning network for devices (%ss timeout)...", timeout)
         try:
-            if self._scan_lock is None:
-                self._scan_lock = asyncio.Lock()
-            async with self._scan_lock:
-                raw = await self._scan_in_subprocess(timeout)
+            raw = await self._scan_in_subprocess(timeout)
         except asyncio.TimeoutError:
             logger.error("mDNS scan exceeded timeout")
             raise RuntimeError("Local network scan timed out")
@@ -351,7 +397,10 @@ class DeviceManager:
             env=env,
         )
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout + 5)
+            # +8 leaves headroom for interpreter startup and zeroconf teardown
+            # under load (signing jobs run in this process during installs)
+            # while staying under /api/devices' 15s deadline.
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout + 8)
         except asyncio.TimeoutError:
             proc.kill()
             await proc.communicate()
