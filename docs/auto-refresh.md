@@ -27,10 +27,83 @@ Server startup
 
 ## Timing
 
-- **Check interval**: every 1 hour
-- **Refresh window**: starts 72 hours before the 7-day expiry
+- **Check interval**: every 1 hour, measured against the **wall clock**
+- **Refresh window**: starts 72 hours before expiry
+- **Expiry**: read from the provisioning profile's `ExpirationDate` where available, falling back to install time + 7 days for records written before that was stored. The 7-day clock starts when Apple issues the profile, not when the app is installed, so the estimate runs optimistic.
 - **Refresh behavior**: the hourly checker refreshes at the first successful opportunity inside that window
+- **On failure**: exponential backoff, 15 minutes doubling to a 12-hour cap, recorded as `next_attempt_at`. A record is never permanently retired — previously three consecutive failures (a weekend away from the device) ended auto-refresh for good.
 - **Startup delay**: 30 seconds (lets server finish initializing)
+
+### Why the wall clock matters
+
+The loop used to wait with `asyncio.sleep(3600)`. asyncio's clock is
+`time.monotonic()`, which on macOS is `mach_absolute_time()` and **does not
+advance while the system is asleep**. On one developer Mac,
+`mach_continuous_time` read 3107.88 h against `mach_absolute_time`'s 2049.48 h —
+44.1 days uncounted across 129 days of uptime, so the loop lost 34% of
+wall-clock time and a laptop that slept nightly checked far less than hourly.
+
+It now waits toward a wall-clock deadline in 60-second slices, so a machine
+that suspends past the deadline runs on its next wake.
+
+## Sleep and wake
+
+Catapult holds a `PreventUserIdleSystemSleep` power assertion for the duration
+of each refresh cycle, so a refresh cannot be suspended mid-signing. This needs
+no entitlement and, unlike `caffeinate -s`, is honoured on battery.
+
+It cannot wake a Mac that is already fully asleep. Scheduling a wake requires
+root, so Catapult shows the command rather than running it (Settings → Sync):
+
+```bash
+sudo pmset repeat wake MTWRFSU 03:00:00
+```
+
+What that can and cannot do, from `xnu`'s `IOPMrootDomain`
+(`shouldSleepOnRTCAlarmWake` returns `!acAdaptorConnected && !clamshellSleepDisableMask`,
+and the clamshell path re-sleeps unconditionally on RTC wake):
+
+| Configuration | Scheduled wake |
+|---|---|
+| Any desktop Mac | Works |
+| MacBook on power, lid open or closed | Works |
+| MacBook on battery, lid open | Works |
+| MacBook on battery, lid closed | Re-sleeps immediately — not overridable |
+
+The honest summary is "Catapult wakes your Mac to refresh, if it is plugged in
+or is a desktop", not "Catapult refreshes while your Mac sleeps". Given the
+72-hour window, being plugged in overnight every third night is enough.
+
+## Untethered refresh
+
+Catapult does **not** refresh apps while every one of your Macs is off, and
+cannot. Signing shells out to `/usr/bin/codesign`, and anisette mints a fresh
+~30-second `X-Apple-I-MD` from AOSKit on each request — both require a running
+Mac. A cloud worker would therefore have to be a rented Mac holding your Apple
+ID session and signing key.
+
+Note that installation is *not* the obstacle: `installation_proxy` is a classic
+lockdown service reachable over plain TCP, so a remote host can reach a device
+that dials out. The blocker is signing.
+
+If you want genuine 24/7 coverage, leave any Mac on the LAN running Catapult.
+That is also the only option that covers **Apple TV** — SideStore and similar
+on-device refreshers are iPhone/iPad only.
+
+## Certificates
+
+Development certificates are valid for a **year**; only the provisioning
+profile carries the 7-day clock. Catapult persists the certificate and key in
+the Keychain and reuses them while Apple still lists the certificate and expiry
+is more than 7 days out.
+
+Revoking is explicit and user-initiated. It used to happen on every refresh,
+which invalidated the certificate belonging to any other machine or tool on the
+same Apple ID — Xcode, AltStore, a second Mac.
+
+Note Apple's free-tier limits, which a scheduled loop can otherwise exhaust:
+10 App ID registrations per 7 days, 3 test devices per platform, 3 active apps.
+App IDs are looked up before being registered for this reason.
 
 ## Persistent State
 
