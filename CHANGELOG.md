@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+### iPhone and iPad
+
+- Fixed selecting a Wi-Fi iPhone or iPad while an Apple TV tunnel was active installing the app **onto the Apple TV**.
+- An iPhone or iPad found only over mDNS is no longer advertised as installable. Selecting one used to fire an admin password prompt, poll for roughly three minutes, and fail; it now says the device needs pairing by cable once.
+- An untrusted device plugged in over USB is no longer labelled "iPhone" regardless of what it is, and the row now says to unlock it and tap Trust.
+- Device scanning no longer re-triggers the Trust dialog on every poll.
+- A slow or failed network scan no longer hides devices that are plugged in.
+- Device registration uses the UDID reported by the device rather than the usbmux list serial.
+
+### Auto-refresh
+
+- Fixed the refresh loop losing all time the Mac spent asleep: it waited on a clock that stops during sleep, which on one machine went uncounted for 44 of 129 days.
+- Expiry now comes from the provisioning profile's real `ExpirationDate` instead of assuming install time plus seven days.
+- A failing refresh backs off exponentially instead of being retired permanently after three attempts.
+- Catapult reuses its signing certificate instead of revoking every certificate on the account hourly, which used to break Xcode, AltStore, and any second Mac. Certificates are valid for a year; only the profile expires weekly.
+- App IDs are looked up before being registered, so a scheduled refresh cannot exhaust Apple's limit of 10 registrations per 7 days.
+- A power assertion is held across each refresh so it cannot be suspended mid-signing.
+
+### Cross-device sync
+
+- Sync is configured in Settings instead of environment variables and `~/.catapult/config.env`, which a Finder-launched app never inherited.
+- The vault defaults to your own iCloud Drive, and a second Mac is unlocked with a single recovery key rather than a hand-copied shared secret.
+- Fixed a second Mac silently creating an incompatible vault when it had no key, instead of reporting the existing vault as locked.
+- Blobs are encrypted in streamed chunks rather than whole in memory, which needed roughly 3 GB for a 1 GB IPA.
+- Writes are staged outside the synced folder, so a partial upload is no longer pushed to your other Macs.
+- Existing `CATAPULT_SYNC_KEY` vaults are adopted automatically with no re-upload.
+- Removed the DMG option that embedded R2 credentials in the disk image.
+
 ## 0.3.8 - 2026-07-17
 
 - Automatically restart a wedged tunnel helper instead of trusting it: a long-running tunneld could silently stop discovering devices while still answering on its port, making Apple TV "Connect" time out with a misleading "device may need re-pairing".
