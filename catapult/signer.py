@@ -11,6 +11,7 @@ from pathlib import Path
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
+from catapult import provisioning
 from catapult.ipa import IpaProcessor
 
 logger = logging.getLogger(__name__)
@@ -123,15 +124,10 @@ class Signer:
 
     def _extract_entitlements(self, profile_bytes: bytes, dest: Path, bundle_id: str):
         """Pull entitlements dict from a provisioning profile and write as plist."""
-        # Profile is a CMS signed blob; the plist payload is between
-        # the first <?xml and </plist> tags.
-        raw = profile_bytes.decode("latin-1")
-        start = raw.find("<?xml")
-        end = raw.find("</plist>") + len("</plist>")
-        if start < 0 or end <= len("</plist>"):
-            raise RuntimeError("Could not parse provisioning profile")
-
-        plist_data = plistlib.loads(raw[start:end].encode("latin-1"))
+        try:
+            plist_data = provisioning.parse_profile_plist(profile_bytes)
+        except ValueError as e:
+            raise RuntimeError(str(e)) from e
         entitlements = plist_data.get("Entitlements", {})
         team_id = entitlements.get("com.apple.developer.team-identifier", "")
         app_identifier = entitlements.get("application-identifier", "")
