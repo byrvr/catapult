@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from catapult.errors import normalize_error
-from catapult import provisioning, vault
+from catapult import power, provisioning, vault
 
 logger = logging.getLogger(__name__)
 
@@ -333,56 +333,68 @@ async def run_refresh_loop(get_server_components):
             pending = due_installs(state)
             if pending:
                 logger.info("Auto-refresh: %d install(s) in the %dh refresh window", len(pending), REFRESH_WINDOW_HOURS)
-                components = tuple(get_server_components())
-                device_manager, auth_client, dev_services, signer, ipa_processor = components[:5]
-                activity_manager = components[5] if len(components) > 5 else None
-                session = auth_client.session
-                if not session or not session.authenticated:
-                    logger.warning("Auto-refresh skipped — not authenticated")
-                    if activity_manager:
-                        job = activity_manager.start(
-                            "refresh",
-                            "Auto-refresh skipped",
-                            target=f"{len(pending)} install(s)",
-                            message="Not authenticated.",
-                        )
-                        normalized = normalize_error("Not authenticated. Please sign in first.")
-                        activity_manager.fail(
-                            job,
-                            normalized.message,
-                            category=normalized.category,
-                            detail=normalized.detail,
-                        )
-                else:
-                    for rec in pending:
-                        job = None
-                        if activity_manager:
-                            job = activity_manager.start(
-                                "refresh",
-                                f"Refresh {rec.get('app_name') or Path(rec.get('ipa_path', '')).name or 'app'}",
-                                target=rec.get("device_name") or rec.get("device_udid", ""),
-                                message="Refreshing saved install...",
-                            )
-                        result = await _refresh_install(rec, device_manager, auth_client,
-                                                        dev_services, signer, ipa_processor)
-                        if activity_manager and job:
-                            if result.get("status") == "ok":
-                                activity_manager.complete(
-                                    job,
-                                    message=result.get("message") or "Auto-refresh complete.",
-                                )
-                            else:
-                                normalized = normalize_error(result.get("message") or "Auto-refresh failed.")
-                                activity_manager.fail(
-                                    job,
-                                    normalized.message,
-                                    category=normalized.category,
-                                    detail=normalized.detail,
-                                )
+                # Hold off idle sleep for the cycle. A refresh suspended
+                # mid-signing leaves a half-written IPA and a failed install.
+                with power.prevent_idle_sleep(
+                    f"Catapult is refreshing {len(pending)} app(s)"
+                ):
+                    await _run_refresh_cycle(pending, get_server_components)
         except Exception:
             logger.exception("Auto-refresh error")
 
         await sleep_until(next_check_at)
+
+
+async def _run_refresh_cycle(pending: list[dict], get_server_components) -> None:
+    """Refresh every due record once. Errors are handled per record."""
+    components = tuple(get_server_components())
+    device_manager, auth_client, dev_services, signer, ipa_processor = components[:5]
+    activity_manager = components[5] if len(components) > 5 else None
+    session = auth_client.session
+
+    if not session or not session.authenticated:
+        logger.warning("Auto-refresh skipped — not authenticated")
+        if activity_manager:
+            job = activity_manager.start(
+                "refresh",
+                "Auto-refresh skipped",
+                target=f"{len(pending)} install(s)",
+                message="Not authenticated.",
+            )
+            normalized = normalize_error("Not authenticated. Please sign in first.")
+            activity_manager.fail(
+                job,
+                normalized.message,
+                category=normalized.category,
+                detail=normalized.detail,
+            )
+        return
+
+    for rec in pending:
+        job = None
+        if activity_manager:
+            job = activity_manager.start(
+                "refresh",
+                f"Refresh {rec.get('app_name') or Path(rec.get('ipa_path', '')).name or 'app'}",
+                target=rec.get("device_name") or rec.get("device_udid", ""),
+                message="Refreshing saved install...",
+            )
+        result = await _refresh_install(rec, device_manager, auth_client,
+                                        dev_services, signer, ipa_processor)
+        if activity_manager and job:
+            if result.get("status") == "ok":
+                activity_manager.complete(
+                    job,
+                    message=result.get("message") or "Auto-refresh complete.",
+                )
+            else:
+                normalized = normalize_error(result.get("message") or "Auto-refresh failed.")
+                activity_manager.fail(
+                    job,
+                    normalized.message,
+                    category=normalized.category,
+                    detail=normalized.detail,
+                )
 
 
 async def _refresh_install(rec, device_manager, auth_client, dev_services, signer, ipa_processor):
