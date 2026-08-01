@@ -14,6 +14,11 @@ struct CatapultNativeApp: App {
                     await state.start()
                 }
         }
+        Settings {
+            SyncSettingsView()
+                .environmentObject(state)
+                .frame(width: 560, height: 560)
+        }
         MenuBarExtra {
             MenuBarStatusMenu()
                 .environmentObject(state)

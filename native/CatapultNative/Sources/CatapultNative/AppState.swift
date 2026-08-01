@@ -34,6 +34,7 @@ final class AppState: ObservableObject {
     @Published var installProgress = 0
     @Published var errorMessage: String?
     @Published var pinPromptDevice: Device?
+    @Published var sync: SyncInfo?
 
     let client = APIClient()
     private var isStarting = false
@@ -212,6 +213,33 @@ final class AppState: ObservableObject {
     func reloadAccountInfo() async {
         guard reinstallingAppID == nil else { return }
         await loadAccountInfo(clearJobMessages: true)
+    }
+
+    // MARK: - Cross-device sync
+
+    func loadSyncStatus() async {
+        sync = try? await client.syncStatus()
+    }
+
+    func configureSync(provider: String, folder: String?) async throws {
+        sync = try await client.configureSync(provider: provider, folder: folder)
+    }
+
+    /// Returns the recovery key exactly once, for display. It is never stored
+    /// in app state — losing it is recoverable, leaking it is not.
+    func createVault() async throws -> String? {
+        let response = try await client.createVault()
+        await loadSyncStatus()
+        return response.recoveryKey
+    }
+
+    func unlockVault(recoveryKey: String) async throws {
+        _ = try await client.unlockVault(recoveryKey: recoveryKey)
+        await loadSyncStatus()
+    }
+
+    func runSync() async throws {
+        sync = try await client.runSync()
     }
 
     func loadActivity() async {

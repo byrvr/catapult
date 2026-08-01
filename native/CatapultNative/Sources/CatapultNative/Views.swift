@@ -714,66 +714,82 @@ private struct SyncSummaryRow: View {
     let sync: SyncInfo
 
     var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: icon)
-                .font(.callout.weight(.semibold))
-                .foregroundStyle(color)
-                .frame(width: 22)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.caption.weight(.semibold))
-                Text(detail)
+        Button {
+            // Settings is where every sync action now lives; the row is just a
+            // status line plus a way in.
+            NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: icon)
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(color)
+                    .frame(width: 22)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.caption.weight(.semibold))
+                    Text(detail)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
+                    .foregroundStyle(.tertiary)
             }
-            Spacer()
+            .padding(10)
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 9))
+            .contentShape(RoundedRectangle(cornerRadius: 9))
         }
-        .padding(10)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 9))
+        .buttonStyle(.plain)
+        .help("Open sync settings")
     }
 
     private var title: String {
-        if sync.status == "ok" {
-            return "Sync ready"
+        switch sync.resolvedState {
+        case "ok": return "Sync ready"
+        case "locked", "needs_key": return "Sync locked"
+        case "wrong_key": return "Recovery key does not match"
+        case "needs_setup": return "Sync needs a vault"
+        case "needs_icloud": return "iCloud Drive is off"
+        default: return "Sync off"
         }
-        if sync.status == "needs_key" {
-            return "Sync needs recovery key"
-        }
-        if sync.status == "wrong_key" {
-            return "Sync key is wrong"
-        }
-        if sync.configured {
-            return "Sync configured"
-        }
-        return "Sync disabled"
     }
 
     private var detail: String {
-        if sync.status == "ok" {
+        switch sync.resolvedState {
+        case "ok":
             let uploaded = sync.uploadedIPAs ?? 0
             let downloaded = sync.downloadedIPAs ?? 0
             let installs = sync.installCount ?? 0
-            let portability = sync.portableKey == true ? "portable key" : "local-only key"
-            return "\(providerName) · \(installs) installs · \(uploaded) uploaded · \(downloaded) downloaded · \(portability)"
+            var parts = ["\(providerName)", "\(installs) installs"]
+            if uploaded > 0 { parts.append("\(uploaded) uploaded") }
+            if downloaded > 0 { parts.append("\(downloaded) downloaded") }
+            if let bytes = sync.vaultBytes, bytes > 0 {
+                parts.append(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file))
+            }
+            return parts.joined(separator: " · ")
+        case "locked", "needs_key":
+            return "Enter your recovery key on this Mac to open the vault."
+        case "wrong_key":
+            return "This vault was created with a different recovery key."
+        case "needs_setup":
+            return "\(providerName) is ready — create a vault to start syncing."
+        case "needs_icloud":
+            return "Turn on iCloud Drive in System Settings, or pick another folder."
+        default:
+            return "Set up sync to recover your apps on another Mac."
         }
-        if sync.status == "needs_key" {
-            return "\(providerName) configured · set CATAPULT_SYNC_KEY on each Mac before remote sync can run"
-        }
-        if sync.status == "wrong_key" {
-            return "\(providerName) configured · this Mac cannot decrypt the remote vault"
-        }
-        if sync.configured {
-            let portability = sync.portableKey == true ? "portable across Macs" : "needs shared CATAPULT_SYNC_KEY for another Mac"
-            return "\(providerName) configured · \(portability)"
-        }
-        return "Set sync settings in ~/.catapult/config.env to recover IPAs on another Mac."
     }
 
     private var providerName: String {
         switch sync.provider {
         case "r2": return "Cloudflare R2"
-        case "folder": return "Sync folder"
+        case "folder":
+            if let folder = sync.folder, folder.contains("com~apple~CloudDocs") {
+                return "iCloud Drive"
+            }
+            return "Sync folder"
         default: return sync.provider.isEmpty ? "No provider" : sync.provider
         }
     }
@@ -783,13 +799,12 @@ private struct SyncSummaryRow: View {
     }
 
     private var color: Color {
-        if sync.status == "ok" {
-            return .green
+        switch sync.resolvedState {
+        case "ok": return .green
+        case "wrong_key": return .red
+        case "locked", "needs_key", "needs_setup", "needs_icloud": return .orange
+        default: return .secondary
         }
-        if sync.status == "wrong_key" {
-            return .red
-        }
-        return sync.configured ? .orange : .secondary
     }
 }
 
