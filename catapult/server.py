@@ -20,6 +20,7 @@ from catapult.errors import normalize_error, redact_sensitive
 from catapult.ipa import IpaProcessor
 from catapult.jobs import ActivityJob, job_manager
 from catapult.signer import Signer
+from catapult import provisioning as _provisioning
 from catapult import refresh as _refresh
 from catapult import sync as _sync
 from catapult import vault as _vault
@@ -507,10 +508,16 @@ async def account_info():
                 ts = record.get("last_installed")
                 if ts:
                     installed_dt = datetime.fromtimestamp(ts).astimezone()
-                    # Free teams: profile expires 7 days after signing. Paid
-                    # teams get year-long certs/profiles (Catapult mints a
-                    # fresh cert at each install, so ~365 days from install).
-                    expiry_dt = installed_dt + timedelta(days=7 if is_free else 365)
+                    # Prefer the ExpirationDate read off the provisioning profile.
+                    # The 7-day clock starts at issuance, not install, so
+                    # install time + 7d is optimistic. Older records have no
+                    # stored expiry and still fall back to the estimate: free
+                    # teams get 7-day profiles, paid teams year-long ones.
+                    stored_expiry = record.get("expires_at")
+                    if stored_expiry:
+                        expiry_dt = datetime.fromtimestamp(float(stored_expiry)).astimezone()
+                    else:
+                        expiry_dt = installed_dt + timedelta(days=7 if is_free else 365)
                     delta = expiry_dt - now
                     days_left = max(0, delta.days)
                     exp_str = expiry_dt.strftime("%b %d, %Y %H:%M")
@@ -1172,6 +1179,7 @@ async def _install_app(
         ipa_sha256=vaulted["sha256"],
         ipa_size=vaulted["size"],
         original_filename=vaulted["original_filename"],
+        expires_at=_provisioning.profile_expiration_ts(profile),
     )
     await _sync_state_for_team(session.apple_id, team_id)
 

@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from catapult.errors import normalize_error
-from catapult import vault
+from catapult import provisioning, vault
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +22,17 @@ REFRESH_WINDOW_HOURS = 72
 REFRESH_WINDOW_SECONDS = REFRESH_WINDOW_HOURS * 3600
 # Re-sign opportunistically once an app has 72h or less before expiry.
 REFRESH_AFTER_SECONDS = max(0, REFRESH_VALID_SECONDS - REFRESH_WINDOW_SECONDS)
+
+# A failing refresh backs off instead of retiring the record. The old behaviour
+# (retire after 3 consecutive failures) meant one weekend away from the device
+# silently ended auto-refresh for good.
+RETRY_BASE_SECONDS = 15 * 60
+RETRY_MAX_SECONDS = 12 * 3600
+
+# Wait in slices rather than one long sleep. asyncio's clock is time.monotonic(),
+# which on macOS is mach_absolute_time() and does NOT advance while the system is
+# asleep, so a single long sleep silently loses all suspended time.
+SLEEP_SLICE_SECONDS = 60
 
 
 def _now_ts() -> float:
@@ -40,24 +51,56 @@ def _refresh_after_ts(last_installed: float | int | None) -> float | None:
     return float(last_installed) + REFRESH_AFTER_SECONDS
 
 
+def retry_delay_seconds(fail_count: int) -> float:
+    """Exponential backoff for a record whose refresh keeps failing."""
+    if fail_count <= 0:
+        return 0.0
+    return float(min(RETRY_BASE_SECONDS * (2 ** (fail_count - 1)), RETRY_MAX_SECONDS))
+
+
+async def sleep_until(deadline_ts: float, *, now=None, sleep=None) -> None:
+    """Sleep until a wall-clock deadline, re-checking the real clock as we go.
+
+    A machine that suspends past the deadline must run on its next wake rather
+    than waiting out a duration measured on a clock that was frozen.
+    """
+    now = now or _now_ts
+    sleep = sleep or asyncio.sleep
+    while True:
+        remaining = deadline_ts - now()
+        if remaining <= 0:
+            return
+        await sleep(min(remaining, SLEEP_SLICE_SECONDS))
+
+
 def seconds_until_expiry(rec: dict, now: float | None = None) -> float | None:
-    expires_at = _expiry_ts(rec.get("last_installed"))
+    """Seconds until the profile expires.
+
+    Prefers the ExpirationDate recorded from the provisioning profile; falls
+    back to install time + 7 days for records written before that was stored.
+    """
+    expires_at = rec.get("expires_at") or _expiry_ts(rec.get("last_installed"))
     if expires_at is None:
         return None
-    return expires_at - (now if now is not None else _now_ts())
+    return float(expires_at) - (now if now is not None else _now_ts())
 
 
 def seconds_until_refresh(rec: dict, now: float | None = None) -> float | None:
-    refresh_after = _refresh_after_ts(rec.get("last_installed"))
+    refresh_after = rec.get("refresh_after") or _refresh_after_ts(rec.get("last_installed"))
     if refresh_after is None:
         return None
-    return refresh_after - (now if now is not None else _now_ts())
+    return float(refresh_after) - (now if now is not None else _now_ts())
 
 
-def _stamp_refresh_schedule(rec: dict, installed_at: float) -> None:
+def _stamp_refresh_schedule(
+    rec: dict, installed_at: float, expires_at: float | None = None
+) -> None:
     rec["last_installed"] = installed_at
-    rec["expires_at"] = _expiry_ts(installed_at)
-    rec["refresh_after"] = _refresh_after_ts(installed_at)
+    resolved_expiry = expires_at if expires_at else _expiry_ts(installed_at)
+    rec["expires_at"] = resolved_expiry
+    rec["refresh_after"] = (
+        resolved_expiry - REFRESH_WINDOW_SECONDS if resolved_expiry else None
+    )
     rec["refresh_window_hours"] = REFRESH_WINDOW_HOURS
 
 
@@ -86,6 +129,7 @@ def record_install(
     ipa_sha256: str = "",
     ipa_size: int | None = None,
     original_filename: str = "",
+    expires_at: float | None = None,
 ):
     state = load_state()
     installs = state.get("installs", [])
@@ -111,7 +155,7 @@ def record_install(
         same_source_bundle = same_device and source_bundle_id and rec.get("source_bundle_id") == source_bundle_id
         if same_file or same_hash or same_signed_bundle or same_source_bundle:
             rec["ipa_path"] = ipa_path
-            _stamp_refresh_schedule(rec, installed_at)
+            _stamp_refresh_schedule(rec, installed_at, expires_at)
             rec["device_name"] = device_name or rec.get("device_name", "")
             if bundle_id:
                 rec["bundle_id"] = bundle_id
@@ -126,6 +170,7 @@ def record_install(
             if original_filename:
                 rec["original_filename"] = original_filename
             rec["fail_count"] = 0
+            rec.pop("next_attempt_at", None)
             save_state(state)
             return
     installs.append({
@@ -138,11 +183,8 @@ def record_install(
         "ipa_sha256": ipa_sha256,
         "ipa_size": ipa_size,
         "original_filename": original_filename,
-        "last_installed": installed_at,
-        "expires_at": _expiry_ts(installed_at),
-        "refresh_after": _refresh_after_ts(installed_at),
-        "refresh_window_hours": REFRESH_WINDOW_HOURS,
     })
+    _stamp_refresh_schedule(installs[-1], installed_at, expires_at)
     state["installs"] = installs
     save_state(state)
     logger.info("Recorded install: %s → %s", ipa_path, device_udid)
@@ -255,9 +297,6 @@ def restore_session(auth_client) -> bool:
     return True
 
 
-MAX_CONSECUTIVE_FAILURES = 3
-
-
 def _rewrite_nested_bundle_id(parent_old_id: str, parent_new_id: str, nested_old_id: str) -> str:
     if nested_old_id == parent_old_id:
         return parent_new_id
@@ -266,17 +305,18 @@ def _rewrite_nested_bundle_id(parent_old_id: str, parent_new_id: str, nested_old
     return f"{parent_new_id}.{nested_old_id.rsplit('.', 1)[-1]}"
 
 
-def due_installs(state: dict) -> list[dict]:
-    """Return installs that need refreshing (skip those that failed too many times)."""
-    now = _now_ts()
-    return [
-        r for r in state.get("installs", [])
-        if (
-            seconds_until_expiry(r, now) is None
-            or seconds_until_expiry(r, now) <= REFRESH_WINDOW_SECONDS
-        )
-        and r.get("fail_count", 0) < MAX_CONSECUTIVE_FAILURES
-    ]
+def due_installs(state: dict, now: float | None = None) -> list[dict]:
+    """Return installs inside the refresh window and past any backoff window."""
+    now = now if now is not None else _now_ts()
+
+    def _is_due(rec: dict) -> bool:
+        remaining = seconds_until_expiry(rec, now)
+        if remaining is not None and remaining > REFRESH_WINDOW_SECONDS:
+            return False
+        next_attempt = rec.get("next_attempt_at")
+        return not next_attempt or float(next_attempt) <= now
+
+    return [r for r in state.get("installs", []) if _is_due(r)]
 
 
 async def run_refresh_loop(get_server_components):
@@ -285,6 +325,9 @@ async def run_refresh_loop(get_server_components):
     await asyncio.sleep(30)  # let server settle on startup
 
     while True:
+        # Compute the next deadline against the wall clock BEFORE doing the work,
+        # so a slow refresh cycle does not push the following check out.
+        next_check_at = _now_ts() + CHECK_INTERVAL
         try:
             state = load_state()
             pending = due_installs(state)
@@ -339,7 +382,7 @@ async def run_refresh_loop(get_server_components):
         except Exception:
             logger.exception("Auto-refresh error")
 
-        await asyncio.sleep(CHECK_INTERVAL)
+        await sleep_until(next_check_at)
 
 
 async def _refresh_install(rec, device_manager, auth_client, dev_services, signer, ipa_processor):
@@ -439,18 +482,24 @@ async def _refresh_install(rec, device_manager, auth_client, dev_services, signe
             ipa_sha256=rec.get("ipa_sha256", ""),
             ipa_size=rec.get("ipa_size"),
             original_filename=rec.get("original_filename", ""),
+            expires_at=provisioning.profile_expiration_ts(profile),
         )
         logger.info("Auto-refresh complete: %s", ipa_path)
         return {"status": "ok", "message": "Auto-refresh complete."}
     except Exception as e:
         rec["fail_count"] = rec.get("fail_count", 0) + 1
-        # Persist failure count
+        delay = retry_delay_seconds(rec["fail_count"])
+        rec["next_attempt_at"] = _now_ts() + delay
+        # Persist failure count and backoff window
         state = load_state()
         for r in state.get("installs", []):
-            if r["device_udid"] == device_udid and r["ipa_path"] == ipa_path:
+            if r.get("device_udid") == device_udid and r.get("ipa_path") == ipa_path:
                 r["fail_count"] = rec["fail_count"]
+                r["next_attempt_at"] = rec["next_attempt_at"]
                 break
         save_state(state)
-        logger.exception("Auto-refresh failed for %s (attempt %d/%d)",
-                         ipa_path, rec["fail_count"], MAX_CONSECUTIVE_FAILURES)
+        logger.exception(
+            "Auto-refresh failed for %s (attempt %d, retrying in %.0f min)",
+            ipa_path, rec["fail_count"], delay / 60,
+        )
         return {"status": "error", "message": str(e), "fail_count": rec["fail_count"]}
