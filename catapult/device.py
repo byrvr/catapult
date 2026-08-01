@@ -34,6 +34,28 @@ DEVICE_CLASS_MAP = {
 # Only mobdev2 is directly installable. Remotepairing needs pair + tunnel first.
 INSTALLABLE_SERVICES = {"_apple-mobdev2._tcp.local."}
 NEEDS_SETUP_SERVICES = {"_remotepairing._tcp.local."}
+
+# Device classes that reach installd over an RSD tunnel. iPhone and iPad reach
+# it over classic lockdown instead, via usbmux.
+TUNNEL_DEVICE_CLASSES = {"tvos"}
+
+
+def device_class_for(name: str, model: str) -> str:
+    """Best-effort device class from an advertised name and model.
+
+    Checks the model first: a user-chosen name like "Ruslan's Tablet" carries
+    no signal, while ProductType always does. Several call sites used to
+    hardcode `"tvos" if "AppleTV" in model else "unknown"`, so a remembered
+    iPad could never come back as ipados.
+    """
+    for haystack in (str(model or ""), f"{name or ''} {model or ''}"):
+        lowered = haystack.lower()
+        for prefix, cls in DEVICE_CLASS_MAP.items():
+            if prefix.lower() in lowered:
+                return cls
+    return "unknown"
+
+
 STATE_DIR = Path.home() / ".catapult"
 PAIRED_DEVICES_PATH = STATE_DIR / "paired_devices.json"
 TUNNELD_DAEMON_LABEL = "com.catapult.tunneld"
@@ -143,13 +165,18 @@ class _Listener(ServiceListener):
             device_name = model.split(",")[0] if model else "Apple Device"
         udid = (props.get("UniqueDeviceID") or props.get("rpMRtID")
                 or props.get("deviceid") or name)
-        device_class = "unknown"
-        # Check both name and model for device type
-        check_str = f"{device_name} {model}".lower()
-        for prefix, cls in DEVICE_CLASS_MAP.items():
-            if prefix.lower() in check_str:
-                device_class = cls
-                break
+        device_class = device_class_for(name=device_name, model=model)
+
+        # mDNS says an iPhone/iPad is on the network; it does not say this Mac
+        # can talk to it. Reaching installd needs a lockdown pair record, which
+        # only a USB trust creates. Claiming installable here sent the install
+        # down the Apple TV tunnel path: an admin password prompt, a ~3 minute
+        # poll, and then failure — or worse, an install onto the Apple TV.
+        installable = stype in INSTALLABLE_SERVICES
+        needs_setup = stype in NEEDS_SETUP_SERVICES
+        if installable and device_class not in TUNNEL_DEVICE_CLASSES:
+            installable = False
+            needs_setup = True
 
         key = f"{addresses[0]}:{info.port}:{stype}"
         self.found[key] = {
@@ -161,8 +188,8 @@ class _Listener(ServiceListener):
             "service": stype,
             "device_class": device_class,
             "connection": "network",
-            "installable": stype in INSTALLABLE_SERVICES,
-            "needs_setup": stype in NEEDS_SETUP_SERVICES,
+            "installable": installable,
+            "needs_setup": needs_setup,
             "paired": False,
             "requires_tunnel": stype in NEEDS_SETUP_SERVICES,
             "tunnel_active": False,
@@ -274,11 +301,14 @@ class DeviceManager:
             # Recompute device_class against the merged name+model — the
             # per-service entry that won deduplication (often _remotepairing)
             # may have arrived with neither, leaving class as "unknown".
-            check_str = f"{d['name']} {d.get('model', '')}".lower()
-            for prefix, cls in DEVICE_CLASS_MAP.items():
-                if prefix.lower() in check_str:
-                    d["device_class"] = cls
-                    break
+            merged_class = device_class_for(name=d["name"], model=d.get("model", ""))
+            if merged_class != "unknown":
+                d["device_class"] = merged_class
+                # A merged name/model can reveal an iPhone or iPad behind a
+                # record that mDNS marked installable. Re-apply the same rule.
+                if d["installable"] and merged_class not in TUNNEL_DEVICE_CLASSES:
+                    d["installable"] = False
+                    d["needs_setup"] = True
 
         devices = list(by_host.values())
 
@@ -334,16 +364,24 @@ class DeviceManager:
             connection_type_raw = getattr(mux_device, "connection_type", "")
             connection = _normalize_usbmux_connection(connection_type_raw)
             connection_type = str(connection_type_raw or connection).strip()
+            # Deliberately blank rather than defaulting to iPhone: when the
+            # lockdown probe below fails on an untrusted device these defaults
+            # survive, and an iPad would be shown as an iPhone.
             info = {
-                "DeviceName": "iPhone",
+                "DeviceName": "",
                 "ProductType": "",
                 "ProductVersion": "",
-                "DeviceClass": "iPhone",
+                "DeviceClass": "",
                 "UniqueDeviceID": udid,
             }
             trusted = False
             try:
-                lockdown = await create_using_usbmux(serial=udid, pair_timeout=3)
+                # autopair=False: discovery runs on a 5s cache TTL while the UI
+                # polls, and the default would re-trigger the Trust dialog on an
+                # untrusted device on every single scan.
+                lockdown = await create_using_usbmux(
+                    serial=udid, pair_timeout=3, autopair=False
+                )
                 for key in list(info):
                     try:
                         value = await lockdown.get_value(key=key)
@@ -355,12 +393,21 @@ class DeviceManager:
             except Exception as e:
                 logger.info("usbmux device %s is visible but not ready: %s", udid, e)
 
-            device_class = "ios"
-            if str(info.get("DeviceClass", "")).lower() == "ipad" or str(info.get("ProductType", "")).startswith("iPad"):
-                device_class = "ipados"
+            device_class = device_class_for(
+                name=info.get("DeviceClass", ""), model=info.get("ProductType", "")
+            )
+            if device_class == "unknown":
+                # An untrusted device answers nothing, so we genuinely do not
+                # know what it is. Say "device", not "iPhone".
+                device_class = "ios" if trusted else "unknown"
+
+            default_name = {
+                "ipados": "iPad",
+                "ios": "iPhone",
+            }.get(device_class, "Connected device")
 
             devices.append({
-                "name": info.get("DeviceName") or ("iPad" if device_class == "ipados" else "iPhone"),
+                "name": info.get("DeviceName") or default_name,
                 "model": info.get("ProductType", ""),
                 "udid": udid,
                 "host": f"usb:{udid}",
@@ -378,6 +425,8 @@ class DeviceManager:
                     "UniqueDeviceID": info.get("UniqueDeviceID", udid),
                     "ConnectionType": connection_type,
                     "trusted": trusted,
+                    "setup_hint": "" if trusted else
+                        "Unlock this device and tap Trust, then scan again.",
                 },
             })
         return devices
@@ -448,7 +497,7 @@ class DeviceManager:
                 "host": device.get("host", ""),
                 "port": 49152,
                 "service": "_remotepairing._tcp.local.",
-                "device_class": "tvos" if "AppleTV" in model else "unknown",
+                "device_class": device_class_for(name=device.get("name", ""), model=model),
                 "connection": "network",
                 "installable": False,
                 "needs_setup": False,
@@ -577,7 +626,23 @@ class DeviceManager:
         device_udid: str | None = None,
         device_host: str | None = None,
     ) -> dict:
-        """Pair with a device. Runs in a background thread so input() doesn't block."""
+        """Pair with a device. Runs in a background thread so input() doesn't block.
+
+        Apple TV only. The protocol below browses `_remotepairing-manual-pairing._tcp`
+        and drives the on-screen PIN handshake; iPhone and iPad advertise neither
+        and are paired by plugging them in and tapping Trust.
+        """
+        known = self._cache.get(device_udid or "") or {}
+        if known.get("device_class") in {"ios", "ipados"}:
+            label = "iPad" if known.get("device_class") == "ipados" else "iPhone"
+            return {
+                "status": "error",
+                "message": (
+                    f"{label}s pair over USB, not over the network. Connect it "
+                    f"with a cable, unlock it, and tap Trust."
+                ),
+            }
+
         try:
             from pymobiledevice3.bonjour import browse_remotepairing_manual_pairing
         except ImportError as e:
@@ -1099,7 +1164,10 @@ echo installed
                             "udid": device_udid or "",
                             "host": device_host,
                             "service": "_remotepairing._tcp.local.",
-                            "device_class": "tvos" if "AppleTV" in remembered.get("model", "") else "unknown",
+                            "device_class": device_class_for(
+                                name=remembered.get("name", ""),
+                                model=remembered.get("model", ""),
+                            ),
                             "properties": {},
                         }
         return None
@@ -1172,6 +1240,14 @@ echo installed
 
         return score
 
+    @staticmethod
+    def _rsd_device_class(rsd) -> str:
+        product = str(
+            getattr(rsd, "product_type", "")
+            or (getattr(rsd, "peer_info", {}) or {}).get("Properties", {}).get("ProductType", "")
+        )
+        return device_class_for(name="", model=product)
+
     def _select_rsd(self, rsds: list, target: dict | None, *, allow_single_fallback: bool) -> object | None:
         if not rsds:
             return None
@@ -1182,6 +1258,21 @@ echo installed
         if best_score > 0:
             return best
         if allow_single_fallback and len(rsds) == 1:
+            # The fallback exists because Apple TV mDNS identifiers rotate and
+            # often match nothing. But an iPad scores 0 against an Apple TV
+            # tunnel for exactly the same reason, and taking "the only tunnel we
+            # have" would install the app onto the Apple TV. Only fall back when
+            # the classes are compatible.
+            target_class = str(target.get("device_class", "")) or "unknown"
+            sole_class = self._rsd_device_class(rsds[0])
+            if target_class != "unknown" and sole_class != "unknown" and target_class != sole_class:
+                logger.warning(
+                    "Refusing to use the sole %s tunnel for a %s target (%s)",
+                    sole_class,
+                    target_class,
+                    target.get("name") or target.get("udid") or target.get("host"),
+                )
+                return None
             logger.info(
                 "Using sole tunneled RSD (udid=%s) for selected target %s",
                 getattr(rsds[0], "udid", "?"),
@@ -1447,10 +1538,25 @@ echo installed
         device_udid: str | None = None,
         device_host: str | None = None,
     ) -> tuple[str, str | None]:
-        """Get the real device UDID from RSD and detect platform (tvOS vs iOS)."""
+        """Get the real device UDID from RSD and detect platform (tvOS vs iOS).
+
+        Tunnel-only. iPhone and iPad reach installd over classic lockdown via
+        usbmux and never come through here — callers short-circuit on
+        service == "usbmux".
+        """
         from pymobiledevice3.tunneld.api import get_tunneld_devices
 
         target = self._tunnel_target(device_udid=device_udid, device_host=device_host)
+        target_class = str((target or {}).get("device_class", "")) or "unknown"
+        if target_class not in TUNNEL_DEVICE_CLASSES and target_class != "unknown":
+            # Previously this fell through to start_tunnel(), which fired an
+            # admin password prompt and polled for roughly three minutes before
+            # failing, for a device that can never be tunneled: tunneld runs
+            # with --no-usb --no-usbmux --no-mobdev2.
+            raise RuntimeError(
+                "Catapult installs to iPhone and iPad over USB. Connect the "
+                "device with a cable, unlock it, and tap Trust."
+            )
 
         # Prefer the identity cached when the tunnel came up — dialing the RSD
         # again right after another connection closed can transiently fail and
@@ -1641,6 +1747,12 @@ echo installed
                 installable = True
 
         if not installable:
+            if device.get("device_class") in {"ios", "ipados"}:
+                raise RuntimeError(
+                    f"'{device['name']}' was found on the network, but Catapult "
+                    f"installs to iPhone and iPad over USB. Connect it with a "
+                    f"cable, unlock it, and tap Trust."
+                )
             raise RuntimeError(
                 f"Device '{device['name']}' is not ready for installation. "
                 f"Use the 'Setup' button to pair and create a tunnel first."
@@ -1702,7 +1814,15 @@ echo installed
         from pymobiledevice3.lockdown import create_using_tcp
         from pymobiledevice3.services.installation_proxy import InstallationProxyService
 
-        lockdown = await create_using_tcp(host, identifier=udid, port=port)
+        # autopair=False deliberately. TcpLockdownClient.__init__ overwrites
+        # identifier with the hostname (pymobiledevice3 lockdown.py:1499-1500),
+        # so the pair-record lookup searches for a record named after the IP,
+        # finds none, and the default autopair=True pops an interactive Trust
+        # dialog — from inside the background refresh loop. Failing with a clear
+        # error beats blocking on a prompt nobody is there to answer.
+        lockdown = await create_using_tcp(
+            host, identifier=udid, port=port, autopair=False
+        )
         installer = InstallationProxyService(lockdown=lockdown)
         await installer.install_from_local(str(ipa_path))
 
