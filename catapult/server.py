@@ -20,6 +20,7 @@ from catapult.errors import normalize_error, redact_sensitive
 from catapult.ipa import IpaProcessor
 from catapult.jobs import ActivityJob, job_manager
 from catapult.signer import Signer
+from catapult import power as _power
 from catapult import provisioning as _provisioning
 from catapult import refresh as _refresh
 from catapult import sync as _sync
@@ -369,6 +370,116 @@ async def sync_status():
     except Exception:
         logger.debug("Could not include team info in sync status", exc_info=True)
         return _sync.status(session.apple_id, "")
+
+
+async def _current_team_id() -> str:
+    session = auth_client.session
+    if not session or not session.authenticated:
+        return ""
+    try:
+        team = await dev_services.get_team(session)
+        return team.get("teamId", "")
+    except Exception:
+        logger.debug("Could not resolve team for sync", exc_info=True)
+        return ""
+
+
+@app.post("/api/sync/configure")
+async def configure_sync(payload: dict = None):
+    """Choose where the vault lives. Replaces the env vars and config.env."""
+    payload = payload or {}
+    provider = (payload.get("provider") or "disabled").lower()
+    if provider not in {"disabled", "folder", "r2"}:
+        return JSONResponse(
+            {"status": "error", "message": f"Unknown provider {provider!r}"},
+            status_code=400,
+        )
+
+    folder = payload.get("folder") or ""
+    if provider == "folder" and not folder:
+        folder = str(_sync.ICLOUD_VAULT_PATH)
+    if provider == "folder" and str(folder) == str(_sync.ICLOUD_VAULT_PATH):
+        if not _sync.icloud_drive_available():
+            return JSONResponse(
+                {
+                    "status": "needs_icloud",
+                    "message": "Turn on iCloud Drive in System Settings first.",
+                },
+                status_code=400,
+            )
+
+    config = _sync.SyncConfig(
+        provider=provider,
+        folder=Path(folder).expanduser() if folder else None,
+        r2_endpoint=(payload.get("r2_endpoint") or "").rstrip("/"),
+        r2_bucket=payload.get("r2_bucket") or "",
+        r2_access_key_id=payload.get("r2_access_key_id") or "",
+        r2_secret_access_key=payload.get("r2_secret_access_key") or "",
+    )
+    config.save()
+    logger.info("Sync configured: provider=%s", provider)
+    return _sync.status(
+        auth_client.session.apple_id if auth_client.session else "",
+        await _current_team_id(),
+    )
+
+
+@app.post("/api/sync/create-vault")
+async def create_vault():
+    """Create a vault and return the recovery key ONCE, for display."""
+    session = auth_client.session
+    if not session or not session.authenticated:
+        return JSONResponse({"status": "error", "message": "Not authenticated"}, status_code=401)
+    team_id = await _current_team_id()
+    if not team_id:
+        return JSONResponse({"status": "error", "message": "No team available"}, status_code=400)
+    try:
+        return await _sync.create_vault(session.apple_id, team_id)
+    except Exception as e:
+        logger.exception("Could not create sync vault")
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+
+@app.post("/api/sync/unlock")
+async def unlock_sync(payload: dict = None):
+    """Unlock an existing vault with a recovery key carried from another Mac."""
+    session = auth_client.session
+    if not session or not session.authenticated:
+        return JSONResponse({"status": "error", "message": "Not authenticated"}, status_code=401)
+    team_id = await _current_team_id()
+    if not team_id:
+        return JSONResponse({"status": "error", "message": "No team available"}, status_code=400)
+
+    entered = (payload or {}).get("recovery_key", "")
+    try:
+        result = await _sync.unlock_vault(team_id, entered)
+    except Exception as e:
+        logger.exception("Could not unlock sync vault")
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+    status_code = 200 if result.get("status") == "ok" else 400
+    return JSONResponse(result, status_code=status_code)
+
+
+@app.get("/api/power/wake-command")
+async def wake_command(hour: int = 3, minute: int = 0):
+    """The pmset invocation the user runs once to schedule a nightly wake.
+
+    Returned rather than executed: pmset schedule requires root, and Catapult
+    should not silently escalate to change a machine's power schedule.
+    """
+    try:
+        command = _power.wake_schedule_command(hour=hour, minute=minute)
+    except ValueError as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=400)
+    return {
+        "status": "ok",
+        "command": command,
+        "note": (
+            "Scheduled wake works on a desktop Mac, or a laptop on power. "
+            "A laptop on battery with the lid closed goes straight back to "
+            "sleep and cannot be overridden."
+        ),
+    }
 
 
 @app.post("/api/sync/run")
