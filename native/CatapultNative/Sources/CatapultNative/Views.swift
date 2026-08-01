@@ -397,7 +397,7 @@ private struct DeviceBrowser: View {
                 LoadingRow("Scanning local network...")
                     .padding(.vertical, 18)
             } else if state.devices.isEmpty {
-                EmptyState(icon: CatapultIcon.noDevices, title: "No devices found", detail: "Keep the target device on this network and enable Developer Mode for Apple TV.")
+                EmptyState(icon: CatapultIcon.noDevices, title: "No devices found", detail: "Connect an iPhone or iPad with a cable, unlock it, and tap Trust. For Apple TV, keep it on this network and enable Developer Mode.")
                     .padding(.vertical, 12)
             } else {
                 VStack(spacing: 8) {

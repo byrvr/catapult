@@ -14,8 +14,16 @@ struct Device: Codable, Hashable, Identifiable, Sendable {
     let paired: Bool?
     let requiresTunnel: Bool?
     let tunnelActive: Bool?
+    /// Set when the device is visible but not usable yet — e.g. plugged in
+    /// but not trusted. Shown verbatim so the app says what to actually do.
+    let setupHint: String?
 
     var id: String { udid }
+
+    var needsTrust: Bool {
+        (deviceClass == "ios" || deviceClass == "ipados" || deviceClass == "unknown")
+            && !(setupHint ?? "").isEmpty
+    }
 
     var platformLabel: String {
         switch deviceClass {
@@ -82,6 +90,9 @@ struct Device: Codable, Hashable, Identifiable, Sendable {
     }
 
     var statusLabel: String {
+        if needsTrust {
+            return "Not trusted"
+        }
         if canInstallNow {
             if isPhysicalUSB {
                 return "Ready · USB"
@@ -101,7 +112,12 @@ struct Device: Codable, Hashable, Identifiable, Sendable {
     }
 
     var displayDetail: String {
-        "\(platformLabel) · \(displayEndpoint)"
+        // When a device is visible but unusable, the row should say what to do
+        // about it rather than just where it is.
+        if needsTrust, let hint = setupHint, !hint.isEmpty {
+            return hint
+        }
+        return "\(platformLabel) · \(displayEndpoint)"
     }
 
     private var displayEndpoint: String {
@@ -136,7 +152,8 @@ struct Device: Codable, Hashable, Identifiable, Sendable {
             needsSetup: false,
             paired: true,
             requiresTunnel: requiresTunnel,
-            tunnelActive: true
+            tunnelActive: true,
+            setupHint: nil
         )
     }
 
@@ -154,6 +171,7 @@ struct Device: Codable, Hashable, Identifiable, Sendable {
         case paired
         case requiresTunnel = "requires_tunnel"
         case tunnelActive = "tunnel_active"
+        case setupHint = "setup_hint"
     }
 }
 

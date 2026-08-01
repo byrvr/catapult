@@ -263,16 +263,26 @@ class DeviceManager:
 
     async def _discover_uncached(self, timeout: float) -> list[dict]:
         logger.info("Scanning network for devices (%ss timeout)...", timeout)
+        # A slow or failed network scan must not hide a device that is plugged
+        # in. USB discovery does not depend on mDNS at all, and an iPhone or
+        # iPad on a cable is the one case guaranteed to be installable.
+        mdns_failed = False
         try:
             raw = await self._scan_in_subprocess(timeout)
         except asyncio.TimeoutError:
             logger.error("mDNS scan exceeded timeout")
-            raise RuntimeError("Local network scan timed out")
+            mdns_failed = True
+            raw = []
         except Exception:
             logger.exception("mDNS scan failed")
+            mdns_failed = True
             raw = []
 
-        raw.extend(await self._scan_usb_devices())
+        usb_devices = await self._scan_usb_devices()
+        raw.extend(usb_devices)
+
+        if mdns_failed and not usb_devices:
+            raise RuntimeError("Local network scan timed out")
 
         # Deduplicate by host — prefer installable, merge best name/model
         by_host: dict[str, dict] = {}
@@ -414,6 +424,10 @@ class DeviceManager:
                 "port": 62078,
                 "service": "usbmux",
                 "device_class": device_class,
+                "setup_hint": "" if trusted else (
+                    f"Unlock this {'iPad' if device_class == 'ipados' else 'device'} "
+                    "and tap Trust, then scan again."
+                ),
                 "connection": connection,
                 "installable": trusted,
                 "needs_setup": not trusted,
@@ -1704,7 +1718,9 @@ echo installed
         from pymobiledevice3.lockdown import create_using_usbmux
         from pymobiledevice3.services.installation_proxy import InstallationProxyService
 
-        lockdown = await create_using_usbmux(serial=udid, pair_timeout=3)
+        # autopair=False, matching the discovery probe: listing apps runs in
+        # the background and must never pop a Trust dialog.
+        lockdown = await create_using_usbmux(serial=udid, pair_timeout=3, autopair=False)
         installer = InstallationProxyService(lockdown=lockdown)
         attributes = [
             "CFBundleIdentifier",
