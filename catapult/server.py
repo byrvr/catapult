@@ -1171,7 +1171,13 @@ async def _install_app(
         if tunnel.get("status") != "ok":
             raise RuntimeError(tunnel.get("message") or "Apple TV tunnel is not ready.")
     if device_info.get("service") == "usbmux":
-        real_udid = device_info["udid"]
+        # Prefer the UDID lockdown itself reported. Apple's device registration
+        # is keyed on the real UDID, and the usbmux list serial is not
+        # guaranteed to be in the same form on modern devices.
+        real_udid = (
+            (device_info.get("properties") or {}).get("UniqueDeviceID")
+            or device_info["udid"]
+        )
         sub_platform = None
     else:
         real_udid, sub_platform = await device_manager.get_real_udid(
