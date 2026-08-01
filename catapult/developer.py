@@ -27,6 +27,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
+from catapult import signing_identity
 from catapult.anisette import get_anisette_http_headers
 from catapult.apple_auth import AuthSession
 
@@ -284,16 +285,31 @@ class DeveloperServices:
     ) -> tuple[bytes, rsa.RSAPrivateKey]:
         """Ensure we have a valid signing certificate.
 
-        Flow (matches AltSign):
-          1. List existing certs
-          2. Revoke all existing certs (free accounts have a limit)
-          3. Generate fresh RSA key + CSR
-          4. Submit CSR to Apple
-          5. Fetch cert content from cert list
+        Reuses the stored identity when Apple still lists it and it is not near
+        expiry. Free-account certificates last a year — only the provisioning
+        profile carries the 7-day clock — so minting a new one per refresh both
+        wasted the credential and revoked whatever certificate Xcode, AltStore
+        or a second Mac was using on the same Apple ID.
+
+        Only when there is no usable identity do we fall back to the AltSign
+        flow: revoke all, generate a fresh RSA key + CSR, submit, fetch content.
 
         Returns (cert_pem_bytes, private_key).
         """
-        # Step 1+2: Revoke existing certs to guarantee room
+        existing = signing_identity.load(team_id)
+        if existing:
+            apple_certs = await self._list_certs(session, team_id)
+            if signing_identity.is_usable(existing, apple_certs):
+                self._cert_id = existing.certificate_id
+                self._cert_serial = existing.serial_number
+                self._private_key = existing.private_key()
+                logger.info(
+                    "Reusing stored signing certificate (id=%s)", self._cert_id
+                )
+                return existing.cert_pem, self._private_key
+            signing_identity.clear(team_id)
+
+        # No usable identity — make room and mint a new one.
         logger.info("Revoking existing development certificates...")
         await self._revoke_all_certs(session, team_id, catapult_only=not personal_team)
 
@@ -370,8 +386,27 @@ class DeveloperServices:
                 else cert_content.encode()
             )
 
+        signing_identity.save(
+            team_id,
+            signing_identity.SigningIdentity.from_key(
+                cert_pem, self._private_key, self._cert_id, self._cert_serial
+            ),
+        )
         logger.info("Signing certificate ready (id=%s)", self._cert_id)
         return cert_pem, self._private_key
+
+    async def revoke_all_certs(self, session: AuthSession, team_id: str) -> None:
+        """Explicitly revoke every development certificate for the team.
+
+        Destructive and user-initiated only: it invalidates apps signed by any
+        machine on this Apple ID. Never called from the refresh path.
+        """
+        async with self._cert_lock:
+            await self._revoke_all_certs(session, team_id)
+            signing_identity.clear(team_id)
+            self._cert_id = ""
+            self._cert_serial = ""
+            self._private_key = None
 
     async def _download_cert_content(
         self, session: AuthSession, team_id: str
@@ -477,6 +512,15 @@ class DeveloperServices:
         short_name = bundle_id.rsplit(".", 1)[-1]
         # Sanitize name: AltSign strips diacritics and non-alphanumeric chars
         app_name = f"Catapult {short_name}"
+
+        # Look up before registering. Apple caps free accounts at 10 App ID
+        # registrations per 7 days, and the refresh loop runs hourly for the app
+        # plus every embedded extension. Calling addAppId first each time burns
+        # that quota and ends in an unrecoverable "You may only register 10 App
+        # IDs every 7 days".
+        existing = await self._find_app_id(session, team_id, target_id)
+        if existing:
+            return existing
 
         logger.info("Registering app ID: %s (name=%s)", target_id, app_name)
         try:
