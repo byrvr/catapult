@@ -32,6 +32,42 @@ struct APIClient: Sendable {
         try await get("/api/activity", as: ActivityListResponse.self)
     }
 
+    func syncStatus() async throws -> SyncInfo {
+        try await get("/api/sync/status", as: SyncInfo.self)
+    }
+
+    func configureSync(provider: String, folder: String?) async throws -> SyncInfo {
+        struct Body: Encodable {
+            let provider: String
+            let folder: String?
+        }
+        return try await postJSON(
+            "/api/sync/configure",
+            body: Body(provider: provider, folder: folder),
+            as: SyncInfo.self
+        )
+    }
+
+    func createVault() async throws -> RecoveryKeyResponse {
+        try await postJSON("/api/sync/create-vault", body: [String: String](), as: RecoveryKeyResponse.self)
+    }
+
+    func unlockVault(recoveryKey: String) async throws -> StatusResponse {
+        try await postJSON(
+            "/api/sync/unlock",
+            body: ["recovery_key": recoveryKey],
+            as: StatusResponse.self
+        )
+    }
+
+    func runSync() async throws -> SyncInfo {
+        try await postJSON("/api/sync/run", body: [String: String](), as: SyncInfo.self)
+    }
+
+    func wakeCommand(hour: Int, minute: Int) async throws -> WakeCommandResponse {
+        try await get("/api/power/wake-command?hour=\(hour)&minute=\(minute)", as: WakeCommandResponse.self)
+    }
+
     func diagnosticsText() async throws -> String {
         var request = URLRequest(url: endpoint("/api/diagnostics"))
         request.httpMethod = "GET"
