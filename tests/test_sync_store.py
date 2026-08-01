@@ -151,3 +151,26 @@ def test_config_round_trips_through_save(tmp_path, monkeypatch):
 def test_icloud_default_path_is_the_documented_one():
     assert sync.ICLOUD_VAULT_PATH.name == "Catapult"
     assert "com~apple~CloudDocs" in str(sync.ICLOUD_VAULT_PATH)
+
+
+def test_status_is_not_locked_when_a_legacy_key_is_still_configured(tmp_path, monkeypatch):
+    """open_vault() adopts CATAPULT_SYNC_KEY on the next run, so reporting
+    'locked' would send the user hunting for a key they do not need yet."""
+    monkeypatch.setattr(sync, "CONFIG_PATH", tmp_path / "sync.json")
+    monkeypatch.setattr(sync, "CONFIG_ENV_PATH", tmp_path / "absent.env")
+    monkeypatch.setenv("CATAPULT_SYNC_PROVIDER", "folder")
+    monkeypatch.setenv("CATAPULT_SYNC_FOLDER", str(tmp_path / "vault"))
+    monkeypatch.setenv("CATAPULT_SYNC_KEY", "a" * 64)
+
+    assert sync.status(team_id=TEAM)["vault_state"] == "ok"
+
+
+def test_status_is_locked_without_any_key(tmp_path, monkeypatch):
+    monkeypatch.setattr(sync, "CONFIG_PATH", tmp_path / "sync.json")
+    monkeypatch.setattr(sync, "CONFIG_ENV_PATH", tmp_path / "absent.env")
+    monkeypatch.setenv("CATAPULT_SYNC_PROVIDER", "folder")
+    monkeypatch.setenv("CATAPULT_SYNC_FOLDER", str(tmp_path / "vault"))
+    monkeypatch.delenv("CATAPULT_SYNC_KEY", raising=False)
+    monkeypatch.setattr(sync, "cached_recovery_key", lambda team: None)
+
+    assert sync.status(team_id=TEAM)["vault_state"] == "locked"

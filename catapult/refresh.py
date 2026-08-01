@@ -425,7 +425,12 @@ async def _refresh_install(rec, device_manager, auth_client, dev_services, signe
             if tunnel.get("status") != "ok":
                 raise RuntimeError(tunnel.get("message") or "Apple TV tunnel is not ready.")
         if device_info.get("service") == "usbmux":
-            real_udid = device_info["udid"]
+            # Same preference as the install path: register the UDID lockdown
+            # reported, not the usbmux list serial.
+            real_udid = (
+                (device_info.get("properties") or {}).get("UniqueDeviceID")
+                or device_info["udid"]
+            )
             sub_platform = None
         else:
             real_udid, sub_platform = await device_manager.get_real_udid(

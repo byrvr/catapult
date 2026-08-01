@@ -918,7 +918,12 @@ def _vault_bytes() -> int:
 def status(apple_id: str = "", team_id: str = "") -> dict:
     """Configuration snapshot. Never performs network I/O."""
     config = SyncConfig.load()
-    have_key = bool(team_id) and cached_recovery_key(team_id) is not None
+    # A legacy CATAPULT_SYNC_KEY counts: open_vault() adopts it on the next run,
+    # so reporting "locked" here would send the user hunting for a recovery key
+    # they do not need yet.
+    have_key = (bool(team_id) and cached_recovery_key(team_id) is not None) or (
+        legacy_sync_key() is not None
+    )
     if config.provider == "disabled" or not config.configured:
         vault_state = "disabled"
     elif config.provider == "folder" and config.folder == ICLOUD_VAULT_PATH and not icloud_drive_available():
