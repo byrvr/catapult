@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import datetime as _dt
+import errno
 import hashlib
 import hmac
 import json
@@ -11,6 +12,9 @@ import logging
 import os
 import secrets
 import shlex
+import shutil
+import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote, urlparse
@@ -33,7 +37,26 @@ logger = logging.getLogger(__name__)
 
 SYNC_KEYCHAIN_SERVICE_ACCOUNT_PREFIX = "sync-key"
 SYNC_MANIFEST_VERSION = 1
+
+# Legacy configuration. Read for one release so existing users are not
+# stranded, then imported into CONFIG_PATH and never written again.
 CONFIG_ENV_PATH = Path.home() / ".catapult" / "config.env"
+
+APP_SUPPORT_DIR = Path.home() / "Library" / "Application Support" / "Catapult"
+CONFIG_PATH = APP_SUPPORT_DIR / "sync.json"
+
+# The default vault lives in the user's own iCloud Drive. This is ordinary
+# POSIX I/O from a non-sandboxed process: no entitlement, no Team ID, no
+# notarization — which matters because an ad-hoc-signed bundle declaring any
+# non-allowlisted entitlement is SIGKILLed at launch. Per-user isolation is
+# structural: it is the user's own iCloud account.
+ICLOUD_DRIVE_ROOT = Path.home() / "Library" / "Mobile Documents" / "com~apple~CloudDocs"
+ICLOUD_VAULT_PATH = ICLOUD_DRIVE_ROOT / "Catapult"
+
+
+def icloud_drive_available() -> bool:
+    """True when iCloud Drive is switched on for this user."""
+    return ICLOUD_DRIVE_ROOT.is_dir()
 
 
 def _parse_config_env() -> dict[str, str]:
@@ -94,6 +117,52 @@ class SyncConfig:
             r2_secret_access_key=_sync_setting("CATAPULT_R2_SECRET_ACCESS_KEY"),
         )
 
+    @classmethod
+    def load(cls) -> "SyncConfig":
+        """Stored settings, falling back to the legacy env/dotfile once.
+
+        The dotfile was never a good home for this: a Finder-launched app
+        inherits no shell environment, which is the root of "sync does not
+        really work".
+        """
+        try:
+            data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return cls.from_env()
+        except (OSError, json.JSONDecodeError):
+            logger.warning("Sync settings at %s are unreadable", CONFIG_PATH)
+            return cls.from_env()
+
+        folder = data.get("folder") or ""
+        return cls(
+            provider=(data.get("provider") or "disabled").lower(),
+            folder=Path(folder).expanduser() if folder else None,
+            r2_endpoint=(data.get("r2_endpoint") or "").rstrip("/"),
+            r2_bucket=data.get("r2_bucket") or "",
+            r2_access_key_id=_keychain_get("sync-r2-access-key-id") or "",
+            r2_secret_access_key=_keychain_get("sync-r2-secret-access-key") or "",
+        )
+
+    def save(self) -> None:
+        """Persist settings. R2 credentials go to the Keychain, not the file."""
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        CONFIG_PATH.write_text(
+            json.dumps(
+                {
+                    "provider": self.provider,
+                    "folder": str(self.folder) if self.folder else "",
+                    "r2_endpoint": self.r2_endpoint,
+                    "r2_bucket": self.r2_bucket,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        if self.r2_access_key_id:
+            _keychain_set("sync-r2-access-key-id", self.r2_access_key_id)
+        if self.r2_secret_access_key:
+            _keychain_set("sync-r2-secret-access-key", self.r2_secret_access_key)
+
     @property
     def configured(self) -> bool:
         if self.provider == "folder":
@@ -129,26 +198,47 @@ def _sync_key_account(apple_id: str, team_id: str) -> str:
     return f"{SYNC_KEYCHAIN_SERVICE_ACCOUNT_PREFIX}:{apple_id}:{team_id}"
 
 
-def get_sync_key(apple_id: str, team_id: str) -> tuple[bytes, bool]:
-    """Return (key, portable).
+def _recovery_key_account(team_id: str) -> str:
+    return f"recovery-key:{team_id}"
 
-    portable=True means the key came from CATAPULT_SYNC_KEY and can be reused on
-    another Mac by setting the same value. Keychain-generated keys are local.
+
+def cached_recovery_key(team_id: str) -> bytes | None:
+    """The recovery key this Mac has already been given, if any.
+
+    A cache, not a source of truth: its absence means "ask the user for the
+    key", never "mint a new one".
+    """
+    stored = _keychain_get(_recovery_key_account(team_id))
+    if not stored:
+        return None
+    try:
+        return recoverykey.decode(stored)
+    except ValueError:
+        logger.warning("Cached recovery key is unreadable — discarding")
+        return None
+
+
+def cache_recovery_key(team_id: str, key: bytes) -> None:
+    if not _keychain_set(_recovery_key_account(team_id), recoverykey.encode(key)):
+        logger.warning("Could not cache recovery key in Keychain")
+
+
+def forget_recovery_key(team_id: str) -> None:
+    from catapult.refresh import _keychain_delete
+
+    _keychain_delete(_recovery_key_account(team_id))
+
+
+def legacy_sync_key() -> bytes | None:
+    """The pre-vault CATAPULT_SYNC_KEY, if one is still configured.
+
+    Adopted verbatim as the data key on migration so every already-uploaded
+    blob stays readable and nothing is re-encrypted or re-uploaded.
     """
     env_key = _sync_setting("CATAPULT_SYNC_KEY")
-    if env_key:
-        return _normalize_key(env_key), True
-
-    account = _sync_key_account(apple_id, team_id)
-    saved = _keychain_get(account)
-    if saved:
-        return _normalize_key(saved), False
-
-    key = secrets.token_bytes(32)
-    encoded = base64.urlsafe_b64encode(key).decode("ascii").rstrip("=")
-    if not _keychain_set(account, encoded):
-        logger.warning("Could not persist generated sync key in Keychain")
-    return key, False
+    if not env_key:
+        return None
+    return _normalize_key(env_key)
 
 
 def _encrypt_json(key: bytes, payload: dict) -> bytes:
@@ -365,14 +455,54 @@ class RemoteStore:
     async def exists(self, key: str) -> bool:
         return await self.get(key) is not None
 
+    async def put_file(self, key: str, path: Path) -> None:
+        """Upload from disk. Overridden where streaming is possible."""
+        await self.put(key, path.read_bytes())
+
+    async def get_file(self, key: str, dest: Path) -> bool:
+        data = await self.get(key)
+        if data is None:
+            return False
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+        return True
+
 
 class FolderStore(RemoteStore):
+    """Any folder on disk — an iCloud Drive path, Dropbox, a network share.
+
+    Writes are staged OUTSIDE the synced root and moved in atomically. Staging
+    inside it means the sync client sees a partial multi-hundred-megabyte temp
+    file and pushes it to every other Mac before it is renamed away.
+    """
+
     def __init__(self, root: Path):
         self.root = root
 
     def _path(self, key: str) -> Path:
         cleaned = key.strip("/")
         return self.root / cleaned
+
+    @contextmanager
+    def _staged(self, target: Path):
+        """Yield a temp path outside the root, then move it onto target."""
+        target.parent.mkdir(parents=True, exist_ok=True)
+        staging_dir = Path(tempfile.mkdtemp(prefix="catapult-sync-"))
+        staged = staging_dir / target.name
+        try:
+            yield staged
+            try:
+                staged.replace(target)
+            except OSError as e:
+                if e.errno != errno.EXDEV:
+                    raise
+                # A File Provider domain is its own mount point, so the move can
+                # cross devices. Fall back to a hidden temp inside the root.
+                fallback = target.with_name(f".{target.name}.part")
+                shutil.copyfile(staged, fallback)
+                fallback.replace(target)
+        finally:
+            shutil.rmtree(staging_dir, ignore_errors=True)
 
     async def get(self, key: str) -> bytes | None:
         path = self._path(key)
@@ -381,11 +511,22 @@ class FolderStore(RemoteStore):
         return path.read_bytes()
 
     async def put(self, key: str, data: bytes) -> None:
-        path = self._path(key)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_bytes(data)
-        tmp.replace(path)
+        target = self._path(key)
+        with self._staged(target) as staged:
+            staged.write_bytes(data)
+
+    async def put_file(self, key: str, path: Path) -> None:
+        target = self._path(key)
+        with self._staged(target) as staged:
+            shutil.copyfile(path, staged)
+
+    async def get_file(self, key: str, dest: Path) -> bool:
+        source = self._path(key)
+        if not source.exists():
+            return False
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, dest)
+        return True
 
     async def exists(self, key: str) -> bool:
         return self._path(key).exists()
@@ -497,6 +638,29 @@ def _store_from_config(config: SyncConfig) -> RemoteStore | None:
     return None
 
 
+def resolve_vault_state(*, vault_doc: dict | None, have_key: bool) -> str:
+    """Decide what the vault needs, given what is remote and what is local.
+
+    The old get_sync_key() minted a fresh random key when the Keychain was
+    empty. On a second Mac that silently created an incompatible vault and
+    started uploading into it, rather than reporting that the existing vault
+    was locked. An empty Keychain plus an existing remote vault must mean
+    "locked", never "make a new one".
+    """
+    if vault_doc is None:
+        # No remote vault: nothing to unlock, whether or not we hold a key.
+        return "needs_setup"
+    return "ok" if have_key else "locked"
+
+
+def _vault_key(team_id: str) -> str:
+    return f"teams/{team_id}/vault.json"
+
+
+def _lease_key(team_id: str) -> str:
+    return f"teams/{team_id}/lease.json"
+
+
 def _manifest_key(team_id: str) -> str:
     return f"teams/{team_id}/manifest.json.enc"
 
@@ -536,9 +700,129 @@ def _merge_installs(local: list[dict], remote: list[dict]) -> list[dict]:
     )
 
 
+async def load_vault_doc(store: RemoteStore, team_id: str) -> dict | None:
+    """Read the plaintext vault descriptor, if the vault has been created."""
+    payload = await store.get(_vault_key(team_id))
+    if not payload:
+        return None
+    try:
+        return json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        logger.warning("Remote vault.json is unreadable")
+        return None
+
+
+async def open_vault(store: RemoteStore, team_id: str) -> tuple[str, bytes | None]:
+    """Resolve the vault into (state, data_key).
+
+    Handles the one-time migration off CATAPULT_SYNC_KEY: the legacy key is
+    adopted verbatim as the data key and wrapped under a fresh recovery key, so
+    every already-uploaded blob stays readable with no re-encryption.
+    """
+    vault_doc = await load_vault_doc(store, team_id)
+
+    if vault_doc is None:
+        legacy = legacy_sync_key()
+        if legacy is not None:
+            recovery_key = recoverykey.generate()
+            doc = {
+                "vault_format": VAULT_FORMAT,
+                "team_id": team_id,
+                "created_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                "migrated_from": "CATAPULT_SYNC_KEY",
+                "wrap": wrap_data_key(legacy, recovery_key, team_id),
+            }
+            await store.put(_vault_key(team_id), json.dumps(doc, indent=2).encode("utf-8"))
+            cache_recovery_key(team_id, recovery_key)
+            logger.info("Adopted the legacy sync key into a recovery-key vault")
+            return "ok", legacy
+        return "needs_setup", None
+
+    recovery_key = cached_recovery_key(team_id)
+    if recovery_key is None:
+        return "locked", None
+    try:
+        return "ok", unwrap_data_key(vault_doc, recovery_key, team_id)
+    except WrongRecoveryKey:
+        return "wrong_key", None
+
+
+async def create_vault(apple_id: str, team_id: str) -> dict:
+    """Create a new vault and return the recovery key ONCE, for display."""
+    config = SyncConfig.load()
+    store = _store_from_config(config)
+    if store is None:
+        return {"status": "disabled", "message": "Choose where the vault should live first."}
+
+    doc, _data_key, recovery_key = new_vault(team_id)
+    await store.put(_vault_key(team_id), json.dumps(doc, indent=2).encode("utf-8"))
+    cache_recovery_key(team_id, recovery_key)
+    logger.info("Created a new sync vault for team %s", team_id)
+    return {
+        "status": "ok",
+        "recovery_key": recoverykey.encode(recovery_key),
+        "message": "Save this recovery key. Catapult cannot recover it for you.",
+    }
+
+
+async def unlock_vault(team_id: str, entered: str) -> dict:
+    """Try a user-supplied recovery key against the remote vault."""
+    config = SyncConfig.load()
+    store = _store_from_config(config)
+    if store is None:
+        return {"status": "disabled", "message": "Sync is not configured."}
+
+    vault_doc = await load_vault_doc(store, team_id)
+    if vault_doc is None:
+        return {"status": "needs_setup", "message": "There is no vault here yet."}
+
+    try:
+        key = recoverykey.decode(entered)
+    except ValueError as e:
+        return {"status": "invalid", "message": str(e)}
+
+    try:
+        unwrap_data_key(vault_doc, key, team_id)
+    except WrongRecoveryKey as e:
+        return {"status": "wrong_key", "message": str(e)}
+
+    cache_recovery_key(team_id, key)
+    return {"status": "ok", "message": "Vault unlocked."}
+
+
+async def _upload_blob(store: RemoteStore, key: bytes, remote_key: str, source: Path) -> None:
+    """Encrypt an IPA to a temp file and upload it, a chunk at a time."""
+    staging = Path(tempfile.mkdtemp(prefix="catapult-upload-"))
+    try:
+        encrypted = staging / "blob.enc"
+        encrypt_file(key, source, encrypted)
+        await store.put_file(remote_key, encrypted)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+async def _download_blob(store: RemoteStore, key: bytes, team_id: str, digest: str) -> bool:
+    """Fetch and decrypt a blob into the durable vault. Verifies the digest."""
+    staging = Path(tempfile.mkdtemp(prefix="catapult-download-"))
+    try:
+        encrypted = staging / "blob.enc"
+        if not await store.get_file(_ipa_key(team_id, digest), encrypted):
+            return False
+        plain = staging / "blob.ipa"
+        decrypt_file(key, encrypted, plain)
+        if vault.sha256_file(plain) != digest:
+            raise ValueError(f"Downloaded IPA hash mismatch for {digest}")
+        dest = vault.vault_path(digest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(plain), str(dest))
+        return True
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
 async def sync_state(apple_id: str, team_id: str) -> dict:
     """Merge local state with remote manifest and sync encrypted IPA blobs."""
-    config = SyncConfig.from_env()
+    config = SyncConfig.load()
     store = _store_from_config(config)
     if store is None:
         return {
@@ -546,16 +830,21 @@ async def sync_state(apple_id: str, team_id: str) -> dict:
             "provider": config.provider,
             "configured": config.configured,
         }
-    if not _sync_setting("CATAPULT_SYNC_KEY"):
+
+    vault_state, key = await open_vault(store, team_id)
+    if vault_state != "ok" or key is None:
         return {
-            "status": "needs_key",
+            "status": vault_state,
+            "vault_state": vault_state,
             "provider": config.provider,
             "configured": True,
-            "portable_key": False,
-            "message": "Set CATAPULT_SYNC_KEY on every Mac that should decrypt this IPA vault.",
+            "message": {
+                "needs_setup": "Set up the vault to start syncing.",
+                "locked": "Enter your recovery key on this Mac to unlock the vault.",
+                "wrong_key": "That recovery key does not open this vault.",
+            }.get(vault_state, ""),
         }
 
-    key, portable_key = get_sync_key(apple_id, team_id)
     local_state = load_state()
     local_installs = local_state.get("installs", [])
     remote_payload = await store.get(_manifest_key(team_id))
@@ -566,12 +855,15 @@ async def sync_state(apple_id: str, team_id: str) -> dict:
             else _default_manifest(apple_id, team_id)
         )
     except InvalidTag:
+        # The vault descriptor unwrapped but the manifest will not decrypt, so
+        # the vault and the manifest were written with different data keys.
         return {
             "status": "wrong_key",
+            "vault_state": "wrong_key",
             "provider": config.provider,
             "configured": True,
-            "portable_key": portable_key,
-            "message": "The configured CATAPULT_SYNC_KEY cannot decrypt this remote vault.",
+            "portable_key": True,
+            "message": "The stored manifest does not match this vault's key.",
         }
     remote_installs = remote_manifest.get("installs", [])
     merged_installs = _merge_installs(local_installs, remote_installs)
@@ -584,24 +876,14 @@ async def sync_state(apple_id: str, team_id: str) -> dict:
             continue
         local_ipa = vault.resolve_ipa_path(record)
         if local_ipa is None:
-            encrypted = await store.get(_ipa_key(team_id, digest))
-            if encrypted:
-                data = _decrypt_bytes(key, encrypted)
-                dest = vault.vault_path(digest)
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                tmp = dest.with_suffix(".ipa.tmp")
-                tmp.write_bytes(data)
-                if vault.sha256_file(tmp) != digest:
-                    tmp.unlink(missing_ok=True)
-                    raise ValueError(f"Downloaded IPA hash mismatch for {digest}")
-                tmp.replace(dest)
-                record["ipa_path"] = str(dest)
+            if await _download_blob(store, key, team_id, digest):
+                record["ipa_path"] = str(vault.vault_path(digest))
                 downloaded += 1
         else:
             record["ipa_path"] = str(local_ipa)
             remote_ipa_key = _ipa_key(team_id, digest)
             if not await store.exists(remote_ipa_key):
-                await store.put(remote_ipa_key, _encrypt_bytes(key, local_ipa.read_bytes()))
+                await _upload_blob(store, key, remote_ipa_key, local_ipa)
                 uploaded += 1
 
     local_state["installs"] = merged_installs
@@ -613,22 +895,46 @@ async def sync_state(apple_id: str, team_id: str) -> dict:
 
     return {
         "status": "ok",
+        "vault_state": "ok",
         "provider": config.provider,
         "configured": True,
-        "portable_key": portable_key,
+        # Retained for one release so the existing status row keeps compiling.
+        "portable_key": True,
         "uploaded_ipas": uploaded,
         "downloaded_ipas": downloaded,
         "install_count": len(merged_installs),
+        "vault_bytes": _vault_bytes(),
     }
 
 
+def _vault_bytes() -> int:
+    """Local size of the IPA vault, for the quota line in the UI."""
+    try:
+        return sum(p.stat().st_size for p in vault.IPA_VAULT_DIR.glob("*.ipa"))
+    except OSError:
+        return 0
+
+
 def status(apple_id: str = "", team_id: str = "") -> dict:
-    config = SyncConfig.from_env()
-    portable_key = bool(_sync_setting("CATAPULT_SYNC_KEY"))
+    """Configuration snapshot. Never performs network I/O."""
+    config = SyncConfig.load()
+    have_key = bool(team_id) and cached_recovery_key(team_id) is not None
+    if config.provider == "disabled" or not config.configured:
+        vault_state = "disabled"
+    elif config.provider == "folder" and config.folder == ICLOUD_VAULT_PATH and not icloud_drive_available():
+        vault_state = "needs_icloud"
+    else:
+        vault_state = "ok" if have_key else "locked"
+
     return {
         "provider": config.provider,
         "configured": config.configured,
-        "portable_key": portable_key,
+        "vault_state": vault_state,
+        "vault_bytes": _vault_bytes(),
+        "icloud_available": icloud_drive_available(),
+        "icloud_path": str(ICLOUD_VAULT_PATH),
+        "have_recovery_key": have_key,
+        "portable_key": have_key,
         "folder": str(config.folder) if config.folder else "",
         "r2_endpoint": config.r2_endpoint,
         "r2_bucket": config.r2_bucket,
