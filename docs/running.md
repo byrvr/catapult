@@ -59,38 +59,20 @@ Logs go to `~/.catapult/server.log`.
 ## Cross-Device Sync
 
 Catapult can recover refreshable installs on another Mac only if the original
-IPA is available. Configure encrypted sync to store a remote IPA vault.
+IPA is available, so it keeps an encrypted vault in storage you already own.
 
-### Sync Folder
+Set it up in **Settings → Sync** — there is nothing to export and no file to
+edit. Pick iCloud Drive (the default) or any folder your cloud client already
+syncs, create a vault, and save the recovery key it shows you once.
 
-```bash
-export CATAPULT_SYNC_PROVIDER=folder
-export CATAPULT_SYNC_KEY="choose-a-long-shared-recovery-key"
-export CATAPULT_SYNC_FOLDER="$HOME/Library/Mobile Documents/com~apple~CloudDocs/Catapult"
-```
+On a second Mac, sign into the same Apple ID, open Settings → Sync, and paste
+that recovery key. Universal Clipboard has usually already carried it across.
 
-For Finder-launched packaged apps, put the same values in
-`~/.catapult/config.env` so the background engine can read them after relaunch:
-
-```text
-CATAPULT_SYNC_PROVIDER=folder
-CATAPULT_SYNC_KEY=choose-a-long-shared-recovery-key
-CATAPULT_SYNC_FOLDER=/Users/you/Library/Mobile Documents/com~apple~CloudDocs/Catapult
-```
-
-### Cloudflare R2
-
-```bash
-export CATAPULT_SYNC_PROVIDER=r2
-export CATAPULT_SYNC_KEY="choose-a-long-shared-recovery-key"
-export CATAPULT_R2_ENDPOINT="https://<account-id>.r2.cloudflarestorage.com"
-export CATAPULT_R2_BUCKET="catapult"
-export CATAPULT_R2_ACCESS_KEY_ID="..."
-export CATAPULT_R2_SECRET_ACCESS_KEY="..."
-```
-
-Use the same `CATAPULT_SYNC_KEY` on every Mac that should decrypt and refresh
-the same IPA vault.
+Earlier versions were configured with `CATAPULT_SYNC_*` environment variables
+or `~/.catapult/config.env`. Those are still read for one release and imported
+automatically on first run, then you can delete the dotfile. See
+[Cross-device sync](cross-device-sync.md) for the vault format, the state
+table, and the migration details.
 
 ## First-Time Setup (Apple TV)
 

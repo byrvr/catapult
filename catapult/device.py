@@ -1554,8 +1554,9 @@ echo installed
             # failing, for a device that can never be tunneled: tunneld runs
             # with --no-usb --no-usbmux --no-mobdev2.
             raise RuntimeError(
-                "Catapult installs to iPhone and iPad over USB. Connect the "
-                "device with a cable, unlock it, and tap Trust."
+                "This Mac has not been paired with that device yet. Connect it "
+                "with a cable once, unlock it, and tap Trust — after that it "
+                "also works over Wi-Fi."
             )
 
         # Prefer the identity cached when the tunnel came up — dialing the RSD
@@ -1749,9 +1750,10 @@ echo installed
         if not installable:
             if device.get("device_class") in {"ios", "ipados"}:
                 raise RuntimeError(
-                    f"'{device['name']}' was found on the network, but Catapult "
-                    f"installs to iPhone and iPad over USB. Connect it with a "
-                    f"cable, unlock it, and tap Trust."
+                    f"'{device['name']}' is on the network, but this Mac has "
+                    f"not been paired with it. Connect it with a cable once, "
+                    f"unlock it, and tap Trust — after that it also works "
+                    f"over Wi-Fi."
                 )
             raise RuntimeError(
                 f"Device '{device['name']}' is not ready for installation. "
