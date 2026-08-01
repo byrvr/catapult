@@ -17,9 +17,11 @@ from urllib.parse import quote, urlparse
 
 import httpx
 from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-from catapult import vault
+from catapult import recoverykey, vault
 from catapult.refresh import (
     _keychain_get,
     _keychain_set,
@@ -162,17 +164,195 @@ def _decrypt_json(key: bytes, payload: bytes) -> dict:
 def _encrypt_bytes(key: bytes, payload: bytes) -> bytes:
     nonce = secrets.token_bytes(12)
     ciphertext = AESGCM(key).encrypt(nonce, payload, None)
-    return b"catapult-sync-v1\n" + nonce + ciphertext
+    return V1_MAGIC + nonce + ciphertext
 
 
 def _decrypt_bytes(key: bytes, payload: bytes) -> bytes:
-    prefix = b"catapult-sync-v1\n"
-    if not payload.startswith(prefix):
+    if not payload.startswith(V1_MAGIC):
         raise ValueError("Unsupported encrypted sync payload")
-    body = payload[len(prefix):]
+    body = payload[len(V1_MAGIC):]
     nonce = body[:12]
     ciphertext = body[12:]
     return AESGCM(key).decrypt(nonce, ciphertext, None)
+
+
+# ── Vault envelope ──────────────────────────────────────────────────────────
+#
+# A random 256-bit data key (DK) encrypts the manifest and every blob. DK is
+# wrapped under a KEK derived from the generated 128-bit recovery key (RK), and
+# the wrapped form lives in a PLAINTEXT vault.json beside the manifest. So a
+# second Mac needs exactly one thing: RK.
+#
+# No password KDF is involved: RK is uniformly random, so the offline attack
+# floor is already 2**128 and stretching would only add a tuning problem across
+# the old Intel Macs macOS 14 still supports.
+#
+# The AEAD tag on the ~48-byte wrapped key IS the wrong-key verifier. A separate
+# hash verifier would add no usability and give an attacker a cheaper oracle.
+
+VAULT_FORMAT = 2
+VAULT_WRAP_ALG = "hkdf-sha256+aes256gcm"
+_WRAP_INFO = b"catapult/recovery/v1"
+
+
+class WrongRecoveryKey(Exception):
+    """The supplied recovery key does not open this vault."""
+
+
+def new_data_key() -> bytes:
+    return secrets.token_bytes(32)
+
+
+def derive_kek(recovery_key: bytes, team_id: str) -> bytes:
+    return HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=team_id.encode("utf-8"),
+        info=_WRAP_INFO,
+    ).derive(recovery_key)
+
+
+def wrap_data_key(data_key: bytes, recovery_key: bytes, team_id: str) -> dict:
+    nonce = secrets.token_bytes(12)
+    kek = derive_kek(recovery_key, team_id)
+    ciphertext = AESGCM(kek).encrypt(nonce, data_key, team_id.encode("utf-8"))
+    return {
+        "alg": VAULT_WRAP_ALG,
+        "nonce": base64.b64encode(nonce).decode("ascii"),
+        "ct": base64.b64encode(ciphertext).decode("ascii"),
+    }
+
+
+def unwrap_data_key(vault_doc: dict, recovery_key: bytes, team_id: str) -> bytes:
+    """Recover the data key, or raise WrongRecoveryKey.
+
+    Fails in about a millisecond, so a mistyped key is reported immediately
+    rather than after a 500 MB download.
+    """
+    wrap = vault_doc.get("wrap") or {}
+    if wrap.get("alg") != VAULT_WRAP_ALG:
+        raise WrongRecoveryKey(f"Unsupported vault wrapping: {wrap.get('alg')!r}")
+    try:
+        nonce = base64.b64decode(wrap["nonce"])
+        ciphertext = base64.b64decode(wrap["ct"])
+        kek = derive_kek(recovery_key, team_id)
+        return AESGCM(kek).decrypt(nonce, ciphertext, team_id.encode("utf-8"))
+    except (InvalidTag, KeyError, ValueError) as e:
+        raise WrongRecoveryKey("That recovery key does not open this vault") from e
+
+
+def new_vault(team_id: str) -> tuple[dict, bytes, bytes]:
+    """Create a fresh vault document. Returns (vault_doc, data_key, recovery_key)."""
+    data_key = new_data_key()
+    recovery_key = recoverykey.generate()
+    return (
+        {
+            "vault_format": VAULT_FORMAT,
+            "team_id": team_id,
+            "created_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+            "wrap": wrap_data_key(data_key, recovery_key, team_id),
+        },
+        data_key,
+        recovery_key,
+    )
+
+
+# ── Streaming blob format ───────────────────────────────────────────────────
+#
+# v1 held the whole IPA in memory twice over. v2 streams 4 MiB chunks, each
+# sealed with a nonce derived from a per-file nonce plus a counter, and each
+# chunk's AAD carries its index and a final-chunk flag so truncation and
+# reordering are both detected.
+
+V1_MAGIC = b"catapult-sync-v1\n"
+V2_MAGIC = b"catapult-sync-v2\n"
+CHUNK_SIZE = 4 * 1024 * 1024
+_FILE_NONCE_BYTES = 8
+_LENGTH_BYTES = 4
+
+
+def _chunk_nonce(file_nonce: bytes, index: int) -> bytes:
+    return file_nonce + index.to_bytes(4, "big")
+
+
+def _chunk_aad(index: int, final: bool) -> bytes:
+    return index.to_bytes(4, "big") + (b"\x01" if final else b"\x00")
+
+
+def encrypt_file(key: bytes, src: Path, dst: Path) -> None:
+    """Encrypt src to dst in chunks, holding at most one chunk in memory."""
+    aes = AESGCM(key)
+    file_nonce = secrets.token_bytes(_FILE_NONCE_BYTES)
+    with src.open("rb") as fin, dst.open("wb") as fout:
+        fout.write(V2_MAGIC)
+        fout.write(file_nonce)
+        index = 0
+        chunk = fin.read(CHUNK_SIZE)
+        while True:
+            following = fin.read(CHUNK_SIZE)
+            final = not following
+            sealed = aes.encrypt(
+                _chunk_nonce(file_nonce, index), chunk, _chunk_aad(index, final)
+            )
+            fout.write(len(sealed).to_bytes(_LENGTH_BYTES, "big"))
+            fout.write(sealed)
+            if final:
+                return
+            chunk = following
+            index += 1
+
+
+def decrypt_file(key: bytes, src: Path, dst: Path) -> None:
+    """Decrypt a v2 blob, or a legacy v1 blob, writing to dst.
+
+    Leaves no output behind on failure — a partially written IPA would be
+    installed and fail confusingly.
+    """
+    with src.open("rb") as fin:
+        magic = fin.read(len(V2_MAGIC))
+        if magic == V1_MAGIC:
+            payload = magic + fin.read()
+            dst.write_bytes(_decrypt_bytes(key, payload))
+            return
+        if magic != V2_MAGIC:
+            raise ValueError("Unsupported encrypted sync payload")
+
+        aes = AESGCM(key)
+        file_nonce = fin.read(_FILE_NONCE_BYTES)
+        if len(file_nonce) != _FILE_NONCE_BYTES:
+            raise ValueError("Encrypted blob is truncated")
+
+        tmp = dst.with_suffix(dst.suffix + ".part")
+        index = 0
+        saw_final = False
+        try:
+            with tmp.open("wb") as fout:
+                while True:
+                    header = fin.read(_LENGTH_BYTES)
+                    if not header:
+                        break
+                    if len(header) != _LENGTH_BYTES:
+                        raise ValueError("Encrypted blob is truncated")
+                    length = int.from_bytes(header, "big")
+                    sealed = fin.read(length)
+                    if len(sealed) != length:
+                        raise ValueError("Encrypted blob is truncated")
+                    nonce = _chunk_nonce(file_nonce, index)
+                    try:
+                        plain = aes.decrypt(nonce, sealed, _chunk_aad(index, False))
+                    except InvalidTag:
+                        plain = aes.decrypt(nonce, sealed, _chunk_aad(index, True))
+                        saw_final = True
+                    fout.write(plain)
+                    if saw_final:
+                        break
+                    index += 1
+            if not saw_final:
+                raise ValueError("Encrypted blob is truncated")
+            tmp.replace(dst)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
 
 
 class RemoteStore:
