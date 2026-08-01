@@ -19,7 +19,7 @@ Catapult installs `.ipa` files onto nearby iPhone, iPad, and Apple TV devices by
 - Developer account view with App ID usage, expiry timestamps, delete, and reinstall controls
 - Expired/history installs remain visible and reinstallable when Catapult still has the saved IPA
 - Opportunistic auto-refresh starting 72 hours before app expiry
-- Optional encrypted cross-device IPA vault sync
+- Optional encrypted cross-device IPA vault, in your own iCloud Drive or any synced folder
 - Styled macOS DMG release package
 
 ## Download
@@ -68,9 +68,9 @@ The Swift app supervises a local FastAPI backend at `127.0.0.1:9450`. The backen
 
 Installed apps are recorded in `~/.catapult/state.json`. Apple auth secrets are stored in the macOS Keychain where possible; the app uses saved session data so you do not need to sign in every time.
 
-For cross-device recovery, Catapult can store encrypted IPA blobs and an encrypted refresh manifest in a sync folder or Cloudflare R2-compatible bucket. The second Mac still needs the same Apple ID and the same `CATAPULT_SYNC_KEY` to decrypt the vault.
+For cross-device recovery, Catapult stores encrypted IPA blobs and an encrypted manifest in storage you already own — your iCloud Drive by default, or any folder your cloud client syncs, or an S3-compatible bucket. A second Mac needs the same Apple ID and one recovery key, which Catapult shows you once when the vault is created.
 
-Finder-launched builds also read persistent sync settings from `~/.catapult/config.env`, so Catapult can keep its sync configuration after normal relaunches.
+Sync is configured in Settings → Sync and stored in `~/Library/Application Support/Catapult/sync.json`, so it survives relaunches without any shell environment.
 
 ## Safety Model
 
