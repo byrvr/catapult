@@ -240,6 +240,12 @@ struct SyncInfo: Codable, Hashable, Sendable {
     let uploadedIPAs: Int?
     let downloadedIPAs: Int?
     let installCount: Int?
+    /// disabled | needs_setup | needs_icloud | locked | ok | wrong_key
+    let vaultState: String?
+    let vaultBytes: Int?
+    let icloudAvailable: Bool?
+    let icloudPath: String?
+    let haveRecoveryKey: Bool?
 
     enum CodingKeys: String, CodingKey {
         case status
@@ -252,7 +258,35 @@ struct SyncInfo: Codable, Hashable, Sendable {
         case uploadedIPAs = "uploaded_ipas"
         case downloadedIPAs = "downloaded_ipas"
         case installCount = "install_count"
+        case vaultState = "vault_state"
+        case vaultBytes = "vault_bytes"
+        case icloudAvailable = "icloud_available"
+        case icloudPath = "icloud_path"
+        case haveRecoveryKey = "have_recovery_key"
     }
+
+    /// Falls back to the pre-vault `status` field so an older backend still renders.
+    var resolvedState: String {
+        vaultState ?? status ?? (configured ? "locked" : "disabled")
+    }
+}
+
+struct RecoveryKeyResponse: Codable, Hashable, Sendable {
+    let status: String
+    let recoveryKey: String?
+    let message: String?
+
+    enum CodingKeys: String, CodingKey {
+        case status
+        case recoveryKey = "recovery_key"
+        case message
+    }
+}
+
+struct WakeCommandResponse: Codable, Hashable, Sendable {
+    let status: String
+    let command: String
+    let note: String
 }
 
 struct TeamInfo: Codable, Sendable {
