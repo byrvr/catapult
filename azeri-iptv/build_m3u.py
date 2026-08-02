@@ -30,23 +30,32 @@ print(f"playlist.m3u: {len([c for c in doc['channels'] if c['tier']=='verified']
 # testing from an Azerbaijani connection where the TV itself is the check.
 # The untested ones are grouped separately so it's obvious which is which.
 allc = []
+def with_alts(c, group):
+    out = [(c, group, c["url"], c["name"])]
+    for i, u in enumerate(c.get("alt") or []):
+        label = f"{c['name']} (alt)" if len(c.get("alt") or []) == 1 else f"{c['name']} (alt {i+1})"
+        out.append((c, group, u, label))
+    return out
+
 for c in doc["channels"]:
     if c["tier"] == "verified":
-        allc.append((c, c["group"]))
+        allc += with_alts(c, c["group"])
 for c in doc["channels"]:
     if c["tier"] == "az_only":
-        allc.append((c, "AZ-only (untested)"))
+        allc += with_alts(c, "AZ-only (untested)")
 
 lines = ['#EXTM3U x-tvg-url="https://azepg.ddns.net/aztv/"']
-for c, grp in allc:
-    attrs = f'tvg-id="{c["id"]}" tvg-name="{c["name"]}"'
+for c, grp, url, label in allc:
+    attrs = f'tvg-id="{c["id"]}" tvg-name="{label}"'
     if c.get("logo"):
         attrs += f' tvg-logo="{c["logo"]}"'
     attrs += f' group-title="{grp}"'
-    lines.append(f'#EXTINF:-1 {attrs},{c["name"]}')
-    for k, v in (c.get("headers") or {}).items():
-        lines.append(f"#EXTVLCOPT:http-{k.lower()}={v}")
-    lines.append(c["url"])
+    lines.append(f'#EXTINF:-1 {attrs},{label}')
+    # Only the primary castr edge needs the Referer; the alts do not.
+    if url == c["url"]:
+        for k, v in (c.get("headers") or {}).items():
+            lines.append(f"#EXTVLCOPT:http-{k.lower()}={v}")
+    lines.append(url)
 
 open(os.path.join(HERE, "playlist-all.m3u"), "w", encoding="utf-8").write("\n".join(lines) + "\n")
 print(f"playlist-all.m3u: {len(allc)} channels")
