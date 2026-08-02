@@ -86,6 +86,43 @@ def variant_for_asset(filename: str) -> str:
     return "-".join(parts).lower()
 
 
+def _name_tokens(filename: str) -> list[str]:
+    """Split a filename on separators, keeping dots so versions stay intact."""
+    import re as _re
+    stem = Path(filename).stem
+    return [tok for tok in _re.split(r"[-_ ]+", stem) if tok]
+
+
+def app_name_for_asset(filename: str) -> str:
+    """The app's name, taken from the leading tokens of its filename.
+
+    Needed because a repo can publish several DIFFERENT apps, each in its own
+    release. github.com/mrdrvt99/YouProEXTRA ships six, so keying the catalog
+    on platform alone collapsed them into one entry.
+    """
+    parts: list[str] = []
+    for token in _name_tokens(filename):
+        lowered = token.lower()
+        # The name ends at the first version or platform token — everything
+        # after a platform token is variant or version, not part of the name.
+        if _VERSION_TOKEN.match(token) or lowered in _TVOS_TOKENS or lowered in _IOS_TOKENS:
+            break
+        parts.append(token)
+    return " ".join(parts) or Path(filename).stem
+
+
+def version_for_asset(filename: str, tag: str) -> str:
+    """Version for an asset, preferring the release tag when it carries one.
+
+    Some repos use a fixed tag per app (ytl-ipa3) and put the version only in
+    the filename. Comparing tags there would never detect a new build.
+    """
+    if any(_VERSION_TOKEN.match(tok) for tok in _name_tokens(tag)):
+        return tag
+    versions = [tok for tok in _name_tokens(filename) if _VERSION_TOKEN.match(tok)]
+    return "-".join(versions) if versions else Path(filename).stem
+
+
 def select_ipa_assets(filenames: list[str]) -> list[str]:
     return [name for name in filenames if name.lower().endswith(".ipa")]
 
@@ -271,13 +308,15 @@ def catalog_from_github_releases(source: Source, releases: list[dict]) -> list[S
             asset = assets[filename]
             platform = platform_for_asset(filename)
             variant = variant_for_asset(filename)
-            key = (platform, variant)
+            app_name = app_name_for_asset(filename)
+            version = version_for_asset(filename, tag)
+            key = (app_name, platform, variant)
 
             existing = best.get(key)
-            if existing and not is_newer(tag, existing.version):
+            if existing and not is_newer(version, existing.version):
                 continue
 
-            label = base_name
+            label = app_name or base_name
             if platform != "unknown":
                 label += f" ({'Apple TV' if platform == 'tvos' else 'iOS'}"
                 label += f" {variant})" if variant else ")"
@@ -286,9 +325,9 @@ def catalog_from_github_releases(source: Source, releases: list[dict]) -> list[S
 
             best[key] = StoreApp(
                 source_id=source.id,
-                app_key=f"{source.id}#{platform}:{variant}",
+                app_key=f"{source.id}#{app_name}:{platform}:{variant}",
                 name=label,
-                version=tag,
+                version=version,
                 platform=platform,
                 variant=variant,
                 developer=repo.split("/")[0],
