@@ -1,12 +1,12 @@
 {
   "name": "Azərbaycan IPTV",
   "description": "Free-to-air Azerbaijani TV channels, HLS live streams.",
-  "updated": "2026-08-02T11:09:16Z",
+  "updated": "2026-08-02T11:19:46Z",
   "counts": {
     "verified": 12,
     "degraded": 1,
-    "az_only": 17,
-    "total": 30
+    "az_only": 16,
+    "total": 29
   },
   "tiers": {
     "verified": "Manifest, media playlist, a real segment download and live-edge advance all confirmed from outside Azerbaijan. The final URL set passed 4 full re-checks over ~35 minutes; individual URLs were checked 7-11 times in total.",
@@ -72,9 +72,13 @@
       "headers": {
         "Referer": "https://player.castr.com/"
       },
+      "alt": [
+        "https://str1.yodacdn.net/cbc/video.m3u8"
+      ],
       "logo": "https://yoda.az/logos/cbc.svg",
       "warnings": [
-        "requires Referer header; player must support custom headers"
+        "requires Referer header; players that ignore it get HTTP 403",
+        "the alt URL needs no header but is geo-locked to Azerbaijan"
       ]
     },
     {
@@ -278,15 +282,6 @@
       "res": "unknown",
       "url": "https://str.yodacdn.net/start/video.m3u8",
       "logo": "https://yoda.az/logos/start.png"
-    },
-    {
-      "id": "cbc",
-      "name": "CBC (platform)",
-      "group": "General",
-      "tier": "az_only",
-      "res": "unknown",
-      "url": "https://str1.yodacdn.net/cbc/video.m3u8",
-      "logo": "https://yoda.az/logos/cbc.svg"
     },
     {
       "id": "ictimaitv",
