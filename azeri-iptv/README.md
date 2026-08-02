@@ -47,8 +47,9 @@ python3 build_m3u.py                   # rebuild the .m3u with them included
 
 ## What "verified" actually means
 
-A stream counts as working only if **all** of these hold — checked over 6 passes
-spread across ~40 minutes:
+A stream counts as working only if **all** of these hold. The final URL set passed
+**4 full re-checks over ~35 minutes**; individual URLs were checked 7–11 times
+across the whole run:
 
 1. The manifest returns 200 and parses as HLS, not an HTML error page
 2. A media playlist resolves (via the highest-bandwidth variant, for masters)
@@ -67,6 +68,13 @@ evidence that anything is playing. Two subtleties were worth handling:
 - Sampling the *first* segment is unreliable — on a short DVR window it can roll
   off between fetching the playlist and fetching the segment, 404ing on a
   healthy stream. The middle segment is sampled instead.
+
+Observed stability, counting every check run against each URL:
+
+| Result | Channels |
+|---|---|
+| clean on every pass | Ayaz TV, AzStar, GunAz, KN Music, Naxçıvan, Vilayət, Xəzər, Mədəniyyət, Baku TV, CBC |
+| one transient blip | AzTV (alt edge only — primary held), APA TV (503) |
 
 ## Notes on individual channels
 

@@ -1,7 +1,7 @@
 {
   "name": "Azərbaycan IPTV",
   "description": "Free-to-air Azerbaijani TV channels, HLS live streams.",
-  "updated": "2026-08-02T11:07:38Z",
+  "updated": "2026-08-02T11:09:16Z",
   "counts": {
     "verified": 12,
     "degraded": 1,
@@ -9,7 +9,7 @@
     "total": 30
   },
   "tiers": {
-    "verified": "Manifest, media playlist, a real segment download and live-edge advance all confirmed from outside Azerbaijan, across 6 passes spread over ~40 minutes.",
+    "verified": "Manifest, media playlist, a real segment download and live-edge advance all confirmed from outside Azerbaijan. The final URL set passed 4 full re-checks over ~35 minutes; individual URLs were checked 7-11 times in total.",
     "degraded": "Plays, but fails the quality/reliability bar. See `warnings`.",
     "az_only": "Official yoda.az platform URL that returns HTTP 403 outside Azerbaijan. Geo/licensing gated, NOT verified by us. Expected to work on an Azerbaijani connection - run selftest.py to confirm."
   },
