@@ -1,0 +1,60 @@
+#EXTM3U x-tvg-url="https://azepg.ddns.net/aztv/"
+#EXTINF:-1 tvg-id="aztv" tvg-name="AzTV" tvg-logo="https://yoda.az/logos/aztv.svg" group-title="General",AzTV
+https://str.yodacdn.net/azertv/index.m3u8
+#EXTINF:-1 tvg-id="medeniyyet" tvg-name="Mədəniyyət TV" tvg-logo="https://yoda.az/logos/medeniyyet.svg" group-title="Culture",Mədəniyyət TV
+https://str.yodacdn.net/medeniyyettele/index.m3u8
+#EXTINF:-1 tvg-id="bakutv" tvg-name="Baku TV" tvg-logo="https://yoda.az/logos/bakutv.webp" group-title="News",Baku TV
+https://rtmp.baku.tv/hls/bakutv.m3u8
+#EXTINF:-1 tvg-id="apatv" tvg-name="APA TV" tvg-logo="https://yoda.az/logos/apatv.png" group-title="News",APA TV
+http://stream.apa.tv/apastream/index.m3u8
+#EXTINF:-1 tvg-id="cbc" tvg-name="CBC" tvg-logo="https://yoda.az/logos/cbc.svg" group-title="General",CBC
+#EXTVLCOPT:http-referer=https://player.castr.com/
+https://stream.castr.com/6994359f4093355bcd876a4c/live_dfbe52f00be311f1952faf8c24dd1b5c/index.m3u8
+#EXTINF:-1 tvg-id="xezer" tvg-name="Xəzər TV" tvg-logo="https://yoda.az/logos/xazar.png" group-title="General",Xəzər TV
+https://www.xezerxeber.az/stream/index.m3u8
+#EXTINF:-1 tvg-id="naxcivan" tvg-name="Naxçıvan TV" tvg-logo="https://yoda.az/logos/ntv.png" group-title="Regional",Naxçıvan TV
+https://str2.yodacdn.net/ntv/video.m3u8
+#EXTINF:-1 tvg-id="ayaztv" tvg-name="Ayaz TV" tvg-logo="https://www.ayaztv.com/storage/assets/site_logo.png" group-title="General",Ayaz TV
+https://janya-ayaztv.vgcdn.net/ptnr-WebApp/title-Ayaz_TV/v1/vglive-sk-934820/main.m3u8
+#EXTINF:-1 tvg-id="azstartv" tvg-name="AzStar TV" group-title="General",AzStar TV
+https://live.livestreamtv.ca/azstar/amlst:azstar/playlist.m3u8
+#EXTINF:-1 tvg-id="knmusictv" tvg-name="KN Music TV" tvg-logo="https://www.knmusictv.com/wp-content/uploads/2026/01/LOGO2112.png" group-title="Music",KN Music TV
+https://cdn4.yayin.com.tr/kntv/tracks-v1a1/mono.m3u8
+#EXTINF:-1 tvg-id="gunaztv" tvg-name="GunAz TV" group-title="General",GunAz TV
+https://tv.gunaz.tv/hls/live.m3u8
+#EXTINF:-1 tvg-id="vilayettv" tvg-name="Vilayət TV" group-title="General",Vilayət TV
+https://nl.livekadeh.com/hls2/vilayet.m3u8
+#EXTINF:-1 tvg-id="atv" tvg-name="ATV" tvg-logo="https://yoda.az/logos/atv.svg" group-title="AZ-only (untested)",ATV
+https://str.yodacdn.net/atv/video.m3u8
+#EXTINF:-1 tvg-id="arb" tvg-name="ARB" tvg-logo="https://yoda.az/logos/arb.svg" group-title="AZ-only (untested)",ARB
+https://str.yodacdn.net/arb/video.m3u8
+#EXTINF:-1 tvg-id="arb24" tvg-name="ARB 24" tvg-logo="https://yoda.az/logos/arb24.svg" group-title="AZ-only (untested)",ARB 24
+https://str.yodacdn.net/arb24/video.m3u8
+#EXTINF:-1 tvg-id="arbgunesh" tvg-name="ARB Günəş" tvg-logo="https://yoda.az/logos/gunesh.svg" group-title="AZ-only (untested)",ARB Günəş
+https://str.yodacdn.net/arbgunesh/video.m3u8
+#EXTINF:-1 tvg-id="space" tvg-name="Space TV" tvg-logo="https://yoda.az/logos/space.png" group-title="AZ-only (untested)",Space TV
+https://str.yodacdn.net/space/video.m3u8
+#EXTINF:-1 tvg-id="real" tvg-name="Real TV" tvg-logo="https://yoda.az/logos/real.svg" group-title="AZ-only (untested)",Real TV
+https://str.yodacdn.net/real/video.m3u8
+#EXTINF:-1 tvg-id="idmantele" tvg-name="İdman Azərbaycan" tvg-logo="https://yoda.az/logos/idman.svg" group-title="AZ-only (untested)",İdman Azərbaycan
+https://str.yodacdn.net/idmantele/video.m3u8
+#EXTINF:-1 tvg-id="qafkaz" tvg-name="Qafqaz TV" tvg-logo="https://yoda.az/logos/qafqaz.svg" group-title="AZ-only (untested)",Qafqaz TV
+https://str.yodacdn.net/qafkaz/video.m3u8
+#EXTINF:-1 tvg-id="mtvaz" tvg-name="MTV Azərbaycan" tvg-logo="https://yoda.az/logos/mtv.png" group-title="AZ-only (untested)",MTV Azərbaycan
+https://str.yodacdn.net/mtvaz/video.m3u8
+#EXTINF:-1 tvg-id="vip" tvg-name="VIP HD" tvg-logo="https://yoda.az/logos/viphd.png" group-title="AZ-only (untested)",VIP HD
+https://str.yodacdn.net/vip/video.m3u8
+#EXTINF:-1 tvg-id="shtv" tvg-name="SH TV" tvg-logo="https://yoda.az/logos/shtv.png" group-title="AZ-only (untested)",SH TV
+https://str.yodacdn.net/shtv/video.m3u8
+#EXTINF:-1 tvg-id="tmbaz" tvg-name="TMB Azərbaycan" tvg-logo="https://yoda.az/logos/tmb.png" group-title="AZ-only (untested)",TMB Azərbaycan
+https://str.yodacdn.net/tmbaz/video.m3u8
+#EXTINF:-1 tvg-id="start" tvg-name="Kanal S / Start" tvg-logo="https://yoda.az/logos/start.png" group-title="AZ-only (untested)",Kanal S / Start
+https://str.yodacdn.net/start/video.m3u8
+#EXTINF:-1 tvg-id="cbc" tvg-name="CBC (platform)" tvg-logo="https://yoda.az/logos/cbc.svg" group-title="AZ-only (untested)",CBC (platform)
+https://str1.yodacdn.net/cbc/video.m3u8
+#EXTINF:-1 tvg-id="ictimaitv" tvg-name="İctimai TV" tvg-logo="https://yoda.az/logos/itv.png" group-title="AZ-only (untested)",İctimai TV
+https://node19.connect.az:9081/tv/live/playlist.m3u8
+#EXTINF:-1 tvg-id="showplus" tvg-name="Show Plus TV" tvg-logo="https://yoda.az/logos/showplus.png" group-title="AZ-only (untested)",Show Plus TV
+https://str.yodacdn.net/showplus/video.m3u8
+#EXTINF:-1 tvg-id="biznestv" tvg-name="Biznes TV" tvg-logo="https://yoda.az/logos/biznestv.png" group-title="AZ-only (untested)",Biznes TV
+https://str.yodacdn.net/biznestv/video.m3u8

@@ -4,8 +4,9 @@ Free-to-air Azerbaijani TV channels as a public HLS playlist, in both JSON and
 M3U form, for loading into a TV app.
 
 ```
-playlist.json   # full channel list with tiers, alternates, headers, logos, EPG
-playlist.m3u    # only the verified channels, ready for any IPTV player
+playlist.json     # full channel list with tiers, alternates, headers, logos, EPG
+playlist.m3u      # only the verified channels (12) - safe anywhere
+playlist-all.m3u  # verified + the AZ-geo-locked ones (29) - use this inside Azerbaijan
 selftest.py     # re-verify every channel from your own network
 build_m3u.py    # regenerate playlist.m3u from playlist.json
 ```
@@ -13,8 +14,9 @@ build_m3u.py    # regenerate playlist.m3u from playlist.json
 **Raw URLs** (what you point your TV at):
 
 ```
-https://raw.githubusercontent.com/byrvr/azeri-iptv/main/playlist.m3u
-https://raw.githubusercontent.com/byrvr/azeri-iptv/main/playlist.json
+https://raw.githubusercontent.com/byrvr/catapult/claude/parallel-agents-azeri-streams-az8hu0/azeri-iptv/playlist-all.m3u
+https://raw.githubusercontent.com/byrvr/catapult/claude/parallel-agents-azeri-streams-az8hu0/azeri-iptv/playlist.m3u
+https://raw.githubusercontent.com/byrvr/catapult/claude/parallel-agents-azeri-streams-az8hu0/azeri-iptv/playlist.json
 ```
 
 ## Tiers, and why they exist
