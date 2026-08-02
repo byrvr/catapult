@@ -1214,10 +1214,25 @@ async def _install_app(
         device_udid,
         [original_bundle_id, legacy_bundle_id],
     )
+    installed_bundle_id = installed_app.get("bundle_id") if installed_app else None
+    if installed_bundle_id == original_bundle_id and not recorded_bundle_id:
+        # The copy on the device carries the app's real bundle ID and Catapult
+        # has no record of installing it — so it is the App Store build. A
+        # development-signed build cannot replace it: installd rejects the
+        # install with IXErrorDomain 46, "a coordinated app install already
+        # exists ... (creator App Store)". Fall through to the namespaced ID and
+        # install alongside it instead.
+        logger.info(
+            "%s is already installed by the App Store — installing under the "
+            "Catapult bundle ID instead of trying to replace it",
+            original_bundle_id,
+        )
+        installed_bundle_id = None
+        installed_app = None
+
     target_bundle_id = (
-        installed_app.get("bundle_id")
-        if installed_app
-        else recorded_bundle_id
+        installed_bundle_id
+        or recorded_bundle_id
         or legacy_bundle_id
     )
     if installed_app and target_bundle_id != original_bundle_id:
