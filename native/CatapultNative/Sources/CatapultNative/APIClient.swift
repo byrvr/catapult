@@ -279,3 +279,36 @@ struct APIClient: Sendable {
         return cleaned.isEmpty ? "upload.ipa" : cleaned
     }
 }
+
+extension APIClient {
+    func storeSources() async throws -> StoreSourceList {
+        try await get("/api/store/sources", as: StoreSourceList.self)
+    }
+
+    func addStoreSource(url: String) async throws -> StatusResponse {
+        try await postJSON("/api/store/sources", body: ["url": url], as: StatusResponse.self)
+    }
+
+    func removeStoreSource(id: String) async throws -> StoreSourceList {
+        try await postJSON("/api/store/sources/remove", body: ["id": id], as: StoreSourceList.self)
+    }
+
+    func storeApps(deviceUDID: String?) async throws -> StoreCatalog {
+        let query = (deviceUDID?.isEmpty == false)
+            ? "?device_udid=\(deviceUDID!.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")"
+            : ""
+        return try await get("/api/store/apps\(query)", as: StoreCatalog.self, timeout: 90)
+    }
+
+    func storeInstall(
+        appKey: String,
+        deviceUDID: String,
+        onMessage: @MainActor @escaping (InstallMessage) -> Void
+    ) async throws {
+        try await streamJob(
+            path: "/ws/store-install",
+            payload: ["app_key": appKey, "device_udid": deviceUDID],
+            onMessage: onMessage
+        )
+    }
+}

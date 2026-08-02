@@ -416,3 +416,87 @@ enum CatapultError: LocalizedError {
         }
     }
 }
+
+struct StoreSource: Codable, Hashable, Identifiable, Sendable {
+    let id: String
+    let kind: String
+    let url: String
+    let includePrerelease: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case id, kind, url
+        case includePrerelease = "include_prerelease"
+    }
+
+    var displayName: String {
+        kind == "github" ? id.replacingOccurrences(of: "github:", with: "") : url
+    }
+}
+
+struct StoreSourceList: Decodable, Sendable {
+    let sources: [StoreSource]
+}
+
+struct StoreApp: Codable, Hashable, Identifiable, Sendable {
+    let appKey: String
+    let sourceId: String
+    let name: String
+    let version: String
+    let platform: String
+    let variant: String
+    let developer: String
+    let iconUrl: String
+    let changelog: String
+    let size: Int
+    let prerelease: Bool
+    let installedVersion: String?
+    let updateAvailable: Bool?
+
+    var id: String { appKey }
+
+    enum CodingKeys: String, CodingKey {
+        case appKey = "app_key"
+        case sourceId = "source_id"
+        case name, version, platform, variant, developer, changelog, size, prerelease
+        case iconUrl = "icon_url"
+        case installedVersion = "installed_version"
+        case updateAvailable = "update_available"
+    }
+
+    var isInstalled: Bool { !(installedVersion ?? "").isEmpty }
+
+    var sizeLabel: String {
+        ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file)
+    }
+
+    var platformLabel: String {
+        switch platform {
+        case "tvos": return variant.isEmpty ? "Apple TV" : "Apple TV · \(variant)"
+        case "ios": return "iPhone & iPad"
+        default: return "Unknown platform"
+        }
+    }
+}
+
+struct StoreSourceError: Codable, Hashable, Sendable {
+    let sourceId: String
+    let message: String
+
+    enum CodingKeys: String, CodingKey {
+        case sourceId = "source_id"
+        case message
+    }
+}
+
+struct StoreCatalog: Decodable, Sendable {
+    let apps: [StoreApp]
+    let errors: [StoreSourceError]
+    let deviceClass: String
+    let freeTeam: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case apps, errors
+        case deviceClass = "device_class"
+        case freeTeam = "free_team"
+    }
+}
