@@ -520,3 +520,63 @@ async def _refresh_install(rec, device_manager, auth_client, dev_services, signe
             ipa_path, rec["fail_count"], delay / 60,
         )
         return {"status": "error", "message": str(e), "fail_count": rec["fail_count"]}
+
+
+STORE_CHECK_INTERVAL_SECONDS = 86400
+
+
+def store_updates_due(state: dict, catalog: dict[str, str], now: float | None = None) -> list[dict]:
+    """Install records whose source publishes a newer version.
+
+    catalog maps store_app_key -> latest version. Only records that opted into
+    auto-update and are not pinned are considered.
+    """
+    from catapult import store as _store
+
+    due: list[dict] = []
+    for rec in state.get("installs", []):
+        key = rec.get("store_app_key")
+        if not key or not rec.get("store_auto_update"):
+            continue
+        if rec.get("store_pinned"):
+            continue
+        latest = catalog.get(key)
+        if latest and _store.is_newer(latest, rec.get("store_version")):
+            due.append(rec)
+    return due
+
+
+def store_check_is_due(state: dict, now: float | None = None) -> bool:
+    now = now if now is not None else _now_ts()
+    last = float(state.get("store_checked_at") or 0)
+    return (now - last) >= STORE_CHECK_INTERVAL_SECONDS
+
+
+def mark_store_checked(now: float | None = None) -> None:
+    state = load_state()
+    state["store_checked_at"] = now if now is not None else _now_ts()
+    save_state(state)
+
+
+def tag_store_install(device_udid: str, ipa_path: str, app_key: str, version: str) -> None:
+    """Mark an install as coming from a store source, so updates can track it.
+
+    Matched on the vault digest rather than the download path, because
+    record_install() rewrites ipa_path to the content-addressed vault copy.
+    """
+    digest = ""
+    try:
+        digest = vault.sha256_file(ipa_path)
+    except OSError:
+        logger.debug("Could not hash %s for store tagging", ipa_path, exc_info=True)
+
+    state = load_state()
+    for rec in state.get("installs", []):
+        if rec.get("device_udid") != device_udid:
+            continue
+        if digest and rec.get("ipa_sha256") == digest:
+            rec["store_app_key"] = app_key
+            rec["store_version"] = version
+            save_state(state)
+            return
+    logger.debug("No install record matched the store app %s", app_key)
