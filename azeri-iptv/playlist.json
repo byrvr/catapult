@@ -1,0 +1,333 @@
+{
+  "name": "Azərbaycan IPTV",
+  "description": "Free-to-air Azerbaijani TV channels, HLS live streams.",
+  "updated": "2026-08-02T11:07:38Z",
+  "counts": {
+    "verified": 12,
+    "degraded": 1,
+    "az_only": 17,
+    "total": 30
+  },
+  "tiers": {
+    "verified": "Manifest, media playlist, a real segment download and live-edge advance all confirmed from outside Azerbaijan, across 6 passes spread over ~40 minutes.",
+    "degraded": "Plays, but fails the quality/reliability bar. See `warnings`.",
+    "az_only": "Official yoda.az platform URL that returns HTTP 403 outside Azerbaijan. Geo/licensing gated, NOT verified by us. Expected to work on an Azerbaijani connection - run selftest.py to confirm."
+  },
+  "channels": [
+    {
+      "id": "aztv",
+      "name": "AzTV",
+      "group": "General",
+      "tier": "verified",
+      "res": "1080p",
+      "url": "https://str.yodacdn.net/azertv/index.m3u8",
+      "alt": [
+        "https://stream8.cinerama.uz/1455/tracks-v1a1/mono.m3u8"
+      ],
+      "logo": "https://yoda.az/logos/aztv.svg",
+      "epg": "https://azepg.ddns.net/aztv/15_days_archive__aztv_desc.xml"
+    },
+    {
+      "id": "medeniyyet",
+      "name": "Mədəniyyət TV",
+      "group": "Culture",
+      "tier": "verified",
+      "res": "1080p",
+      "url": "https://str.yodacdn.net/medeniyyettele/index.m3u8",
+      "logo": "https://yoda.az/logos/medeniyyet.svg"
+    },
+    {
+      "id": "bakutv",
+      "name": "Baku TV",
+      "group": "News",
+      "tier": "verified",
+      "res": "1080p",
+      "url": "https://rtmp.baku.tv/hls/bakutv.m3u8",
+      "alt": [
+        "https://str1.yodacdn.net/bakutv/tracks-v1a1/mono.ts.m3u8"
+      ],
+      "logo": "https://yoda.az/logos/bakutv.webp",
+      "epg": "https://azepg.ddns.net/aztv/15_days_archive__bakutv_desc.xml"
+    },
+    {
+      "id": "apatv",
+      "name": "APA TV",
+      "group": "News",
+      "tier": "verified",
+      "res": "1080p",
+      "url": "http://stream.apa.tv/apastream/index.m3u8",
+      "logo": "https://yoda.az/logos/apatv.png",
+      "warnings": [
+        "HTTP-only origin (no TLS)",
+        "one transient 503 seen across 6 passes"
+      ]
+    },
+    {
+      "id": "cbc",
+      "name": "CBC",
+      "group": "General",
+      "tier": "verified",
+      "res": "720p",
+      "url": "https://stream.castr.com/6994359f4093355bcd876a4c/live_dfbe52f00be311f1952faf8c24dd1b5c/index.m3u8",
+      "headers": {
+        "Referer": "https://player.castr.com/"
+      },
+      "logo": "https://yoda.az/logos/cbc.svg",
+      "warnings": [
+        "requires Referer header; player must support custom headers"
+      ]
+    },
+    {
+      "id": "xezer",
+      "name": "Xəzər TV",
+      "group": "General",
+      "tier": "verified",
+      "res": "720p",
+      "url": "https://www.xezerxeber.az/stream/index.m3u8",
+      "logo": "https://yoda.az/logos/xazar.png",
+      "epg": "https://azepg.ddns.net/aztv/15_days_archive__xezer_desc.xml"
+    },
+    {
+      "id": "naxcivan",
+      "name": "Naxçıvan TV",
+      "group": "Regional",
+      "tier": "verified",
+      "res": "720p",
+      "url": "https://str2.yodacdn.net/ntv/video.m3u8",
+      "alt": [
+        "https://str1.yodacdn.net/ntv/tracks-v1a1/mono.ts.m3u8"
+      ],
+      "logo": "https://yoda.az/logos/ntv.png"
+    },
+    {
+      "id": "ayaztv",
+      "name": "Ayaz TV",
+      "group": "General",
+      "tier": "verified",
+      "res": "720p",
+      "url": "https://janya-ayaztv.vgcdn.net/ptnr-WebApp/title-Ayaz_TV/v1/vglive-sk-934820/main.m3u8",
+      "logo": "https://www.ayaztv.com/storage/assets/site_logo.png"
+    },
+    {
+      "id": "azstartv",
+      "name": "AzStar TV",
+      "group": "General",
+      "tier": "verified",
+      "res": "1080p",
+      "url": "https://live.livestreamtv.ca/azstar/amlst:azstar/playlist.m3u8",
+      "alt": [
+        "http://live.azstartv.com/azstar/smil:azstar.smil/playlist.m3u8"
+      ],
+      "note": "Azerbaijani diaspora channel (broadcast from Canada)"
+    },
+    {
+      "id": "knmusictv",
+      "name": "KN Music TV",
+      "group": "Music",
+      "tier": "verified",
+      "res": "720p",
+      "url": "https://cdn4.yayin.com.tr/kntv/tracks-v1a1/mono.m3u8",
+      "logo": "https://www.knmusictv.com/wp-content/uploads/2026/01/LOGO2112.png"
+    },
+    {
+      "id": "gunaztv",
+      "name": "GunAz TV",
+      "group": "General",
+      "tier": "verified",
+      "res": "576p",
+      "url": "https://tv.gunaz.tv/hls/live.m3u8",
+      "note": "South Azerbaijani (Iranian Azeri) diaspora channel"
+    },
+    {
+      "id": "vilayettv",
+      "name": "Vilayət TV",
+      "group": "General",
+      "tier": "verified",
+      "res": "576p",
+      "url": "https://nl.livekadeh.com/hls2/vilayet.m3u8",
+      "note": "South Azerbaijani (Iranian Azeri) channel"
+    },
+    {
+      "id": "eltv",
+      "name": "EL TV",
+      "group": "General",
+      "tier": "degraded",
+      "res": "360p",
+      "url": "https://live.eltv.az/live/eltv/playlist.m3u8",
+      "warnings": [
+        "origin TLS certificate is EXPIRED — most TV players will refuse it",
+        "360p only, ~0.5 Mbit/s"
+      ]
+    },
+    {
+      "id": "atv",
+      "name": "ATV",
+      "group": "General",
+      "tier": "az_only",
+      "res": "unknown",
+      "url": "https://str.yodacdn.net/atv/video.m3u8",
+      "logo": "https://yoda.az/logos/atv.svg"
+    },
+    {
+      "id": "arb",
+      "name": "ARB",
+      "group": "General",
+      "tier": "az_only",
+      "res": "unknown",
+      "url": "https://str.yodacdn.net/arb/video.m3u8",
+      "logo": "https://yoda.az/logos/arb.svg"
+    },
+    {
+      "id": "arb24",
+      "name": "ARB 24",
+      "group": "News",
+      "tier": "az_only",
+      "res": "unknown",
+      "url": "https://str.yodacdn.net/arb24/video.m3u8",
+      "logo": "https://yoda.az/logos/arb24.svg"
+    },
+    {
+      "id": "arbgunesh",
+      "name": "ARB Günəş",
+      "group": "Kids",
+      "tier": "az_only",
+      "res": "unknown",
+      "url": "https://str.yodacdn.net/arbgunesh/video.m3u8",
+      "logo": "https://yoda.az/logos/gunesh.svg"
+    },
+    {
+      "id": "space",
+      "name": "Space TV",
+      "group": "General",
+      "tier": "az_only",
+      "res": "unknown",
+      "url": "https://str.yodacdn.net/space/video.m3u8",
+      "logo": "https://yoda.az/logos/space.png"
+    },
+    {
+      "id": "real",
+      "name": "Real TV",
+      "group": "News",
+      "tier": "az_only",
+      "res": "unknown",
+      "url": "https://str.yodacdn.net/real/video.m3u8",
+      "logo": "https://yoda.az/logos/real.svg"
+    },
+    {
+      "id": "idmantele",
+      "name": "İdman Azərbaycan",
+      "group": "Sports",
+      "tier": "az_only",
+      "res": "unknown",
+      "url": "https://str.yodacdn.net/idmantele/video.m3u8",
+      "alt": [
+        "https://str.yodacdn.net/idmantele/index.m3u8"
+      ],
+      "logo": "https://yoda.az/logos/idman.svg"
+    },
+    {
+      "id": "qafkaz",
+      "name": "Qafqaz TV",
+      "group": "General",
+      "tier": "az_only",
+      "res": "unknown",
+      "url": "https://str.yodacdn.net/qafkaz/video.m3u8",
+      "logo": "https://yoda.az/logos/qafqaz.svg"
+    },
+    {
+      "id": "mtvaz",
+      "name": "MTV Azərbaycan",
+      "group": "Music",
+      "tier": "az_only",
+      "res": "unknown",
+      "url": "https://str.yodacdn.net/mtvaz/video.m3u8",
+      "logo": "https://yoda.az/logos/mtv.png"
+    },
+    {
+      "id": "vip",
+      "name": "VIP HD",
+      "group": "General",
+      "tier": "az_only",
+      "res": "unknown",
+      "url": "https://str.yodacdn.net/vip/video.m3u8",
+      "logo": "https://yoda.az/logos/viphd.png"
+    },
+    {
+      "id": "shtv",
+      "name": "SH TV",
+      "group": "General",
+      "tier": "az_only",
+      "res": "unknown",
+      "url": "https://str.yodacdn.net/shtv/video.m3u8",
+      "logo": "https://yoda.az/logos/shtv.png"
+    },
+    {
+      "id": "tmbaz",
+      "name": "TMB Azərbaycan",
+      "group": "General",
+      "tier": "az_only",
+      "res": "unknown",
+      "url": "https://str.yodacdn.net/tmbaz/video.m3u8",
+      "logo": "https://yoda.az/logos/tmb.png"
+    },
+    {
+      "id": "start",
+      "name": "Kanal S / Start",
+      "group": "General",
+      "tier": "az_only",
+      "res": "unknown",
+      "url": "https://str.yodacdn.net/start/video.m3u8",
+      "logo": "https://yoda.az/logos/start.png"
+    },
+    {
+      "id": "cbc",
+      "name": "CBC (platform)",
+      "group": "General",
+      "tier": "az_only",
+      "res": "unknown",
+      "url": "https://str1.yodacdn.net/cbc/video.m3u8",
+      "logo": "https://yoda.az/logos/cbc.svg"
+    },
+    {
+      "id": "ictimaitv",
+      "name": "İctimai TV",
+      "group": "General",
+      "tier": "az_only",
+      "res": "unknown",
+      "url": "https://node19.connect.az:9081/tv/live/playlist.m3u8",
+      "alt": [
+        "https://live.itv.az/itv.m3u8"
+      ],
+      "logo": "https://yoda.az/logos/itv.png",
+      "epg": "https://azepg.ddns.net/aztv/15_days_archive__itv_desc.xml",
+      "warnings": [
+        "endpoint taken from itv.az's own player bundle",
+        "serves on port 9081; some networks and players block non-443 ports"
+      ]
+    },
+    {
+      "id": "showplus",
+      "name": "Show Plus TV",
+      "group": "General",
+      "tier": "az_only",
+      "res": "unknown",
+      "url": "https://str.yodacdn.net/showplus/video.m3u8",
+      "logo": "https://yoda.az/logos/showplus.png",
+      "warnings": [
+        "404 (not 403) on the platform URL - path may have changed"
+      ]
+    },
+    {
+      "id": "biznestv",
+      "name": "Biznes TV",
+      "group": "Business",
+      "tier": "az_only",
+      "res": "unknown",
+      "url": "https://str.yodacdn.net/biznestv/video.m3u8",
+      "logo": "https://yoda.az/logos/biznestv.png",
+      "warnings": [
+        "404 (not 403) on the platform URL - path may have changed"
+      ]
+    }
+  ]
+}
