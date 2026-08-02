@@ -6,20 +6,30 @@ struct ContentView: View {
     @State private var showSignIn = false
     @State private var showAccount = false
     @State private var showActivity = false
+    @State private var selectedTab = 0
 
     var body: some View {
         VStack(spacing: 0) {
             TopBar(showSignIn: $showSignIn, showAccount: $showAccount, showActivity: $showActivity)
             Divider()
             BackendBanner()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    InstallWorkspace(showSignIn: $showSignIn)
-                    DeviceBrowser()
+            TabView(selection: $selectedTab) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        InstallWorkspace(showSignIn: $showSignIn)
+                        DeviceBrowser()
+                    }
+                    .padding(22)
+                    .frame(maxWidth: 980)
+                    .frame(maxWidth: .infinity)
                 }
-                .padding(22)
-                .frame(maxWidth: 980)
-                .frame(maxWidth: .infinity)
+                .tabItem { Label("Install", systemImage: CatapultIcon.install) }
+                .tag(0)
+
+                StoreView()
+                    .environmentObject(state)
+                    .tabItem { Label("Store", systemImage: "shippingbox") }
+                    .tag(1)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -1216,7 +1226,7 @@ private struct StatusBanner: View {
     }
 }
 
-private struct EmptyState: View {
+struct EmptyState: View {
     let icon: String
     let title: String
     let detail: String
