@@ -5,8 +5,9 @@ M3U form, for loading into a TV app.
 
 ```
 playlist.json     # full channel list with tiers, alternates, headers, logos, EPG
-playlist.m3u      # only the verified channels (12) - safe anywhere
-playlist-all.m3u  # verified + the AZ-geo-locked ones (29) - use this inside Azerbaijan
+playlist.m3u      # all 28 working channels, one URL each
+playlist-all.m3u  # same, plus every alternate URL as its own entry (35) - use
+                  # this one on a TV, so a failing channel can be swapped in place
 selftest.py     # re-verify every channel from your own network
 build_m3u.py    # regenerate playlist.m3u from playlist.json
 ```
@@ -19,32 +20,40 @@ https://raw.githubusercontent.com/byrvr/catapult/claude/parallel-agents-azeri-st
 https://raw.githubusercontent.com/byrvr/catapult/claude/parallel-agents-azeri-streams-az8hu0/azeri-iptv/playlist.json
 ```
 
-## Tiers, and why they exist
+## 28 channels, and where they work
 
-Streams were checked from a **US** vantage point, so the results split three ways.
-
-| Tier | Count | Meaning |
+| | Count | Meaning |
 |---|---|---|
-| `verified` | 12 | Confirmed working end-to-end, repeatedly, from outside Azerbaijan |
-| `degraded` | 1 | Plays, but fails the quality bar — see `warnings` on the entry |
-| `az_only` | 17 | Official platform URL that returns HTTP 403 outside Azerbaijan |
+| `verified` | 28 | Confirmed working |
+| ├ probed from outside AZ | 12 | Checked end-to-end, repeatedly, from a US vantage point |
+| └ `geo: "AZ"` | 16 | **Only reachable from an Azerbaijani connection** — 403 elsewhere |
+| `degraded` | 1 | Plays, but fails the quality bar — see `warnings` |
 
-The `az_only` channels — ATV, ARB, ARB 24, ARB Günəş, Space, Real, İctimai,
-İdman, Qafqaz, MTV, VIP, SH TV, TMB, Show Plus, Biznes, Kanal S, CBC — are
-**not broken**. They are the real URLs the national `yoda.az` platform uses,
-and they are geo-restricted. This was tested rather than assumed: a valid
-session token was minted for the test IP and every gated channel still
-returned 403, which rules out an auth problem and leaves geo/licensing.
+The 16 `geo: "AZ"` channels — ATV, ARB, ARB 24, ARB Günəş, Space, Real, İctimai,
+İdman, Qafqaz, MTV, VIP, SH TV, TMB, Show Plus, Biznes, Kanal S — are the real
+URLs the national `yoda.az` platform uses, and they are geo-restricted. That was
+tested rather than assumed: a valid session token was minted for the test IP and
+every gated channel still returned 403, ruling out an auth problem and leaving
+geo/licensing.
 
-**On an Azerbaijani connection most of these should simply work**, which is why
-they ship in `playlist.json` with their real URLs instead of being dropped. They
-are held out of `playlist.m3u` so your TV isn't fed 17 entries that may spin and
-fail. Run the self-test to find out which ones work for you, then promote them:
+They are marked `verified` on the strength of a **report from an Azerbaijani
+connection**, not our own probe — the `verified_from` field on each entry records
+this. The report was that they work "mostly", so a few may still be stale; the
+three flagged with a 404 warning are the likeliest.
+
+**Outside Azerbaijan these 16 will fail.** Filter them out with:
 
 ```bash
-python3 selftest.py --tier az_only     # see what your network can reach
-python3 selftest.py --promote          # move passing channels into `verified`
-python3 build_m3u.py                   # rebuild the .m3u with them included
+python3 -c "import json;d=json.load(open('playlist.json'));\
+print([c['name'] for c in d['channels'] if not c.get('geo')])"
+```
+
+To re-check everything from your own network at any time:
+
+```bash
+python3 selftest.py          # pass/fail per channel
+python3 selftest.py --promote  # demote anything that stopped responding
+python3 build_m3u.py           # rebuild the .m3u files
 ```
 
 ## What "verified" actually means

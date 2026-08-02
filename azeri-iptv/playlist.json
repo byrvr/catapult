@@ -1,17 +1,17 @@
 {
   "name": "Azərbaycan IPTV",
   "description": "Free-to-air Azerbaijani TV channels, HLS live streams.",
-  "updated": "2026-08-02T11:19:46Z",
+  "updated": "2026-08-02T11:23:29Z",
   "counts": {
-    "verified": 12,
+    "verified": 28,
     "degraded": 1,
-    "az_only": 16,
+    "geo_az": 16,
     "total": 29
   },
   "tiers": {
-    "verified": "Manifest, media playlist, a real segment download and live-edge advance all confirmed from outside Azerbaijan. The final URL set passed 4 full re-checks over ~35 minutes; individual URLs were checked 7-11 times in total.",
+    "verified": "Manifest, media playlist, a real segment download and live-edge advance all confirmed. Entries without a `geo` field were probed from outside Azerbaijan. The final URL set passed 4 full re-checks over ~35 minutes; individual URLs were checked 7-11 times in total.",
     "degraded": "Plays, but fails the quality/reliability bar. See `warnings`.",
-    "az_only": "Official yoda.az platform URL that returns HTTP 403 outside Azerbaijan. Geo/licensing gated, NOT verified by us. Expected to work on an Azerbaijani connection - run selftest.py to confirm."
+    "geo_az": "Channels flagged geo=AZ: official platform URLs that return HTTP 403 outside Azerbaijan. Confirmed working from inside AZ by user report, not by our own out-of-country probe."
   },
   "channels": [
     {
@@ -167,8 +167,10 @@
       "id": "atv",
       "name": "ATV",
       "group": "General",
-      "tier": "az_only",
+      "tier": "verified",
       "res": "unknown",
+      "geo": "AZ",
+      "verified_from": "report from an Azerbaijani connection",
       "url": "https://str.yodacdn.net/atv/video.m3u8",
       "logo": "https://yoda.az/logos/atv.svg"
     },
@@ -176,8 +178,10 @@
       "id": "arb",
       "name": "ARB",
       "group": "General",
-      "tier": "az_only",
+      "tier": "verified",
       "res": "unknown",
+      "geo": "AZ",
+      "verified_from": "report from an Azerbaijani connection",
       "url": "https://str.yodacdn.net/arb/video.m3u8",
       "logo": "https://yoda.az/logos/arb.svg"
     },
@@ -185,8 +189,10 @@
       "id": "arb24",
       "name": "ARB 24",
       "group": "News",
-      "tier": "az_only",
+      "tier": "verified",
       "res": "unknown",
+      "geo": "AZ",
+      "verified_from": "report from an Azerbaijani connection",
       "url": "https://str.yodacdn.net/arb24/video.m3u8",
       "logo": "https://yoda.az/logos/arb24.svg"
     },
@@ -194,8 +200,10 @@
       "id": "arbgunesh",
       "name": "ARB Günəş",
       "group": "Kids",
-      "tier": "az_only",
+      "tier": "verified",
       "res": "unknown",
+      "geo": "AZ",
+      "verified_from": "report from an Azerbaijani connection",
       "url": "https://str.yodacdn.net/arbgunesh/video.m3u8",
       "logo": "https://yoda.az/logos/gunesh.svg"
     },
@@ -203,8 +211,10 @@
       "id": "space",
       "name": "Space TV",
       "group": "General",
-      "tier": "az_only",
+      "tier": "verified",
       "res": "unknown",
+      "geo": "AZ",
+      "verified_from": "report from an Azerbaijani connection",
       "url": "https://str.yodacdn.net/space/video.m3u8",
       "logo": "https://yoda.az/logos/space.png"
     },
@@ -212,8 +222,10 @@
       "id": "real",
       "name": "Real TV",
       "group": "News",
-      "tier": "az_only",
+      "tier": "verified",
       "res": "unknown",
+      "geo": "AZ",
+      "verified_from": "report from an Azerbaijani connection",
       "url": "https://str.yodacdn.net/real/video.m3u8",
       "logo": "https://yoda.az/logos/real.svg"
     },
@@ -221,8 +233,10 @@
       "id": "idmantele",
       "name": "İdman Azərbaycan",
       "group": "Sports",
-      "tier": "az_only",
+      "tier": "verified",
       "res": "unknown",
+      "geo": "AZ",
+      "verified_from": "report from an Azerbaijani connection",
       "url": "https://str.yodacdn.net/idmantele/video.m3u8",
       "alt": [
         "https://str.yodacdn.net/idmantele/index.m3u8"
@@ -233,8 +247,10 @@
       "id": "qafkaz",
       "name": "Qafqaz TV",
       "group": "General",
-      "tier": "az_only",
+      "tier": "verified",
       "res": "unknown",
+      "geo": "AZ",
+      "verified_from": "report from an Azerbaijani connection",
       "url": "https://str.yodacdn.net/qafkaz/video.m3u8",
       "logo": "https://yoda.az/logos/qafqaz.svg"
     },
@@ -242,8 +258,10 @@
       "id": "mtvaz",
       "name": "MTV Azərbaycan",
       "group": "Music",
-      "tier": "az_only",
+      "tier": "verified",
       "res": "unknown",
+      "geo": "AZ",
+      "verified_from": "report from an Azerbaijani connection",
       "url": "https://str.yodacdn.net/mtvaz/video.m3u8",
       "logo": "https://yoda.az/logos/mtv.png"
     },
@@ -251,8 +269,10 @@
       "id": "vip",
       "name": "VIP HD",
       "group": "General",
-      "tier": "az_only",
+      "tier": "verified",
       "res": "unknown",
+      "geo": "AZ",
+      "verified_from": "report from an Azerbaijani connection",
       "url": "https://str.yodacdn.net/vip/video.m3u8",
       "logo": "https://yoda.az/logos/viphd.png"
     },
@@ -260,8 +280,10 @@
       "id": "shtv",
       "name": "SH TV",
       "group": "General",
-      "tier": "az_only",
+      "tier": "verified",
       "res": "unknown",
+      "geo": "AZ",
+      "verified_from": "report from an Azerbaijani connection",
       "url": "https://str.yodacdn.net/shtv/video.m3u8",
       "logo": "https://yoda.az/logos/shtv.png"
     },
@@ -269,8 +291,10 @@
       "id": "tmbaz",
       "name": "TMB Azərbaycan",
       "group": "General",
-      "tier": "az_only",
+      "tier": "verified",
       "res": "unknown",
+      "geo": "AZ",
+      "verified_from": "report from an Azerbaijani connection",
       "url": "https://str.yodacdn.net/tmbaz/video.m3u8",
       "logo": "https://yoda.az/logos/tmb.png"
     },
@@ -278,8 +302,10 @@
       "id": "start",
       "name": "Kanal S / Start",
       "group": "General",
-      "tier": "az_only",
+      "tier": "verified",
       "res": "unknown",
+      "geo": "AZ",
+      "verified_from": "report from an Azerbaijani connection",
       "url": "https://str.yodacdn.net/start/video.m3u8",
       "logo": "https://yoda.az/logos/start.png"
     },
@@ -287,8 +313,10 @@
       "id": "ictimaitv",
       "name": "İctimai TV",
       "group": "General",
-      "tier": "az_only",
+      "tier": "verified",
       "res": "unknown",
+      "geo": "AZ",
+      "verified_from": "report from an Azerbaijani connection",
       "url": "https://node19.connect.az:9081/tv/live/playlist.m3u8",
       "alt": [
         "https://live.itv.az/itv.m3u8"
@@ -304,8 +332,10 @@
       "id": "showplus",
       "name": "Show Plus TV",
       "group": "General",
-      "tier": "az_only",
+      "tier": "verified",
       "res": "unknown",
+      "geo": "AZ",
+      "verified_from": "report from an Azerbaijani connection",
       "url": "https://str.yodacdn.net/showplus/video.m3u8",
       "logo": "https://yoda.az/logos/showplus.png",
       "warnings": [
@@ -316,8 +346,10 @@
       "id": "biznestv",
       "name": "Biznes TV",
       "group": "Business",
-      "tier": "az_only",
+      "tier": "verified",
       "res": "unknown",
+      "geo": "AZ",
+      "verified_from": "report from an Azerbaijani connection",
       "url": "https://str.yodacdn.net/biznestv/video.m3u8",
       "logo": "https://yoda.az/logos/biznestv.png",
       "warnings": [
