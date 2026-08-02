@@ -23,6 +23,7 @@ from catapult.signer import Signer
 from catapult import power as _power
 from catapult import provisioning as _provisioning
 from catapult import refresh as _refresh
+from catapult import store as _store
 from catapult import sync as _sync
 from catapult import vault as _vault
 
@@ -1418,6 +1419,195 @@ async def reinstall_ws(ws: WebSocket):
             await _send_error(ws, e, job=job)
         except Exception:
             pass
+    finally:
+        try:
+            await ws.close()
+        except Exception:
+            pass
+
+
+# ── Store ──
+
+
+def _sources_payload() -> dict:
+    return {"sources": [s.to_dict() for s in _store.load_sources()]}
+
+
+@app.get("/api/store/sources")
+async def list_sources():
+    return _sources_payload()
+
+
+@app.post("/api/store/sources")
+async def add_source(payload: dict = None):
+    """Add a GitHub repo or an AltStore apps.json URL."""
+    try:
+        source = _store.normalize_source((payload or {}).get("url", ""))
+    except ValueError as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=400)
+
+    sources = _store.load_sources()
+    if any(s.id == source.id for s in sources):
+        return JSONResponse(
+            {"status": "error", "message": "That source is already added."},
+            status_code=409,
+        )
+
+    # Fetch once before saving, so a typo fails loudly instead of sitting in
+    # the list producing nothing.
+    try:
+        apps = await _store.fetch_catalog(source)
+    except Exception as e:
+        logger.info("Could not read source %s: %s", source.id, e)
+        return JSONResponse(
+            {"status": "error", "message": f"Could not read that source: {e}"},
+            status_code=400,
+        )
+
+    sources.append(source)
+    _store.save_sources(sources)
+    logger.info("Added source %s (%d apps)", source.id, len(apps))
+    return {"status": "ok", "source": source.to_dict(), "app_count": len(apps)}
+
+
+@app.post("/api/store/sources/remove")
+async def remove_source(payload: dict = None):
+    source_id = (payload or {}).get("id", "")
+    remaining = [s for s in _store.load_sources() if s.id != source_id]
+    _store.save_sources(remaining)
+    return _sources_payload()
+
+
+@app.post("/api/store/sources/update")
+async def update_source(payload: dict = None):
+    """Toggle per-source settings, currently just pre-release inclusion."""
+    payload = payload or {}
+    source_id = payload.get("id", "")
+    sources = _store.load_sources()
+    for source in sources:
+        if source.id == source_id and "include_prerelease" in payload:
+            source.include_prerelease = bool(payload["include_prerelease"])
+    _store.save_sources(sources)
+    return _sources_payload()
+
+
+@app.get("/api/store/apps")
+async def list_store_apps(device_udid: str = ""):
+    """Merged catalog, filtered to what fits the selected device."""
+    device_class = ""
+    if device_udid:
+        try:
+            device = await device_manager.get_device_info(device_udid)
+            device_class = device.get("device_class", "")
+        except Exception:
+            logger.debug("Could not resolve device for store filter", exc_info=True)
+
+    apps: list[dict] = []
+    errors: list[dict] = []
+    for source in _store.load_sources():
+        try:
+            for app in await _store.fetch_catalog(source):
+                if device_class and not _store.platform_fits_device(app.platform, device_class):
+                    continue
+                apps.append(app.to_dict())
+        except Exception as e:
+            logger.info("Source %s failed: %s", source.id, e)
+            errors.append({"source_id": source.id, "message": str(e)})
+
+    installed = {
+        rec.get("store_app_key"): rec.get("store_version")
+        for rec in _refresh.load_state().get("installs", [])
+        if rec.get("store_app_key")
+    }
+    for app in apps:
+        current = installed.get(app["app_key"])
+        app["installed_version"] = current or ""
+        app["update_available"] = bool(current) and _store.is_newer(app["version"], current)
+
+    return {
+        "apps": apps,
+        "errors": errors,
+        "device_class": device_class,
+        "free_team": await _team_is_free(),
+    }
+
+
+async def _team_is_free() -> bool:
+    """Free teams allow 10 App IDs per 7 days and 3 apps — a store exhausts that."""
+    session = auth_client.session
+    if not session or not session.authenticated:
+        return False
+    try:
+        team = await dev_services.get_team(session)
+    except Exception:
+        return False
+    return str(team.get("type", "")).lower() in ("individual", "free", "")
+
+
+async def _resolve_store_app(app_key: str) -> "_store.StoreApp | None":
+    for source in _store.load_sources():
+        try:
+            for app in await _store.fetch_catalog(source):
+                if app.app_key == app_key:
+                    return app
+        except Exception:
+            logger.debug("Source %s failed during resolve", source.id, exc_info=True)
+    return None
+
+
+@app.websocket("/ws/store-install")
+async def store_install_ws(ws: WebSocket):
+    """Download a catalog app, then hand it to the normal install pipeline."""
+    await ws.accept()
+    job: ActivityJob | None = None
+    try:
+        message = await ws.receive()
+        raw = message.get("text") or (message.get("bytes") or b"").decode("utf-8")
+        params = json.loads(raw) if raw else {}
+
+        device_udid = params.get("device_udid", "")
+        app_key = params.get("app_key", "")
+        job = job_manager.start(
+            "install", "Install from store", target=device_udid or "",
+            message="Looking up app...",
+        )
+        if not device_udid or not app_key:
+            text = "Store install request was missing the device or the app."
+            job_manager.fail(job, text)
+            await _send_error(ws, text, job=job)
+            return
+
+        report = lambda step, progress, message: _job_progress(  # noqa: E731
+            job,
+            lambda s, p, m: _send(ws, s, p, m, job_id=job.id),
+            step, progress, message,
+        )
+
+        app = await _resolve_store_app(app_key)
+        if app is None:
+            text = "That app is no longer listed by its source."
+            job_manager.fail(job, text)
+            await _send_error(ws, text, job=job)
+            return
+
+        await report("download", 5, f"Downloading {app.name} {app.version}...")
+        downloads = Path.home() / ".catapult" / "downloads"
+        target = downloads / f"{hashlib.sha256(app.download_url.encode()).hexdigest()[:16]}.ipa"
+        await _store.download_to(app.download_url, target, expected_sha256=app.sha256)
+
+        await report("download", 20, "Verifying...")
+        result = await _install_app(device_udid, str(target), report)
+
+        _refresh.tag_store_install(device_udid, str(target), app.app_key, app.version)
+        done = result.get("message") or f"Installed {app.name} {app.version}."
+        job_manager.complete(job, message=done)
+        await _send(ws, "done", 100, done, job_id=job.id)
+
+    except Exception as e:
+        logger.exception("Store install failed")
+        if job:
+            job_manager.fail(job, str(e))
+        await _send_error(ws, str(e), job=job)
     finally:
         try:
             await ws.close()
