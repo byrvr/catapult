@@ -66,7 +66,9 @@ TUNNELD_LOG_PATH = "/tmp/catapult_tunneld.log"
 # are actively connecting, treat it as wedged and force a restart rather than
 # blindly trusting its HTTP port. (A long-lived daemon can silently stop
 # discovering devices after sleep/wake or network changes.)
-STALE_TUNNELD_UPTIME_S = 3600
+# How long a failed tunnel attempt is remembered, so one unreachable device
+# does not produce four identical poll cycles during a single install.
+TUNNEL_FAILURE_CACHE_SECONDS = 60
 # Poll windows (each attempt waits 2s). An already-running healthy daemon
 # usually has the tunnel up already, so a short window is enough. A freshly
 # (re)started daemon is cold — it must browse mDNS, discover the device, and
@@ -208,6 +210,7 @@ class DeviceManager:
         self._cache: dict[str, dict] = {}
         self._tunnel_proc: asyncio.subprocess.Process | None = None
         self._tunneled_hosts: set[str] = set()  # hosts with active tunnels
+        self._recent_tunnel_failures: dict[str, tuple[float, dict]] = {}
         self._paired_devices = self._load_paired_devices()
         self._pairing_lock = threading.Lock()
         self._tunnel_lock: asyncio.Lock | None = None  # created lazily in async context
@@ -1158,13 +1161,36 @@ echo installed
         self,
         device_udid: str | None = None,
         device_host: str | None = None,
+        allow_escalation: bool = True,
     ) -> dict:
-        """Ensure tunneld is running, then wait for a tunnel to appear."""
+        """Ensure tunneld is running, then wait for a tunnel to appear.
+
+        allow_escalation=False forbids installing the LaunchDaemon, which is the
+        only operation that needs an admin password. Background callers pass
+        False so an unattended refresh can never pop a password dialog.
+        """
         if self._tunnel_lock is None:
             self._tunnel_lock = asyncio.Lock()
 
+        key = device_udid or device_host or ""
         async with self._tunnel_lock:
-            return await self._start_tunnel_inner(device_udid=device_udid, device_host=device_host)
+            # A single install calls start_tunnel up to four times (preflight,
+            # get_real_udid, and twice inside install()). Without this, one
+            # unreachable device produced four full poll cycles back to back.
+            cached = self._recent_tunnel_failures.get(key)
+            if cached and (time.time() - cached[0]) < TUNNEL_FAILURE_CACHE_SECONDS:
+                return cached[1]
+
+            result = await self._start_tunnel_inner(
+                device_udid=device_udid,
+                device_host=device_host,
+                allow_escalation=allow_escalation,
+            )
+            if result.get("status") == "ok":
+                self._recent_tunnel_failures.pop(key, None)
+            else:
+                self._recent_tunnel_failures[key] = (time.time(), result)
+            return result
 
     def _tunnel_target(self, device_udid: str | None = None, device_host: str | None = None) -> dict | None:
         if device_udid or device_host:
@@ -1466,22 +1492,52 @@ echo installed
         out, _ = await ps.communicate()
         return _parse_ps_etime(out.decode().strip())
 
-    async def _restart_stale_tunneld(self) -> dict:
-        """Force-reinstall and kickstart the tunneld daemon.
+    async def _recover_tunneld(self, hard: bool = False) -> dict:
+        """Recover a wedged tunneld WITHOUT asking for an admin password.
 
-        A long-lived tunneld can wedge — reachable on its HTTP port but no longer
-        discovering devices, so every poll returns an empty tunnel map.
-        Reinstalling boots out the stale process and kickstarts a fresh one
-        (prompting once for admin, same as first-time setup).
+        This used to reinstall the LaunchDaemon, which meant a root prompt every
+        time — including from the hourly background refresh, with nobody there to
+        answer it. And because the privileged script begins with `bootout` plus
+        `pkill -9`, each prompt destroyed a perfectly good daemon and guaranteed
+        the next one.
+
+        tunneld exposes an unauthenticated control API on its own localhost port,
+        and the LaunchDaemon has KeepAlive, so launchd restarts it for us:
+
+          GET /clear_tunnels   drop tunnels, keep the process (soft)
+          GET /shutdown        exit; launchd brings it straight back (hard)
+
+        No privilege required for either. Callers try soft first and escalate to
+        hard only if a tunnel still does not appear, because clearing tunnels is
+        far less disruptive to any other device mid-install.
         """
-        logger.warning("tunneld reachable but no tunnel established; forcing daemon restart")
-        self._tunneld_owned = False
-        return await self._install_tunneld_launchdaemon()
+        import httpx
+
+        endpoint = "shutdown" if hard else "clear_tunnels"
+        try:
+            async with httpx.AsyncClient() as client:
+                await client.get(f"{self.TUNNELD_URL}/{endpoint}", timeout=5)
+        except Exception as e:
+            # /shutdown legitimately drops the connection as the process exits.
+            logger.debug("tunneld /%s returned %s", endpoint, e)
+
+        # After /shutdown, launchd needs a moment to respawn the process.
+        for _ in range(15):
+            if await self._tunneld_api_ready():
+                logger.info(
+                    "Recovered tunneld via /%s (no admin password needed)", endpoint
+                )
+                return {"status": "ok", "message": f"tunneld recovered via /{endpoint}"}
+            await asyncio.sleep(1)
+
+        logger.warning("tunneld did not come back after /%s", endpoint)
+        return {"status": "error", "message": "tunneld did not restart"}
 
     async def _start_tunnel_inner(
         self,
         device_udid: str | None = None,
         device_host: str | None = None,
+        allow_escalation: bool = True,
     ) -> dict:
         target = self._tunnel_target(device_udid=device_udid, device_host=device_host)
 
@@ -1498,6 +1554,15 @@ echo installed
         # Start tunneld if not running
         freshly_started = False
         if not await self._ensure_tunneld():
+            if not allow_escalation:
+                # Installing the daemon needs an admin password, and nobody is
+                # watching a background refresh. Fail cleanly; the next
+                # user-initiated Setup or Install will offer to install it.
+                logger.info("tunneld is not installed; skipping (no escalation in background)")
+                return {
+                    "status": "error",
+                    "message": "Apple TV support needs a one-time setup. Open Catapult and press Setup.",
+                }
             result = await self._start_tunneld()
             if result["status"] != "ok":
                 return result
@@ -1528,22 +1593,26 @@ echo installed
             message = f"Tunnel active at {self._tunnel_address}:{self._tunnel_port}"
             return {"status": "ok", "message": message}
 
-        # No tunnel after the poll window. If we adopted an already-running daemon
-        # that has been up long enough to be considered wedged (rather than one we
-        # just started that is still warming up), force a restart and poll again
-        # with the generous cold-start window — a freshly restarted tunneld can
-        # take well over a minute to rediscover and re-tunnel the device. This
-        # recovers a tunneld that is reachable on its HTTP port but has silently
-        # stopped discovering devices, without the user having to restart it by hand.
+        # No tunnel after the poll window. A tunneld can be reachable on its HTTP
+        # port while having silently stopped discovering devices, so try a
+        # restart and poll again with the generous cold-start window.
+        #
+        # This is deliberately NOT gated on daemon uptime any more. A daemon
+        # older than an hour is the normal steady state, not evidence of a
+        # fault, so the old `uptime >= STALE_TUNNELD_UPTIME_S` check fired
+        # whenever an Apple TV was merely unreachable — asleep, off the network,
+        # unpaired — and reinstalled a healthy daemon as root to "fix" it.
+        # Recovery now costs nothing, so it is simply always attempted.
         if not freshly_started:
-            uptime = await self._tunneld_process_uptime()
-            if uptime is None or uptime >= STALE_TUNNELD_UPTIME_S:
-                restart = await self._restart_stale_tunneld()
-                if restart.get("status") == "ok":
-                    await asyncio.sleep(2)
-                    if await self._poll_for_tunnel(target, attempts=TUNNELD_COLD_START_POLL_ATTEMPTS):
-                        message = f"Tunnel active at {self._tunnel_address}:{self._tunnel_port}"
-                        return {"status": "ok", "message": message}
+            for hard in (False, True):
+                restart = await self._recover_tunneld(hard=hard)
+                if restart.get("status") != "ok":
+                    continue
+                await asyncio.sleep(2)
+                attempts = TUNNELD_COLD_START_POLL_ATTEMPTS if hard else TUNNELD_POLL_ATTEMPTS
+                if await self._poll_for_tunnel(target, attempts=attempts):
+                    message = f"Tunnel active at {self._tunnel_address}:{self._tunnel_port}"
+                    return {"status": "ok", "message": message}
 
         self._tunnel_address = None
         self._tunnel_port = None
