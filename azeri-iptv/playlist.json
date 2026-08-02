@@ -1,7 +1,7 @@
 {
   "name": "Azərbaycan IPTV",
   "description": "Free-to-air Azerbaijani TV channels, HLS live streams.",
-  "updated": "2026-08-02T11:23:29Z",
+  "updated": "2026-08-02T11:27:39Z",
   "counts": {
     "verified": 28,
     "degraded": 1,
@@ -317,15 +317,15 @@
       "res": "unknown",
       "geo": "AZ",
       "verified_from": "report from an Azerbaijani connection",
-      "url": "https://node19.connect.az:9081/tv/live/playlist.m3u8",
+      "url": "https://live.itv.az/itv.m3u8",
       "alt": [
-        "https://live.itv.az/itv.m3u8"
+        "https://node19.connect.az:9081/tv/live/playlist.m3u8"
       ],
       "logo": "https://yoda.az/logos/itv.png",
       "epg": "https://azepg.ddns.net/aztv/15_days_archive__itv_desc.xml",
       "warnings": [
-        "endpoint taken from itv.az's own player bundle",
-        "serves on port 9081; some networks and players block non-443 ports"
+        "itv.az's own player uses the :9081 URL (now the alt); many TV apps and home networks refuse non-443 ports, so the 443 host is tried first",
+        "reported not working from Azerbaijan - both URLs unverifiable from outside AZ, so neither is confirmed"
       ]
     },
     {

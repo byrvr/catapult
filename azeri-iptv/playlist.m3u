@@ -51,7 +51,7 @@ https://str.yodacdn.net/tmbaz/video.m3u8
 #EXTINF:-1 tvg-id="start" tvg-name="Kanal S / Start" tvg-logo="https://yoda.az/logos/start.png" group-title="General",Kanal S / Start
 https://str.yodacdn.net/start/video.m3u8
 #EXTINF:-1 tvg-id="ictimaitv" tvg-name="İctimai TV" tvg-logo="https://yoda.az/logos/itv.png" group-title="General",İctimai TV
-https://node19.connect.az:9081/tv/live/playlist.m3u8
+https://live.itv.az/itv.m3u8
 #EXTINF:-1 tvg-id="showplus" tvg-name="Show Plus TV" tvg-logo="https://yoda.az/logos/showplus.png" group-title="General",Show Plus TV
 https://str.yodacdn.net/showplus/video.m3u8
 #EXTINF:-1 tvg-id="biznestv" tvg-name="Biznes TV" tvg-logo="https://yoda.az/logos/biznestv.png" group-title="Business",Biznes TV
