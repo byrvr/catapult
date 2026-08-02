@@ -285,3 +285,79 @@ def test_parses_a_checksums_file():
 
     assert digests["VortX-iOS.ipa"].startswith("e3b0c442")
     assert digests["VortX-tvOS.ipa"].startswith("d7a8fbb3")
+
+
+# ── repos that ship several apps under fixed tags ──────────────────────────
+#
+# github.com/mrdrvt99/YouProEXTRA publishes six different apps, each in its own
+# release under a fixed tag (ytl-ipa3, ytkp-ipa1, …). The tag carries no
+# version at all — the version lives in the asset filename.
+
+YOUPRO_ASSETS = [
+    ("ytl-ipa3", "YouTubePlus_21.24.3_5.2.2.ipa"),
+    ("ytkp-ipa1", "YTKillerPlus_21.30.5_5.23.ipa"),
+    ("ytkace-ipa1", "YTKACE_21.30.5_0.7.4.ipa"),
+    ("yt-ipa4", "YouTube_DLTube_21.24.3_2.16.3.ipa"),
+    ("yt-ipa3", "YouTube_TubeLRD_21.24.3_1.13.ipa"),
+    ("youproextra-ipa1", "YouProExtra_21.24.3_1.3.1.ipa"),
+]
+
+
+def test_app_name_comes_from_the_filename():
+    assert store.app_name_for_asset("YouTubePlus_21.24.3_5.2.2.ipa") == "YouTubePlus"
+    assert store.app_name_for_asset("YTKillerPlus_21.30.5_5.23.ipa") == "YTKillerPlus"
+
+
+def test_app_name_drops_platform_tokens():
+    assert store.app_name_for_asset("VortX-tvOS-lite-v0.3.14-beta.12-ci.ipa") == "VortX"
+
+
+def test_version_falls_back_to_the_filename_when_the_tag_has_none():
+    version = store.version_for_asset("YouTubePlus_21.24.3_5.2.2.ipa", tag="ytl-ipa3")
+
+    assert version == "21.24.3-5.2.2"
+
+
+def test_version_prefers_a_tag_that_carries_one():
+    version = store.version_for_asset("VortX-iOS-v0.3.14-beta.12-ci.ipa", tag="v0.3.14-beta.12")
+
+    assert version == "v0.3.14-beta.12"
+
+
+def test_filename_version_detects_a_new_build_under_the_same_tag():
+    """The whole point: this repo reuses ytl-ipa3, so a tag comparison would
+    never see an update."""
+    old = store.version_for_asset("YouTubePlus_21.24.3_5.2.2.ipa", tag="ytl-ipa3")
+    new = store.version_for_asset("YouTubePlus_21.25.0_5.2.3.ipa", tag="ytl-ipa3")
+
+    assert store.is_newer(new, old)
+
+
+def test_multi_app_repo_lists_every_app_separately():
+    source = store.normalize_source("mrdrvt99/YouProEXTRA")
+    releases = [_release(tag, [name]) for tag, name in YOUPRO_ASSETS]
+
+    apps = store.catalog_from_github_releases(source, releases)
+
+    assert len(apps) == 6
+    assert "YouTubePlus" in {a.name for a in apps}
+    assert "YTKACE" in {a.name for a in apps}
+
+
+def test_multi_app_repo_keeps_versions_distinct():
+    source = store.normalize_source("mrdrvt99/YouProEXTRA")
+    releases = [_release(tag, [name]) for tag, name in YOUPRO_ASSETS]
+
+    apps = {a.name: a.version for a in store.catalog_from_github_releases(source, releases)}
+
+    assert apps["YouTubePlus"] == "21.24.3-5.2.2"
+    assert apps["YTKillerPlus"] == "21.30.5-5.23"
+
+
+def test_vortx_still_groups_by_platform_and_variant():
+    """The multi-app change must not merge VortX's three builds."""
+    source = store.normalize_source("VortXTV/VortX")
+
+    apps = store.catalog_from_github_releases(source, [_release("v0.3.14-beta.12", VORTX_ASSETS)])
+
+    assert len(apps) == 3
