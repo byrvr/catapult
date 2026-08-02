@@ -421,6 +421,8 @@ async def _refresh_install(rec, device_manager, auth_client, dev_services, signe
             tunnel = await device_manager.start_tunnel(
                 device_udid=device_udid,
                 device_host=device_info.get("host", ""),
+                # Never pop an admin password dialog from the background loop.
+                allow_escalation=False,
             )
             if tunnel.get("status") != "ok":
                 raise RuntimeError(tunnel.get("message") or "Apple TV tunnel is not ready.")
