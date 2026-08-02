@@ -56,11 +56,16 @@ def team_is_free(team: dict) -> bool:
     Team ``type`` cannot distinguish free from paid — a paid individual
     membership is also type "Individual". Apple marks free personal teams
     with ``xcodeFreeOnly``; paid teams carry active program memberships.
+    Only when the response carries neither signal does ``type`` decide: a
+    "Company/Organization" or "In-House" team is never free, an
+    "Individual" one is assumed to be.
     """
     if team.get("xcodeFreeOnly"):
         return True
     memberships = team.get("memberships") or []
-    return not any(m.get("status") == "active" for m in memberships)
+    if memberships:
+        return not any(m.get("status") == "active" for m in memberships)
+    return str(team.get("type", "")).lower() in ("individual", "free", "")
 
 
 class DeveloperServices:
@@ -169,8 +174,24 @@ class DeveloperServices:
         teams = data.get("teams", [])
         if not teams:
             raise DeveloperServicesError("No development teams found for this Apple ID")
+        # Prefer a PAID team over the free personal one. An Apple ID that has a
+        # paid membership usually also has a free "Individual" team, and picking
+        # the free one silently caps the user at 10 App IDs, 3 apps, and 7-day
+        # profiles when they are entitled to 1-year profiles. An expired team
+        # cannot sign at all, so only consider inactive teams when none is active.
         active = [t for t in teams if t.get("status") == "active"] or teams
         team = next((t for t in active if not team_is_free(t)), active[0])
+        if len(teams) > 1:
+            logger.info(
+                "Apple ID has %d teams; chose %s. Others: %s",
+                len(teams),
+                team.get("teamId"),
+                [
+                    (t.get("teamId"), t.get("type"), t.get("status"), team_is_free(t))
+                    for t in teams
+                    if t is not team
+                ],
+            )
         logger.info(
             "Using team: %s (%s, type=%s, free=%s) of %d team(s)",
             team.get("name"),

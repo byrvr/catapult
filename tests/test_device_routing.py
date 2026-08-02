@@ -89,3 +89,37 @@ def test_select_rsd_returns_none_without_fallback():
     rsds = [FakeRSD(udid="AAA"), FakeRSD(udid="BBB")]
 
     assert manager._select_rsd(rsds, {"udid": "ZZZ"}, allow_single_fallback=False) is None
+
+
+def test_usb_device_stays_installable_through_dedupe():
+    """Regression: the mDNS-only guard also fired on usbmux devices, so a
+    trusted iPad on a cable was marked 'needs setup' and could not be selected."""
+    from catapult.device import INSTALLABLE_SERVICES, TUNNEL_DEVICE_CLASSES, device_class_for
+
+    usb_ipad = {
+        "name": "Ruslan's iPad",
+        "model": "iPad16,4",
+        "service": "usbmux",
+        "device_class": "ipados",
+        "installable": True,
+        "needs_setup": False,
+    }
+    merged_class = device_class_for(name=usb_ipad["name"], model=usb_ipad["model"])
+    should_downgrade = (
+        usb_ipad["service"] in INSTALLABLE_SERVICES
+        and merged_class not in TUNNEL_DEVICE_CLASSES
+    )
+
+    assert merged_class == "ipados"
+    assert not should_downgrade
+
+
+def test_mdns_ipad_is_still_downgraded():
+    from catapult.device import INSTALLABLE_SERVICES, TUNNEL_DEVICE_CLASSES, device_class_for
+
+    mdns_ipad = {"name": "Ruslan's iPad", "model": "iPad16,4",
+                 "service": "_apple-mobdev2._tcp.local."}
+    merged_class = device_class_for(name=mdns_ipad["name"], model=mdns_ipad["model"])
+
+    assert mdns_ipad["service"] in INSTALLABLE_SERVICES
+    assert merged_class not in TUNNEL_DEVICE_CLASSES
