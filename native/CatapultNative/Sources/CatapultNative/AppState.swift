@@ -35,6 +35,11 @@ final class AppState: ObservableObject {
     @Published var errorMessage: String?
     @Published var pinPromptDevice: Device?
     @Published var sync: SyncInfo?
+    @Published var storeSources: [StoreSource] = []
+    @Published var storeApps: [StoreApp] = []
+    @Published var storeErrors: [StoreSourceError] = []
+    @Published var storeFreeTeam = false
+    @Published var isLoadingStore = false
 
     let client = APIClient()
     private var isStarting = false
@@ -475,5 +480,58 @@ private func withTimeout<T: Sendable>(
         }
         group.cancelAll()
         return result
+    }
+}
+
+// MARK: - Store
+
+extension AppState {
+    func loadStore(force: Bool = false) async {
+        if isLoadingStore && !force { return }
+        isLoadingStore = true
+        defer { isLoadingStore = false }
+        storeSources = (try? await client.storeSources())?.sources ?? []
+        if let catalog = try? await client.storeApps(deviceUDID: selectedDevice?.udid) {
+            storeApps = catalog.apps
+            storeErrors = catalog.errors
+            storeFreeTeam = catalog.freeTeam
+        }
+    }
+
+    func addStoreSource(url: String) async {
+        isLoadingStore = true
+        do {
+            _ = try await client.addStoreSource(url: url)
+            isLoadingStore = false
+            await loadStore(force: true)
+        } catch {
+            isLoadingStore = false
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func removeStoreSource(id: String) async {
+        storeSources = (try? await client.removeStoreSource(id: id))?.sources ?? storeSources
+        await loadStore(force: true)
+    }
+
+    func installFromStore(_ app: StoreApp) async {
+        guard let device = selectedDevice else {
+            errorMessage = "Select a device first."
+            return
+        }
+        isInstalling = true
+        installProgress = 0
+        installMessage = "Starting…"
+        do {
+            try await client.storeInstall(appKey: app.appKey, deviceUDID: device.udid) { message in
+                self.installMessage = message.message
+                self.installProgress = message.progress
+            }
+            await loadStore(force: true)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+        isInstalling = false
     }
 }
