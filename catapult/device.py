@@ -314,9 +314,15 @@ class DeviceManager:
             merged_class = device_class_for(name=d["name"], model=d.get("model", ""))
             if merged_class != "unknown":
                 d["device_class"] = merged_class
-                # A merged name/model can reveal an iPhone or iPad behind a
-                # record that mDNS marked installable. Re-apply the same rule.
-                if d["installable"] and merged_class not in TUNNEL_DEVICE_CLASSES:
+                # A merged name/model can reveal an iPhone or iPad behind an
+                # mDNS record that was marked installable. Re-apply that rule —
+                # but ONLY to mDNS records. A usbmux device is on a cable and is
+                # genuinely installable; applying this to it marked a trusted,
+                # paired iPad as needing setup.
+                if (
+                    d.get("service") in INSTALLABLE_SERVICES
+                    and merged_class not in TUNNEL_DEVICE_CLASSES
+                ):
                     d["installable"] = False
                     d["needs_setup"] = True
 
