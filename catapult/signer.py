@@ -388,10 +388,40 @@ class Signer:
         if entitlements:
             cmd += ["--entitlements", str(entitlements)]
         else:
-            cmd.append("--preserve-metadata=identifier,entitlements,flags")
+            # Pin the signing identifier to the bundle's own CFBundleIdentifier
+            # rather than preserving whatever the original signature carried.
+            # Repackaged IPAs often disagree: ellekit ships as
+            # CydiaSubstrate.framework with CFBundleIdentifier "ellekit" but a
+            # signing identifier of "CydiaSubstrate", and installd rejects the
+            # install with MismatchedBundleIDSigningIdentifier.
+            bundle_id = self._nested_bundle_identifier(path)
+            if bundle_id:
+                cmd += ["-i", bundle_id, "--preserve-metadata=entitlements,flags"]
+            else:
+                # No Info.plist (a bare dylib): codesign derives the identifier
+                # from the filename, which is what we want.
+                cmd.append("--preserve-metadata=identifier,entitlements,flags")
         cmd.append(str(path))
 
         await self._run(*cmd, label=f"codesign:{path.name}")
+
+    @staticmethod
+    def _nested_bundle_identifier(path: Path) -> str | None:
+        """CFBundleIdentifier of a nested bundle, or None if it has no plist."""
+        if not path.is_dir():
+            return None
+        for candidate in (path / "Info.plist", path / "Resources" / "Info.plist"):
+            if not candidate.exists():
+                continue
+            try:
+                with candidate.open("rb") as f:
+                    identifier = plistlib.load(f).get("CFBundleIdentifier", "")
+            except Exception:
+                logger.debug("Could not read %s", candidate, exc_info=True)
+                return None
+            if identifier:
+                return str(identifier)
+        return None
 
     def _update_bundle_id(self, app_dir: Path, new_id: str):
         """Rewrite CFBundleIdentifier in the app and nested app extensions."""
