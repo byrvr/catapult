@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """Self-test every channel in playlist.json from YOUR network.
 
-The 17 `az_only` channels are geo-locked to Azerbaijan and could not be
-verified from the machine that built this playlist. Run this on your own
-connection (ideally the same network as the TV) to find out which of them
-actually work for you:
+The 16 channels flagged `geo: "AZ"` are geo-locked to Azerbaijan and could
+not be probed from the machine that built this playlist. Run this on your own
+connection (ideally the same network as the TV) to check them:
 
     python3 selftest.py                 # tests playlist.json next to this file
-    python3 selftest.py --tier az_only  # just the geo-locked ones
+    python3 selftest.py --geo AZ        # just the geo-locked ones
     python3 selftest.py --promote       # rewrite playlist.json + playlist.m3u,
                                         # moving whatever passed into `verified`
 
@@ -126,13 +125,16 @@ def check(ch):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--tier", help="only test this tier")
+    ap.add_argument("--geo", help="only test channels with this geo flag (e.g. AZ)")
     ap.add_argument("--playlist", default=os.path.join(HERE, "playlist.json"))
     ap.add_argument("--promote", action="store_true",
                     help="rewrite playlist.json/.m3u with passing channels marked verified")
     a = ap.parse_args()
 
     doc = json.load(open(a.playlist, encoding="utf-8"))
-    chans = [c for c in doc["channels"] if not a.tier or c["tier"] == a.tier]
+    chans = [c for c in doc["channels"]
+             if (not a.tier or c["tier"] == a.tier)
+             and (not a.geo or c.get("geo") == a.geo)]
     print(f"testing {len(chans)} channels...\n")
     with cf.ThreadPoolExecutor(max_workers=8) as ex:
         res = list(ex.map(check, chans))
@@ -147,13 +149,14 @@ def main():
         by_id = {r["ch"]["id"]: r for r in res}
         for c in doc["channels"]:
             r = by_id.get(c["id"])
-            if r and r["ok"] and c["tier"] == "az_only":
+            if r and r["ok"] and c["tier"] != "verified":
                 c["tier"] = "verified"
-                c["verified_from"] = "self-test on an Azerbaijani connection"
+                c["verified_from"] = "self-test from this network"
             elif r and not r["ok"] and c["tier"] == "verified":
                 c["tier"] = "unreachable"
-        for t in ("verified", "degraded", "az_only"):
+        for t in ("verified", "degraded", "unreachable"):
             doc["counts"][t] = len([c for c in doc["channels"] if c["tier"] == t])
+        doc["counts"]["geo_az"] = len([c for c in doc["channels"] if c.get("geo") == "AZ"])
         doc["counts"]["total"] = len(doc["channels"])
         json.dump(doc, open(a.playlist, "w", encoding="utf-8"),
                   indent=2, ensure_ascii=False)
