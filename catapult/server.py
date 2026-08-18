@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from catapult.apple_auth import AppleAuthClient
-from catapult.developer import DeveloperServices
+from catapult.developer import DeveloperServices, team_is_free
 from catapult.device import DeviceManager
 from catapult.errors import normalize_error, redact_sensitive
 from catapult.ipa import IpaProcessor
@@ -449,6 +449,7 @@ async def account_info():
     try:
         team = await dev_services.get_team(session)
         team_id = team["teamId"]
+        is_free = team_is_free(team)
         sync_result = await _sync_state_for_team(session.apple_id, team_id)
 
         app_ids = await dev_services._list_app_ids(session, team_id)
@@ -506,8 +507,10 @@ async def account_info():
                 ts = record.get("last_installed")
                 if ts:
                     installed_dt = datetime.fromtimestamp(ts).astimezone()
-                    # Free accounts: profile expires 7 days after signing
-                    expiry_dt = installed_dt + timedelta(days=7)
+                    # Free teams: profile expires 7 days after signing. Paid
+                    # teams get year-long certs/profiles (Catapult mints a
+                    # fresh cert at each install, so ~365 days from install).
+                    expiry_dt = installed_dt + timedelta(days=7 if is_free else 365)
                     delta = expiry_dt - now
                     days_left = max(0, delta.days)
                     exp_str = expiry_dt.strftime("%b %d, %Y %H:%M")
@@ -720,7 +723,6 @@ async def account_info():
         )
 
         team_type = team.get("type", "")
-        is_free = team_type.lower() in ("individual", "free", "")
         app_id_limit = 10 if is_free else 100
 
         return {
@@ -1065,7 +1067,9 @@ async def _install_app(
     team_id = team["teamId"]
 
     await progress("signing", 20, "Preparing signing certificate...")
-    cert, private_key = await dev_services.get_or_create_cert(session, team_id)
+    cert, private_key = await dev_services.get_or_create_cert(
+        session, team_id, personal_team=team_is_free(team)
+    )
 
     # 3. Register device — get real UDID from RSD, not mDNS name or pairing UUID
     await progress("signing", 30, "Registering device...")
