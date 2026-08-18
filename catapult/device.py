@@ -52,6 +52,12 @@ STALE_TUNNELD_UPTIME_S = 3600
 # gets a much more generous window.
 TUNNELD_POLL_ATTEMPTS = 30
 TUNNELD_COLD_START_POLL_ATTEMPTS = 90
+# Active /start-tunnel sweep over stored pairing records. Establishing a tunnel
+# takes ~15-25s; a record the device rejects fails in ~10-15s (mDNS browse plus
+# a refused handshake), so give each request a generous timeout but cap the
+# whole sweep so a connect attempt can still fall back to the passive poll.
+ACTIVE_TUNNEL_REQUEST_TIMEOUT_S = 60
+ACTIVE_TUNNEL_REQUEST_BUDGET_S = 150
 
 
 def _parse_ps_etime(value: str) -> float | None:
@@ -1229,6 +1235,56 @@ echo installed
             await asyncio.sleep(2)
         return False
 
+    async def _request_tunnel_start(self, target: dict | None) -> bool:
+        """Explicitly ask tunneld to establish a Wi-Fi tunnel, newest record first.
+
+        tunneld's ambient Wi-Fi monitor retries every stored pairing record
+        against every advertised address each cycle; once stale records for a
+        re-paired device pile up, that crawl can take minutes or wedge outright,
+        leaving the UI stuck on "Connecting...". /start-tunnel with an explicit
+        record skips the crawl entirely, and the newest record is almost always
+        the one the device still accepts. Returns True once a tunnel matching
+        ``target`` is up and cached.
+        """
+        import httpx
+        from pymobiledevice3.pair_records import iter_remote_pair_records
+
+        try:
+            records = sorted(
+                iter_remote_pair_records(),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )
+        except Exception as e:
+            logger.debug("Could not list remote pairing records: %s", e)
+            return False
+
+        deadline = asyncio.get_running_loop().time() + ACTIVE_TUNNEL_REQUEST_BUDGET_S
+        async with httpx.AsyncClient() as client:
+            for record in records:
+                identifier = record.stem.removeprefix("remote_")
+                if asyncio.get_running_loop().time() >= deadline:
+                    logger.info("Active tunnel request sweep hit its time budget")
+                    break
+                try:
+                    resp = await client.get(
+                        f"{self.TUNNELD_URL}/start-tunnel",
+                        params={"udid": identifier, "connection_type": "wifi"},
+                        timeout=ACTIVE_TUNNEL_REQUEST_TIMEOUT_S,
+                    )
+                except Exception as e:
+                    logger.debug("start-tunnel request for %s failed: %s", identifier, e)
+                    continue
+                if resp.status_code != 200:
+                    logger.debug("start-tunnel for %s: HTTP %d", identifier, resp.status_code)
+                    continue
+                logger.info("tunneld established tunnel using pairing record %s", identifier)
+                # The tunnel may belong to a different device than ``target``
+                # (multiple paired devices) — only stop once the right one is up.
+                if await self._poll_for_tunnel(target, attempts=1):
+                    return True
+        return False
+
     async def _tunneld_daemon_pid(self) -> int | None:
         """PID of the tunneld LaunchDaemon, read from launchctl.
 
@@ -1324,6 +1380,20 @@ echo installed
             freshly_started = True
             # Wait for tunneld to be ready
             await asyncio.sleep(2)
+
+        # A healthy daemon may already have the tunnel up — check briefly before
+        # doing anything heavier.
+        if await self._poll_for_tunnel(target, attempts=2):
+            message = f"Tunnel active at {self._tunnel_address}:{self._tunnel_port}"
+            return {"status": "ok", "message": message}
+
+        # Don't just wait for tunneld's ambient discovery to find the device —
+        # ask it explicitly, record by record. This is what actually connects in
+        # practice; the passive poll below is the fallback.
+        logger.info("Requesting tunnel from tunneld with stored pairing records...")
+        if await self._request_tunnel_start(target):
+            message = f"Tunnel active at {self._tunnel_address}:{self._tunnel_port}"
+            return {"status": "ok", "message": message}
 
         # Poll tunneld for tunnels (it auto-discovers WiFi devices). A daemon we
         # just started is cold and needs the longer window; an adopted one that is
