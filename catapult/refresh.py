@@ -356,7 +356,10 @@ async def _refresh_install(rec, device_manager, auth_client, dev_services, signe
         session = auth_client.session
         team = await dev_services.get_team(session)
         team_id = team["teamId"]
-        cert, private_key = await dev_services.get_or_create_cert(session, team_id)
+        from catapult.developer import team_is_free
+        cert, private_key = await dev_services.get_or_create_cert(
+            session, team_id, personal_team=team_is_free(team)
+        )
 
         device_info = await device_manager.get_device_info(device_udid)
         if "remotepairing" in device_info.get("service", ""):

@@ -49,6 +49,19 @@ class DeveloperServicesError(RuntimeError):
         self.result_code = result_code
 
 
+def team_is_free(team: dict) -> bool:
+    """Whether a team is a free (Xcode personal) team.
+
+    Team ``type`` cannot distinguish free from paid — a paid individual
+    membership is also type "Individual". Apple marks free personal teams
+    with ``xcodeFreeOnly``; paid teams carry active program memberships.
+    """
+    if team.get("xcodeFreeOnly"):
+        return True
+    memberships = team.get("memberships") or []
+    return not any(m.get("status") == "active" for m in memberships)
+
+
 class DeveloperServices:
     def __init__(self):
         ctx = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
@@ -145,23 +158,25 @@ class DeveloperServices:
     # ── 1. Team ──
 
     async def get_team(self, session: AuthSession) -> dict:
-        """Fetch the first development team for this Apple ID."""
+        """Fetch the preferred development team for this Apple ID.
+
+        An Apple ID can belong to several teams — typically the free personal
+        team plus one or more paid program teams. A paid team gets year-long
+        profiles and 100 device slots, so prefer it over the personal team.
+        """
         data = await self._request(session, "listTeams.action")
         teams = data.get("teams", [])
         if not teams:
             raise DeveloperServicesError("No development teams found for this Apple ID")
-        # Prefer individual > free > first
-        team = teams[0]
-        for t in teams:
-            status = t.get("status", "")
-            if status == "active":
-                team = t
-                break
+        active = [t for t in teams if t.get("status") == "active"] or teams
+        team = next((t for t in active if not team_is_free(t)), active[0])
         logger.info(
-            "Using team: %s (%s, type=%s)",
+            "Using team: %s (%s, type=%s, free=%s) of %d team(s)",
             team.get("name"),
             team.get("teamId"),
             team.get("type"),
+            team_is_free(team),
+            len(teams),
         )
         return team
 
@@ -215,13 +230,28 @@ class DeveloperServices:
         except DeveloperServicesError as e:
             logger.warning("Failed to revoke cert id=%s: %s", certificate_id, e)
 
-    async def _revoke_all_certs(self, session: AuthSession, team_id: str):
-        """Revoke ALL development certs to make room for a new one.
+    async def _revoke_all_certs(
+        self, session: AuthSession, team_id: str, *, catapult_only: bool = False
+    ):
+        """Revoke development certs to make room for a new one.
 
         Free Apple IDs can only have a limited number of dev certs.
         AltSign revokes existing certs before creating a new one.
+
+        On a shared paid team revoking everything would kill other members'
+        certificates, so ``catapult_only`` restricts revocation to certs
+        Catapult itself created (machineName "Catapult").
         """
         certs = await self._list_certs(session, team_id)
+        if catapult_only:
+            skipped = [c for c in certs if c.get("machineName") != "Catapult"]
+            for cert in skipped:
+                logger.info(
+                    "Leaving cert alone (not Catapult's): %s (id=%s)",
+                    cert.get("machineName", "?"),
+                    cert.get("certificateId", "?"),
+                )
+            certs = [c for c in certs if c.get("machineName") == "Catapult"]
         for cert in certs:
             serial = cert.get("serialNumber", "")
             name = cert.get("machineName", "?")
@@ -242,13 +272,15 @@ class DeveloperServices:
                 )
 
     async def get_or_create_cert(
-        self, session: AuthSession, team_id: str
+        self, session: AuthSession, team_id: str, *, personal_team: bool = True
     ) -> tuple[bytes, rsa.RSAPrivateKey]:
         async with self._cert_lock:
-            return await self._get_or_create_cert_locked(session, team_id)
+            return await self._get_or_create_cert_locked(
+                session, team_id, personal_team=personal_team
+            )
 
     async def _get_or_create_cert_locked(
-        self, session: AuthSession, team_id: str
+        self, session: AuthSession, team_id: str, *, personal_team: bool = True
     ) -> tuple[bytes, rsa.RSAPrivateKey]:
         """Ensure we have a valid signing certificate.
 
@@ -263,7 +295,7 @@ class DeveloperServices:
         """
         # Step 1+2: Revoke existing certs to guarantee room
         logger.info("Revoking existing development certificates...")
-        await self._revoke_all_certs(session, team_id)
+        await self._revoke_all_certs(session, team_id, catapult_only=not personal_team)
 
         # Step 3: Generate fresh keypair + CSR
         self._private_key = rsa.generate_private_key(
@@ -301,7 +333,7 @@ class DeveloperServices:
                 "CSR was blocked by an existing or pending certificate; "
                 "revoking and retrying once"
             )
-            await self._revoke_all_certs(session, team_id)
+            await self._revoke_all_certs(session, team_id, catapult_only=not personal_team)
             await asyncio.sleep(2)
             data = await self._request(
                 session,
@@ -711,7 +743,9 @@ class DeveloperServices:
         team_id = team["teamId"]
 
         # 2. Certificate
-        cert_pem, private_key = await self.get_or_create_cert(session, team_id)
+        cert_pem, private_key = await self.get_or_create_cert(
+            session, team_id, personal_team=team_is_free(team)
+        )
 
         # 3. Device
         await self.register_device(session, team_id, device_udid, device_name)
