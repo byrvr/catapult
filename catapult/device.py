@@ -856,6 +856,7 @@ class DeviceManager:
     _tunnel_address: str | None = None
     _tunnel_port: int | None = None
     _tunnel_udid: str | None = None  # Real device UDID from tunneld
+    _tunnel_sub_platform: str | None = None  # "tvOS" or None, from RSD peer info
     _tunneld_owned: bool = False  # True once Catapult has verified its managed helper
     TUNNELD_URL = "http://127.0.0.1:49151"
 
@@ -1197,6 +1198,9 @@ echo installed
     def _cache_active_tunnel(self, rsd, target: dict | None = None):
         self._tunnel_address, self._tunnel_port = getattr(rsd, "service").address
         self._tunnel_udid = getattr(rsd, "udid", None)
+        peer_info = getattr(rsd, "peer_info", {}) or {}
+        product_type = (peer_info.get("Properties", {}) or {}).get("ProductType", "")
+        self._tunnel_sub_platform = "tvOS" if "appletv" in product_type.lower() else None
         if target and target.get("host"):
             self._tunneled_hosts.add(target["host"])
         logger.info(
@@ -1233,6 +1237,33 @@ echo installed
                     except Exception:
                         pass
             await asyncio.sleep(2)
+        return False
+
+    async def _tunnel_listed(self, address: str, port: int) -> bool:
+        """Check tunneld's HTTP listing for a tunnel without dialing the device.
+
+        Verifying via get_tunneld_devices() opens an RSD connection to the
+        device and closes it again; the device transiently refuses a reconnect
+        right after a close, so back-to-back verifications misreported live
+        tunnels as stale — and every false negative spun up a duplicate tunnel
+        that killed the previous one. The listing is authoritative for what
+        tunneld maintains and touches nothing on-device.
+        """
+        import httpx
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(self.TUNNELD_URL, timeout=3)
+                if resp.status_code != 200:
+                    return False
+                for tunnels in (resp.json() or {}).values():
+                    for tunnel in tunnels:
+                        if (
+                            tunnel.get("tunnel-address") == address
+                            and tunnel.get("tunnel-port") == port
+                        ):
+                            return True
+        except Exception as e:
+            logger.debug("tunneld listing check failed: %s", e)
         return False
 
     async def _request_tunnel_start(self, target: dict | None) -> bool:
@@ -1341,35 +1372,17 @@ echo installed
         device_udid: str | None = None,
         device_host: str | None = None,
     ) -> dict:
-        from pymobiledevice3.tunneld.api import get_tunneld_devices
-
         target = self._tunnel_target(device_udid=device_udid, device_host=device_host)
 
         if self._tunnel_address and self._tunnel_port:
-            try:
-                rsds = await get_tunneld_devices()
-            except Exception as e:
-                logger.debug("Cached tunnel verification failed: %s", e)
-                rsds = []
-            selected = self._select_rsd(rsds, target, allow_single_fallback=True)
-            if selected:
-                self._cache_active_tunnel(selected, target)
-                for rsd in rsds:
-                    try:
-                        await rsd.close()
-                    except Exception:
-                        pass
+            if await self._tunnel_listed(self._tunnel_address, self._tunnel_port):
                 return {"status": "ok", "message": "Tunnel already active"}
-            for rsd in rsds:
-                try:
-                    await rsd.close()
-                except Exception:
-                    pass
 
             logger.info("Cached tunnel is stale; clearing and waiting for a live tunnel")
             self._tunnel_address = None
             self._tunnel_port = None
             self._tunnel_udid = None
+            self._tunnel_sub_platform = None
 
         # Start tunneld if not running
         freshly_started = False
@@ -1438,6 +1451,19 @@ echo installed
         from pymobiledevice3.tunneld.api import get_tunneld_devices
 
         target = self._tunnel_target(device_udid=device_udid, device_host=device_host)
+
+        # Prefer the identity cached when the tunnel came up — dialing the RSD
+        # again right after another connection closed can transiently fail and
+        # made installs abort with "No active Apple TV tunnel" despite a live one.
+        if self._tunnel_udid and self._tunnel_address and self._tunnel_port:
+            if await self._tunnel_listed(self._tunnel_address, self._tunnel_port):
+                logger.info(
+                    "Real device UDID (cached): %s, subPlatform: %s",
+                    self._tunnel_udid,
+                    self._tunnel_sub_platform,
+                )
+                return (self._tunnel_udid, self._tunnel_sub_platform)
+
         rsds = await get_tunneld_devices()
         if not rsds:
             tunnel = await self.start_tunnel(device_udid=device_udid, device_host=device_host)
