@@ -1541,7 +1541,7 @@ async def _team_is_free() -> bool:
         team = await dev_services.get_team(session)
     except Exception:
         return False
-    return str(team.get("type", "")).lower() in ("individual", "free", "")
+    return team_is_free(team)
 
 
 async def _resolve_store_app(app_key: str) -> "_store.StoreApp | None":
