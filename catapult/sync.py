@@ -467,6 +467,24 @@ class RemoteStore:
         dest.write_bytes(data)
         return True
 
+    async def delete(self, key: str) -> None:
+        raise NotImplementedError
+
+    async def archive_team(self, team_id: str) -> str:
+        """Move a team's vault out of the way before a replacement is created.
+
+        Returns a short note about what happened to the old data. This default
+        removes the descriptor and the manifest, which is enough for the next
+        sync to start from an empty manifest and re-upload from the local
+        vault; blobs written under the old data key are left in place.
+        """
+        for key in (_manifest_key(team_id), _vault_key(team_id)):
+            await self.delete(key)
+        return (
+            "The old vault descriptor and manifest were removed; encrypted IPA "
+            "blobs from the old vault were left in place."
+        )
+
 
 class FolderStore(RemoteStore):
     """Any folder on disk — an iCloud Drive path, Dropbox, a network share.
@@ -530,6 +548,21 @@ class FolderStore(RemoteStore):
 
     async def exists(self, key: str) -> bool:
         return self._path(key).exists()
+
+    async def delete(self, key: str) -> None:
+        self._path(key).unlink(missing_ok=True)
+
+    async def archive_team(self, team_id: str) -> str:
+        team_dir = self._path(f"teams/{team_id}")
+        if not team_dir.exists():
+            return "There was no previous vault to keep."
+        stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        archived = team_dir.with_name(f"{team_dir.name}.replaced-{stamp}")
+        team_dir.rename(archived)
+        return (
+            f"The previous vault was moved to {archived.name} inside the sync "
+            "folder. Delete it once you are sure you no longer need it."
+        )
 
 
 class R2Store(RemoteStore):
@@ -626,6 +659,14 @@ class R2Store(RemoteStore):
             return False
         response.raise_for_status()
         return True
+
+    async def delete(self, key: str) -> None:
+        url = self._url(key)
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.delete(url, headers=self._sign_headers("DELETE", url))
+        if response.status_code == 404:
+            return
+        response.raise_for_status()
 
 
 def _store_from_config(config: SyncConfig) -> RemoteStore | None:
@@ -740,6 +781,12 @@ async def open_vault(store: RemoteStore, team_id: str) -> tuple[str, bytes | Non
 
     recovery_key = cached_recovery_key(team_id)
     if recovery_key is None:
+        legacy = legacy_sync_key()
+        if legacy is not None and vault_doc.get("migrated_from") == "CATAPULT_SYNC_KEY":
+            # Another Mac already migrated the shared CATAPULT_SYNC_KEY. That
+            # key IS the data key, so this Mac keeps syncing without the
+            # recovery key the other Mac minted (Settings can show it there).
+            return "ok", legacy
         return "locked", None
     try:
         return "ok", unwrap_data_key(vault_doc, recovery_key, team_id)
@@ -747,22 +794,50 @@ async def open_vault(store: RemoteStore, team_id: str) -> tuple[str, bytes | Non
         return "wrong_key", None
 
 
-async def create_vault(apple_id: str, team_id: str) -> dict:
-    """Create a new vault and return the recovery key ONCE, for display."""
+async def create_vault(apple_id: str, team_id: str, *, replace: bool = False) -> dict:
+    """Create a new vault and return the recovery key ONCE, for display.
+
+    Refuses to overwrite an existing vault unless ``replace`` is set. The
+    descriptor holds the only wrap of the data key: overwriting it silently
+    locked every other Mac out and left the old manifest undecryptable, so
+    every later sync reported ``wrong_key``. Replacing moves the old vault
+    aside first so the next sync starts from an empty manifest and re-uploads
+    from this Mac's local vault.
+    """
     config = SyncConfig.load()
     store = _store_from_config(config)
     if store is None:
         return {"status": "disabled", "message": "Choose where the vault should live first."}
 
+    note = ""
+    if await store.exists(_vault_key(team_id)):
+        if not replace:
+            return {
+                "status": "exists",
+                "message": (
+                    "A vault already exists here. Unlock it with its recovery key, "
+                    "or choose to start a new vault to replace it."
+                ),
+            }
+        note = await store.archive_team(team_id)
+        logger.warning("Replacing the sync vault for team %s. %s", team_id, note)
+
     doc, _data_key, recovery_key = new_vault(team_id)
     await store.put(_vault_key(team_id), json.dumps(doc, indent=2).encode("utf-8"))
     cache_recovery_key(team_id, recovery_key)
     logger.info("Created a new sync vault for team %s", team_id)
+    message = "Save this recovery key. Catapult cannot recover it for you."
     return {
         "status": "ok",
         "recovery_key": recoverykey.encode(recovery_key),
-        "message": "Save this recovery key. Catapult cannot recover it for you.",
+        "message": f"{message} {note}".strip(),
     }
+
+
+def recovery_key_for_display(team_id: str) -> str | None:
+    """The recovery key this Mac already holds, encoded for showing on demand."""
+    key = cached_recovery_key(team_id)
+    return recoverykey.encode(key) if key is not None else None
 
 
 async def unlock_vault(team_id: str, entered: str) -> dict:
@@ -915,6 +990,25 @@ def _vault_bytes() -> int:
         return 0
 
 
+def _folder_vault_state(folder: Path, team_id: str) -> str:
+    """Vault state for a folder provider, from the descriptor on disk."""
+    descriptor = FolderStore(folder)._path(_vault_key(team_id))
+    legacy = legacy_sync_key()
+    if not descriptor.exists():
+        # No vault yet. A legacy CATAPULT_SYNC_KEY is adopted into a new vault
+        # on the next sync run, so that Mac is effectively ready.
+        return "ok" if legacy is not None else "needs_setup"
+    if cached_recovery_key(team_id) is not None:
+        return "ok"
+    try:
+        doc = json.loads(descriptor.read_text("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        doc = {}
+    if legacy is not None and doc.get("migrated_from") == "CATAPULT_SYNC_KEY":
+        return "ok"
+    return "locked"
+
+
 def status(apple_id: str = "", team_id: str = "") -> dict:
     """Configuration snapshot. Never performs network I/O."""
     config = SyncConfig.load()
@@ -928,6 +1022,11 @@ def status(apple_id: str = "", team_id: str = "") -> dict:
         vault_state = "disabled"
     elif config.provider == "folder" and config.folder == ICLOUD_VAULT_PATH and not icloud_drive_available():
         vault_state = "needs_icloud"
+    elif config.provider == "folder" and config.folder and team_id:
+        # A folder vault is plain file I/O, so the descriptor can be consulted
+        # here without network access. This is what lets a first Mac see
+        # "needs_setup" (and the Create vault button) instead of "locked".
+        vault_state = _folder_vault_state(config.folder, team_id)
     else:
         vault_state = "ok" if have_key else "locked"
 

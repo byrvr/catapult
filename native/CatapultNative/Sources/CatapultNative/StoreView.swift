@@ -3,8 +3,8 @@ import SwiftUI
 /// Browse and install apps published by sources you add.
 ///
 /// The catalog is filtered to the selected device, so an Apple TV never sees an
-/// iOS build. Auto-update is opt-in per app and only installs when the device is
-/// actually reachable.
+/// iOS build. Installs run through the same pipeline as the Install tab; the
+/// update badge comes from comparing the installed version with the source.
 struct StoreView: View {
     @EnvironmentObject private var state: AppState
     @State private var newSourceURL = ""
@@ -14,6 +14,10 @@ struct StoreView: View {
         VStack(alignment: .leading, spacing: 0) {
             header
             Divider()
+            if state.isInstalling || state.installProgress > 0 {
+                installProgress
+                Divider()
+            }
             if showingSources {
                 sourcesPane
                 Divider()
@@ -46,6 +50,19 @@ struct StoreView: View {
             .disabled(state.isLoadingStore)
         }
         .padding(16)
+    }
+
+    /// Same progress strip as the Install tab. A Store install used to run with
+    /// no feedback on this tab at all.
+    private var installProgress: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ProgressView(value: Double(state.installProgress), total: 100)
+            Text(state.installMessage.isEmpty ? "Preparing…" : state.installMessage)
+                .font(.caption)
+                .foregroundStyle(state.installProgress >= 100 ? .green : .secondary)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
     }
 
     private var subtitle: String {
@@ -191,7 +208,11 @@ private struct StoreAppRow: View {
                     .frame(minWidth: 64)
             }
             .buttonStyle(.borderedProminent)
-            .disabled(state.selectedDevice == nil || state.isInstalling)
+            // Mirror the Install tab: a signed-in user and a device that can
+            // take an install right now. An Apple TV without its tunnel, or an
+            // untrusted iPad, goes through Setup first instead of failing here.
+            .disabled(!state.isAuthenticated || state.isInstalling
+                      || !(state.selectedDevice?.canInstallNow ?? false))
         }
         .padding(12)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))

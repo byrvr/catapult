@@ -793,19 +793,20 @@ private struct SyncSummaryRow: View {
     }
 
     private var providerName: String {
-        switch sync.provider {
+        let provider = sync.provider ?? ""
+        switch provider {
         case "r2": return "Cloudflare R2"
         case "folder":
             if let folder = sync.folder, folder.contains("com~apple~CloudDocs") {
                 return "iCloud Drive"
             }
             return "Sync folder"
-        default: return sync.provider.isEmpty ? "No provider" : sync.provider
+        default: return provider.isEmpty ? "No provider" : provider
         }
     }
 
     private var icon: String {
-        sync.configured ? "externaldrive.connected.to.line.below" : "externaldrive.badge.xmark"
+        (sync.configured ?? false) ? "externaldrive.connected.to.line.below" : "externaldrive.badge.xmark"
     }
 
     private var color: Color {

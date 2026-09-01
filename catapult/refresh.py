@@ -205,6 +205,29 @@ def find_recorded_bundle_id(device_udid: str, candidate_bundle_ids: list[str]) -
     return None
 
 
+def choose_target_bundle_id(
+    *,
+    original_bundle_id: str,
+    legacy_bundle_id: str,
+    installed_bundle_id: str | None,
+    recorded_bundle_id: str | None,
+) -> str:
+    """Pick the bundle ID to sign and install under.
+
+    Prefer updating an installed copy in place. But a copy that carries the
+    app's real bundle ID, which Catapult never recorded installing under that
+    ID, is the App Store build: installd refuses to replace it with a
+    development-signed build (IXErrorDomain 46, "a coordinated app install
+    already exists ... (creator App Store)"). Fall through to the recorded or
+    namespaced ID and install alongside it — on every install, not only the
+    first one, because the device lookup finds the App Store copy first even
+    when Catapult's own copy is also installed.
+    """
+    if installed_bundle_id == original_bundle_id and recorded_bundle_id != original_bundle_id:
+        installed_bundle_id = None
+    return installed_bundle_id or recorded_bundle_id or legacy_bundle_id
+
+
 def _keychain_set(account: str, data: str) -> bool:
     """Store a value in macOS Keychain."""
     # Delete existing entry first (ignore errors if not found)

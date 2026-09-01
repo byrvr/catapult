@@ -33,12 +33,15 @@ matters, because Catapult is ad-hoc signed and an ad-hoc-signed bundle
 declaring any non-allowlisted entitlement is killed at launch. That also rules
 out CloudKit, ubiquity containers, and iCloud Keychain sync.
 
-Alternatives, both configured in **Settings → Sync**:
+Alternatives:
 
 - **Any already-synced folder** — Dropbox, Google Drive, OneDrive, Syncthing.
   Their desktop clients handle the account, so Catapult inherits per-user
-  isolation with no auth code.
+  isolation with no auth code. Settings → Sync → "Choose a folder…".
 - **Cloudflare R2** or any S3-compatible bucket, for people who want one.
+  There is no Settings UI for it yet: configure it with
+  `POST /api/sync/configure` (`provider: "r2"` plus the bucket details) or the
+  legacy environment variables.
 
 Sync is **off** until you turn it on. Writing IPAs into someone's iCloud Drive
 uninvited would quietly consume their 5 GB free tier, which is shared with
@@ -122,7 +125,10 @@ Sync. It finds the vault and shows a paste field. Press ⌘V: Universal Clipboar
 has usually already carried the key across, since both Macs are on the same
 Apple Account.
 
-**If you lose the key**, choose "Start a new vault". Your IPAs still exist
+**If you lose the key**, choose "Start a new vault instead" and confirm.
+Catapult moves the old vault aside (`teams/<team_id>.replaced-<timestamp>`),
+mints a new key, and re-uploads from this Mac on the next sync; other Macs need
+the new key. Your IPAs still exist
 locally in `~/Library/Application Support/Catapult/IPAs`, so losing the key is
 annoying rather than fatal.
 
@@ -149,11 +155,13 @@ app inherits no shell environment, which is why that never really worked.
 
 Settings now live in `~/Library/Application Support/Catapult/sync.json`, with
 R2 credentials in the Keychain. The old values are still read for one release
-and imported on first run: `CATAPULT_SYNC_KEY` is adopted **verbatim** as the
-data key and wrapped under a freshly generated recovery key, so every
-already-uploaded blob stays readable and nothing is re-encrypted or re-uploaded.
-Catapult shows the new recovery key once; save it, then delete
-`~/.catapult/config.env`.
+as a fallback while `sync.json` is absent: `CATAPULT_SYNC_KEY` is adopted
+**verbatim** as the data key and wrapped under a freshly generated recovery
+key, so every already-uploaded blob stays readable and nothing is re-encrypted
+or re-uploaded. The new recovery key lands in this Mac's Keychain; open
+Settings → Sync → "Show recovery key…" to save it, then delete
+`~/.catapult/config.env`. A second Mac that still has the same
+`CATAPULT_SYNC_KEY` keeps opening the vault without it.
 
 The "personal encrypted DMG" mechanism, which embedded R2 credentials in the
 disk image, has been removed. It was one mis-set environment variable away from
@@ -161,10 +169,11 @@ publishing working bucket keys to GitHub Releases.
 
 ## Concurrent Macs
 
-Two Macs sharing a vault must not refresh the same app at once. A lease at
-`teams/<team_id>/lease.json` records `locked_by`, `locked_until`, and
-`operation`.
+Two Macs sharing a vault should not refresh the same app at once. A lease at
+`teams/<team_id>/lease.json` (recording `locked_by`, `locked_until`, and
+`operation`) is the plan for that and is **not implemented yet**: today the two
+refresh loops run independently and the last writer wins on the manifest.
 
-The lease alone is not sufficient — certificate reuse is the other half, since
+The lease alone would not be sufficient — certificate reuse is the other half, since
 a refresh used to revoke every certificate on the account and break whatever
 the other Mac had installed. See [Auto-refresh](auto-refresh.md).
