@@ -229,6 +229,23 @@ def choose_target_bundle_id(
     return installed_bundle_id or recorded_bundle_id or legacy_bundle_id
 
 
+def _security_quote(value: str) -> str | None:
+    """Quote one token for ``security -i``.
+
+    Its tokenizer strips one pair of quotes but does not join adjacent quoted
+    segments, so shlex-style quoting (``'o'"'"'brien'``) splits a value with an
+    apostrophe into several tokens. Single quotes unless the value has one,
+    double quotes otherwise; a value with both, or a newline, cannot be passed.
+    """
+    if "\n" in value or "\r" in value:
+        return None
+    if "'" not in value:
+        return f"'{value}'"
+    if '"' not in value:
+        return f'"{value}"'
+    return None
+
+
 def _keychain_set(account: str, data: str) -> bool:
     """Store a value in macOS Keychain.
 
@@ -237,10 +254,12 @@ def _keychain_set(account: str, data: str) -> bool:
     ``-w <secret>`` argument does. ``-U`` updates an existing item in place;
     ``security -i`` exits non-zero when the inner command fails.
     """
-    script = (
-        f"add-generic-password -s {shlex.quote(_KEYCHAIN_SERVICE)} "
-        f"-a {shlex.quote(account)} -X {data.encode('utf-8').hex()} -U\n"
-    )
+    service = _security_quote(_KEYCHAIN_SERVICE)
+    quoted_account = _security_quote(account)
+    if service is None or quoted_account is None:
+        logger.warning("Keychain account %r cannot be quoted for security -i", account)
+        return False
+    script = f"add-generic-password -s {service} -a {quoted_account} -X {data.encode('utf-8').hex()} -U\n"
     result = subprocess.run(
         ["security", "-i"], input=script, capture_output=True, text=True,
     )
@@ -387,7 +406,13 @@ async def _refresh_lease_context(dev_services, session):
     """(store, team_id, machine_id) for the cycle lease, or None when sync is off."""
     from catapult import sync as _sync  # sync imports this module; keep it local
 
-    store = _sync._store_from_config(_sync.SyncConfig.load())
+    config = _sync.SyncConfig.load()
+    if config.provider == "folder" and config.folder is not None and not Path(config.folder).is_dir():
+        # A missing sync folder — iCloud Drive off, an external volume away —
+        # must not be recreated by a lease write: FolderStore mkdirs its root,
+        # after which iCloud Drive looks "available" forever.
+        return None
+    store = _sync._store_from_config(config)
     if store is None:
         return None
     team = await dev_services.get_team(session)
@@ -673,17 +698,22 @@ async def run_store_update_check(
     source publishes a newer build, and install them — but only where the
     device is reachable right now. Nothing installs to a device that is not
     there; those records are simply looked at again at the next daily check.
+
+    The day is stamped only after a check that could do its job: a check where
+    every source failed, or that yielded to another Mac's refresh lease, is
+    retried at the next hourly tick instead of waiting a day.
     """
     from catapult import store as _store
 
     now = now if now is not None else _now_ts()
     state = load_state()
     if not store_check_is_due(state, now):
-        return {"status": "skipped"}
-    mark_store_checked(now)
+        return {"status": "skipped", "reason": "not due"}
 
     components = tuple(get_server_components())
     device_manager = components[0]
+    auth_client = components[1] if len(components) > 1 else None
+    dev_services = components[2] if len(components) > 2 else None
     installer = components[6] if len(components) > 6 else None
     fetch = fetch_catalog or _store.fetch_catalog
     sources = _store.load_sources() if sources is None else list(sources)
@@ -699,37 +729,74 @@ async def run_store_update_check(
         except Exception as e:
             logger.info("Store check: source %s failed: %s", source.id, e)
             source_errors.append(source.id)
+    if sources and len(source_errors) == len(sources):
+        logger.info("Store check: every source failed; trying again next hour")
+        return {
+            "status": "ok", "sources": len(sources), "updated": [], "unreachable": [],
+            "failed": [], "source_errors": source_errors,
+        }
 
     versions = {key: app.version for key, app in catalog.items()}
+    due = store_updates_due(state, versions, now)
+
+    # Installing is what the refresh lease protects: two Macs sharing a vault
+    # must not both install the same update to the same device.
+    lease = None
+    session = getattr(auth_client, "session", None) if auth_client is not None else None
+    if due and session is not None:
+        from catapult import sync as _sync
+
+        try:
+            lease = await _refresh_lease_context(dev_services, session)
+            if lease is not None:
+                store, team_id, machine = lease
+                if not await _sync.acquire_refresh_lease(store, team_id, machine_id=machine):
+                    logger.info("Store check: another Mac holds the refresh lease; deferring")
+                    return {"status": "skipped", "reason": "lease"}
+        except Exception:
+            logger.debug("Refresh lease unavailable for the store check", exc_info=True)
+            lease = None
+
     updated: list[str] = []
     unreachable: list[str] = []
     failed: list[str] = []
-    for rec in store_updates_due(state, versions, now):
-        udid = rec.get("device_udid", "")
-        app = catalog[rec["store_app_key"]]
-        try:
-            device = await device_manager.get_device_info(udid)
-            if not device.get("installable", True):
-                raise RuntimeError("the device is not ready for installation")
-        except Exception as e:
-            logger.info("Store update of %s on %s deferred: %s", app.name, udid, e)
-            unreachable.append(udid)
-            continue
-        if installer is None:
-            logger.warning("Store update of %s: no installer available", app.name)
-            failed.append(udid)
-            continue
+    try:
+        for rec in due:
+            udid = rec.get("device_udid", "")
+            app = catalog[rec["store_app_key"]]
+            try:
+                device = await device_manager.get_device_info(udid)
+                if not device.get("installable", True):
+                    raise RuntimeError("the device is not ready for installation")
+            except Exception as e:
+                logger.info("Store update of %s on %s deferred: %s", app.name, udid, e)
+                unreachable.append(udid)
+                continue
+            if installer is None:
+                logger.warning("Store update of %s: no installer available", app.name)
+                failed.append(udid)
+                continue
 
-        async def progress(step, pct, message, _app=app, _udid=udid):
-            logger.info("Store update %s on %s: %s", _app.name, _udid, message)
+            async def progress(step, pct, message, _app=app, _udid=udid):
+                logger.info("Store update %s on %s: %s", _app.name, _udid, message)
 
-        try:
-            await installer(udid, app, progress)
-            updated.append(udid)
-        except Exception:
-            logger.exception("Store update of %s on %s failed", app.name, udid)
-            failed.append(udid)
+            try:
+                await installer(udid, app, progress)
+                updated.append(udid)
+            except Exception:
+                logger.exception("Store update of %s on %s failed", app.name, udid)
+                failed.append(udid)
+    finally:
+        if lease is not None:
+            from catapult import sync as _sync
 
+            store, team_id, machine = lease
+            try:
+                await _sync.release_refresh_lease(store, team_id, machine_id=machine)
+            except Exception:
+                logger.debug("Could not release the refresh lease", exc_info=True)
+
+    mark_store_checked(now)
     return {
         "status": "ok",
         "sources": len(sources),

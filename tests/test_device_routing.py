@@ -6,6 +6,8 @@ install the app onto the Apple TV, because _select_rsd falls back to "the only
 tunnel we have" when nothing scores.
 """
 
+import pytest
+
 from catapult.device import DeviceManager, device_class_for
 
 
@@ -287,7 +289,8 @@ async def test_cached_tunnel_is_reused_for_the_same_apple_tv(monkeypatch):
 
 async def test_cached_tunnel_is_not_reused_for_a_different_apple_tv(monkeypatch):
     """Two Apple TVs, tunnel A cached, user selects B: registering B under A's
-    UDID signs a profile that does not include B, and the install fails."""
+    UDID signs a profile that does not include B, and the install fails. The
+    cache is bypassed and B is found by its own identifier."""
     import pymobiledevice3.tunneld.api as api
 
     manager = DeviceManager()
@@ -299,14 +302,33 @@ async def test_cached_tunnel_is_not_reused_for_a_different_apple_tv(monkeypatch)
         return True
 
     async def get_tunneld_devices():
-        return [_tunneled("UDID-B")]
+        return [_tunneled("TV-B")]
 
     monkeypatch.setattr(manager, "_tunnel_listed", listed)
     monkeypatch.setattr(api, "get_tunneld_devices", get_tunneld_devices)
 
     udid, _ = await manager.get_real_udid(device_udid="TV-B")
 
-    assert udid == "UDID-B"
+    assert udid == "TV-B"
+
+
+async def test_with_two_apple_tvs_an_unidentifiable_sole_tunnel_is_refused(monkeypatch):
+    """Same setup, but the only live tunnel cannot be tied to B. Guessing would
+    be a coin flip between two devices, so the install stops with a clear error
+    instead of landing on the wrong Apple TV."""
+    import pymobiledevice3.tunneld.api as api
+
+    manager = DeviceManager()
+    manager._cache["TV-A"] = _tv_row("TV-A", "10.0.0.5", "Living Room")
+    manager._cache["TV-B"] = _tv_row("TV-B", "10.0.0.6", "Bedroom")
+
+    async def get_tunneld_devices():
+        return [_tunneled("UDID-UNKNOWN")]
+
+    monkeypatch.setattr(api, "get_tunneld_devices", get_tunneld_devices)
+
+    with pytest.raises(RuntimeError, match="matched the selected Apple TV"):
+        await manager.get_real_udid(device_udid="TV-B")
 
 
 async def test_start_tunnel_does_not_answer_already_active_for_another_apple_tv(monkeypatch):
@@ -334,3 +356,101 @@ async def test_start_tunnel_does_not_answer_already_active_for_another_apple_tv(
 
     assert result["status"] == "ok"
     assert polled == ["TV-B"], "must look for B's tunnel instead of trusting A's cache"
+
+
+# ── Two Apple TVs: never guess ────────────────────────────────────────────────
+
+def test_select_rsd_refuses_the_sole_tunnel_when_two_apple_tvs_are_known():
+    """With one Apple TV, 'the only tunnel we have' is a safe guess when its
+    mDNS identifier has rotated. With two known Apple TVs it is a coin flip,
+    and the losing side installs onto the wrong device."""
+    manager = DeviceManager()
+    manager._cache["TV-A"] = _tv_row("TV-A", "10.0.0.5", "Living Room")
+    manager._cache["TV-B"] = _tv_row("TV-B", "10.0.0.6", "Bedroom")
+    sole = FakeRSD(udid="UDID-A", product_type="AppleTV14,1")
+
+    assert manager._select_rsd([sole], manager._cache["TV-B"], allow_single_fallback=True) is None
+
+
+def test_select_rsd_still_falls_back_with_a_single_known_apple_tv():
+    manager = DeviceManager()
+    manager._cache["TV-A"] = _tv_row("TV-A", "10.0.0.5", "Living Room")
+    sole = FakeRSD(udid="UDID-A", product_type="AppleTV14,1")
+    target = {"udid": "ROTATED", "host": "10.0.0.5", "device_class": "tvos"}
+
+    assert manager._select_rsd([sole], target, allow_single_fallback=True) is sole
+
+
+# ── Trust request must finish inside the client's request timeout ────────────
+
+async def test_trust_request_waits_less_than_the_clients_timeout(monkeypatch):
+    """The native client gives /api/devices/setup 60 seconds. A 90-second pair
+    timeout meant the UI reported a failure while the device still showed the
+    Trust prompt."""
+    import pymobiledevice3.lockdown as lockdown_mod
+
+    seen = {}
+
+    class FakeLockdown:
+        paired = True
+
+    async def create_using_usbmux(**kwargs):
+        seen.update(kwargs)
+        return FakeLockdown()
+
+    monkeypatch.setattr(lockdown_mod, "create_using_usbmux", create_using_usbmux)
+    manager = DeviceManager()
+    manager._cache["USB1"] = _usb_row()
+
+    await manager.pair_device(device_udid="USB1")
+
+    assert seen["pair_timeout"] <= 45
+
+
+# ── Background installs never escalate ───────────────────────────────────────
+
+async def test_install_forwards_allow_escalation_to_start_tunnel(monkeypatch):
+    manager = DeviceManager()
+    seen = {}
+
+    async def get_device_info(udid):
+        return {"udid": udid, "name": "TV", "host": "10.0.0.5", "port": 49152,
+                "service": "_remotepairing._tcp.local.", "installable": False}
+
+    async def start_tunnel(**kwargs):
+        seen.update(kwargs)
+        return {"status": "error", "message": "no tunnel"}
+
+    monkeypatch.setattr(manager, "get_device_info", get_device_info)
+    monkeypatch.setattr(manager, "start_tunnel", start_tunnel)
+
+    try:
+        await manager.install("TV1", "/nonexistent.ipa", allow_escalation=False)
+    except Exception:
+        pass
+
+    assert seen.get("allow_escalation") is False
+
+
+async def test_get_real_udid_forwards_allow_escalation_to_start_tunnel(monkeypatch):
+    import pymobiledevice3.tunneld.api as api
+
+    manager = DeviceManager()
+    seen = {}
+
+    async def no_devices():
+        return []
+
+    async def start_tunnel(**kwargs):
+        seen.update(kwargs)
+        return {"status": "error", "message": "no tunnel"}
+
+    monkeypatch.setattr(api, "get_tunneld_devices", no_devices)
+    monkeypatch.setattr(manager, "start_tunnel", start_tunnel)
+
+    try:
+        await manager.get_real_udid(device_udid="TV1", allow_escalation=False)
+    except Exception:
+        pass
+
+    assert seen.get("allow_escalation") is False

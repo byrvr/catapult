@@ -421,3 +421,20 @@ def test_altstore_sha256_is_carried_when_the_source_publishes_it():
     (app,) = store.catalog_from_altstore(source, document)
 
     assert app.sha256 == "ab" * 32
+
+
+def test_checksums_match_entries_that_carry_a_directory_prefix():
+    """CI-generated SHA256SUMS files list `./dist/App.ipa` or `dist/App.ipa`;
+    the asset on the release is just `App.ipa`."""
+    apps = [store.StoreApp(source_id="s", app_key="k", name="A", version="1",
+                           platform="tvos", download_url="https://x/v2/App-tvOS-v2.0.ipa")]
+
+    store.apply_checksums(apps, store.parse_checksums("ab" * 32 + "  ./dist/App-tvOS-v2.0.ipa\n"))
+
+    assert apps[0].sha256 == "ab" * 32
+
+
+def test_checksums_parse_the_bsd_style_format():
+    digests = store.parse_checksums("SHA256 (App-tvOS-v2.0.ipa) = " + "CD" * 32 + "\n")
+
+    assert digests == {"App-tvOS-v2.0.ipa": "cd" * 32}

@@ -194,3 +194,25 @@ def test_set_store_auto_update_flags_the_matching_record(tmp_path, monkeypatch):
 
     assert refresh.load_state()["installs"][0]["store_auto_update"] is True
     assert not refresh.set_store_auto_update("DEV1", "github:nobody/nothing#ios:", True)
+
+
+async def test_a_check_where_every_source_failed_is_retried_next_hour(tmp_path, monkeypatch):
+    """A transient outage at check time must not cost a whole day."""
+    monkeypatch.setattr(refresh, "STATE_FILE", tmp_path / "state.json")
+    refresh.save_state({"installs": [_record()]})
+
+    async def fetch_catalog(source):
+        raise RuntimeError("offline")
+
+    async def installer(device_udid, catalog_app, progress):
+        return {"status": "ok"}
+
+    summary = await refresh.run_store_update_check(
+        _components(FakeDevices({"DEV1"}), installer),
+        sources=[_store.normalize_source("VortXTV/VortX")],
+        fetch_catalog=fetch_catalog,
+        now=2_000_000.0,
+    )
+
+    assert summary["source_errors"] == ["github:VortXTV/VortX"]
+    assert refresh.load_state().get("store_checked_at") is None

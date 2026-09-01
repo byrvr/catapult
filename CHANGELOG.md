@@ -47,7 +47,7 @@
 
 - New Store tab: add a GitHub repository (or its releases page) or an AltStore source, see the builds that fit the selected device, and install or update them through the normal signing pipeline. Repositories that publish several apps under fixed tags are supported.
 - Store installs show progress and errors on the Store tab.
-- Installed store apps can opt into daily automatic updates from the Store tab; an update installs only when the device is reachable.
+- Installed store apps can opt into daily automatic updates from the Store tab; an update installs only when the device is reachable, never asks for an admin password, and yields to another Mac's refresh lease.
 - Downloads are verified against the release's `SHA256SUMS` file when it publishes one, and against the digest an AltStore source publishes.
 
 ### Apple TV tunnel
@@ -55,7 +55,7 @@
 - Catapult no longer asks for an admin password on every tunnel. A wedged tunneld is recovered through its local control endpoints, and the hourly refresh never installs the daemon.
 - A background refresh that finds tunneld missing no longer blocks the next Setup click for a minute.
 - tunneld is restarted only when it serves no tunnel at all; an unreachable Apple TV no longer tears down another Apple TV's live tunnel.
-- With two Apple TVs, the cached tunnel is used only for the Apple TV it was opened for.
+- With two Apple TVs, the cached tunnel is used only for the Apple TV it was opened for, and Catapult no longer guesses which of them a lone unidentified tunnel belongs to.
 
 ### Signing
 

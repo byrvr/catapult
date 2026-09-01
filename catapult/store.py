@@ -14,6 +14,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import uuid
+from pathlib import PurePosixPath
 from urllib.parse import unquote
 import re
 from dataclasses import dataclass, field, asdict
@@ -426,13 +428,30 @@ async def fetch_catalog(source: Source) -> list[StoreApp]:
 
 # ── downloading ─────────────────────────────────────────────────────────────
 
+_BSD_SUM = re.compile(r"^SHA256\s*\((.+)\)\s*=\s*([0-9a-fA-F]{64})$")
+
+
 def parse_checksums(text: str) -> dict[str, str]:
-    """Parse a SHA256SUMS file into {filename: digest}."""
+    """Parse a SHA256SUMS file into {basename: digest}.
+
+    Accepts GNU lines (``<hash>  path``, optional ``*`` binary marker) and BSD
+    lines (``SHA256 (path) = <hash>``). Keys are basenames because CI-generated
+    files list ``./dist/App.ipa`` while the release asset is just ``App.ipa``.
+    """
     digests: dict[str, str] = {}
-    for line in text.splitlines():
-        parts = line.split()
-        if len(parts) >= 2 and len(parts[0]) == 64:
-            digests[parts[-1].lstrip("*")] = parts[0].lower()
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        bsd = _BSD_SUM.match(line)
+        if bsd:
+            name, digest = bsd.group(1), bsd.group(2)
+        else:
+            parts = line.split()
+            if len(parts) < 2 or len(parts[0]) != 64:
+                continue
+            digest, name = parts[0], parts[-1].lstrip("*")
+        digests[PurePosixPath(name.strip()).name] = digest.lower()
     return digests
 
 
@@ -470,7 +489,9 @@ async def download_to(url: str, dest: Path, *, expected_sha256: str = "") -> Pat
     """Stream a download to disk, verifying the digest when one is known."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     digest = hashlib.sha256()
-    tmp = dest.with_suffix(dest.suffix + ".part")
+    # A unique temp name: a user-initiated install and the daily check can
+    # fetch the same URL at once, and two writers on one .part file interleave.
+    tmp = dest.with_name(f".{dest.name}.{uuid.uuid4().hex[:8]}.part")
     try:
         # No total timeout (IPAs are large and links can be slow), but a stalled
         # connection or a silent server must not hang the install forever.
