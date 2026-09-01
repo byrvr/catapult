@@ -12,6 +12,7 @@
 - Device registration uses the UDID reported by the device rather than the usbmux list serial.
 - Running Setup for an Apple TV no longer marks every Wi-Fi iPhone and iPad on the network as ready to install.
 - Installing to a Wi-Fi iPhone or iPad that advertises the Apple TV pairing service now says it needs one cable pairing, instead of prompting for an admin password and polling for a tunnel that never comes.
+- Setup on an untrusted USB iPhone or iPad asks the device to trust this Mac (the button reads "Trust"), instead of failing or starting an Apple TV pairing browse.
 
 ### Auto-refresh
 
@@ -23,6 +24,8 @@
 - A power assertion is held across each refresh so it cannot be suspended mid-signing.
 - Installing an app that is also installed from the App Store no longer tries to replace the App Store copy on the second and later installs.
 - Settings → Sync shows the `pmset repeat wake` command for scheduling a nightly wake, so refreshes can run while the Mac sleeps.
+- Catapult asks Apple for a new certificate before revoking anything, and revokes only when Apple reports the slot is taken. Two Macs on one Apple ID no longer take turns revoking each other's certificate.
+- Keychain writes no longer place the secret on the `security` command line.
 
 ### Cross-device sync
 
@@ -37,16 +40,22 @@
 - A first Mac now sees "Create vault" instead of "This vault is locked" when the sync folder has no vault yet.
 - A Mac that still uses the old `CATAPULT_SYNC_KEY` can open a vault another Mac migrated from that key, and Settings → Sync can show the recovery key this Mac holds.
 - A failed sync no longer blanks the Developer Account view.
+- Two Macs sharing a vault take turns: the hourly refresh holds a short lease in the vault and skips a cycle another Mac is running.
+- S3-compatible buckets accept a `region`, and IPA blobs stream to and from them instead of being held in memory.
 
 ### Store
 
 - New Store tab: add a GitHub repository (or its releases page) or an AltStore source, see the builds that fit the selected device, and install or update them through the normal signing pipeline. Repositories that publish several apps under fixed tags are supported.
 - Store installs show progress and errors on the Store tab.
+- Installed store apps can opt into daily automatic updates from the Store tab; an update installs only when the device is reachable.
+- Downloads are verified against the release's `SHA256SUMS` file when it publishes one, and against the digest an AltStore source publishes.
 
 ### Apple TV tunnel
 
 - Catapult no longer asks for an admin password on every tunnel. A wedged tunneld is recovered through its local control endpoints, and the hourly refresh never installs the daemon.
 - A background refresh that finds tunneld missing no longer blocks the next Setup click for a minute.
+- tunneld is restarted only when it serves no tunnel at all; an unreachable Apple TV no longer tears down another Apple TV's live tunnel.
+- With two Apple TVs, the cached tunnel is used only for the Apple TV it was opened for.
 
 ### Signing
 

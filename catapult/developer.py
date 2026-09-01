@@ -312,8 +312,11 @@ class DeveloperServices:
         wasted the credential and revoked whatever certificate Xcode, AltStore
         or a second Mac was using on the same Apple ID.
 
-        Only when there is no usable identity do we fall back to the AltSign
-        flow: revoke all, generate a fresh RSA key + CSR, submit, fetch content.
+        Only when there is no usable identity do we mint one: generate a fresh
+        RSA key + CSR and submit it. Existing certificates are revoked only if
+        Apple reports the slot is taken (result code 7460), then the CSR is
+        retried once. Revoking up front, the AltSign way, meant two Catapult
+        Macs on one Apple ID took turns killing each other's certificate.
 
         Returns (cert_pem_bytes, private_key).
         """
@@ -330,9 +333,8 @@ class DeveloperServices:
                 return existing.cert_pem, self._private_key
             signing_identity.clear(team_id)
 
-        # No usable identity — make room and mint a new one.
-        logger.info("Revoking existing development certificates...")
-        await self._revoke_all_certs(session, team_id, catapult_only=not personal_team)
+        # No usable identity — mint a new one. Ask Apple first; revoke only if
+        # it says the slot is taken (handled below on result code 7460).
 
         # Step 3: Generate fresh keypair + CSR
         self._private_key = rsa.generate_private_key(

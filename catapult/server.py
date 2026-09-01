@@ -68,7 +68,10 @@ async def _on_startup():
         asyncio.create_task(_sync_authenticated_state())
     # Start opportunistic auto-refresh background loop.
     def _components():
-        return device_manager, auth_client, dev_services, signer, ipa_processor, job_manager
+        return (
+            device_manager, auth_client, dev_services, signer, ipa_processor, job_manager,
+            _install_store_app,
+        )
     asyncio.create_task(_refresh.run_refresh_loop(_components))
 
     # Warm the first device scan off the request path: right after boot it
@@ -292,6 +295,13 @@ async def setup_device(payload: dict = None):
             pair_result = await device_manager.pair_device(device_name=name, device_udid=udid, device_host=host)
             if pair_result.get("status") != "ok":
                 job_manager.fail(job, pair_result.get("message") or "Device pairing failed.")
+                return _annotate_job(pair_result, job)
+            if (selected or {}).get("service") == "usbmux":
+                # A USB iPhone or iPad pairs by trusting this Mac; there is no
+                # tunnel to start. Rescan so the row reflects the new trust.
+                job_manager.update(job, progress=80, message="Rescanning devices...")
+                await device_manager.discover()
+                job_manager.complete(job, message=pair_result.get("message") or "Trusted.")
                 return _annotate_job(pair_result, job)
 
         # After successful pairing, start tunnel
@@ -1570,15 +1580,27 @@ async def list_store_apps(device_udid: str = ""):
             logger.info("Source %s failed: %s", source.id, e)
             errors.append({"source_id": source.id, "message": str(e)})
 
-    installed = {
-        rec.get("store_app_key"): rec.get("store_version")
-        for rec in _refresh.load_state().get("installs", [])
-        if rec.get("store_app_key")
-    }
+    records = [
+        rec for rec in _refresh.load_state().get("installs", []) if rec.get("store_app_key")
+    ]
+
+    def _record_for(app_key: str) -> dict | None:
+        # Installed state is per device: the same catalog entry can be on the
+        # Apple TV with auto-update on and on an iPad with it off.
+        for rec in records:
+            if rec.get("store_app_key") != app_key:
+                continue
+            if not device_udid or rec.get("device_udid") == device_udid:
+                return rec
+        return None
+
     for app in apps:
-        current = installed.get(app["app_key"])
-        app["installed_version"] = current or ""
+        rec = _record_for(app["app_key"]) or {}
+        current = rec.get("store_version") or ""
+        app["installed_version"] = current
         app["update_available"] = bool(current) and _store.is_newer(app["version"], current)
+        app["auto_update"] = bool(rec.get("store_auto_update"))
+        app["pinned"] = bool(rec.get("store_pinned"))
 
     return {
         "apps": apps,
@@ -1598,6 +1620,43 @@ async def _team_is_free() -> bool:
     except Exception:
         return False
     return team_is_free(team)
+
+
+@app.post("/api/store/apps/auto-update")
+async def set_store_auto_update(payload: dict = None):
+    """Opt one installed store app in or out of the daily update check."""
+    payload = payload or {}
+    device_udid = payload.get("device_udid", "")
+    app_key = payload.get("app_key", "")
+    enabled = bool(payload.get("enabled", False))
+    if not device_udid or not app_key:
+        return JSONResponse(
+            {"status": "error", "message": "device_udid and app_key are required"},
+            status_code=400,
+        )
+    if not _refresh.set_store_auto_update(device_udid, app_key, enabled):
+        return JSONResponse(
+            {"status": "error", "message": "That app is not installed from the Store on this device."},
+            status_code=404,
+        )
+    return {"status": "ok", "auto_update": enabled}
+
+
+async def _install_store_app(device_udid: str, app: "_store.StoreApp", report) -> dict:
+    """Download a catalog app and hand it to the normal install pipeline.
+
+    Shared by the Store tab's install socket and the daily update check, so
+    both verify the published checksum and record the store origin the same way.
+    """
+    await report("download", 5, f"Downloading {app.name} {app.version}...")
+    downloads = Path.home() / ".catapult" / "downloads"
+    target = downloads / f"{hashlib.sha256(app.download_url.encode()).hexdigest()[:16]}.ipa"
+    await _store.download_to(app.download_url, target, expected_sha256=app.sha256)
+
+    await report("download", 20, "Verifying..." if app.sha256 else "Preparing...")
+    result = await _install_app(device_udid, str(target), report)
+    _refresh.tag_store_install(device_udid, str(target), app.app_key, app.version)
+    return result
 
 
 async def _resolve_store_app(app_key: str) -> "_store.StoreApp | None":
@@ -1646,15 +1705,7 @@ async def store_install_ws(ws: WebSocket):
             await _send_error(ws, text, job=job)
             return
 
-        await report("download", 5, f"Downloading {app.name} {app.version}...")
-        downloads = Path.home() / ".catapult" / "downloads"
-        target = downloads / f"{hashlib.sha256(app.download_url.encode()).hexdigest()[:16]}.ipa"
-        await _store.download_to(app.download_url, target, expected_sha256=app.sha256)
-
-        await report("download", 20, "Verifying...")
-        result = await _install_app(device_udid, str(target), report)
-
-        _refresh.tag_store_install(device_udid, str(target), app.app_key, app.version)
+        result = await _install_store_app(device_udid, app, report)
         done = result.get("message") or f"Installed {app.name} {app.version}."
         job_manager.complete(job, message=done)
         await _send(ws, "done", 100, done, job_id=job.id)

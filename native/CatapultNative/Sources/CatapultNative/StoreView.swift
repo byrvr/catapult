@@ -196,6 +196,14 @@ private struct StoreAppRow: View {
                          : "Installed \(installed)")
                         .font(.caption2)
                         .foregroundStyle(app.updateAvailable == true ? Color.orange : .secondary)
+                    // Checks daily, installs when the device is connected.
+                    Toggle("Update automatically", isOn: Binding(
+                        get: { app.autoUpdate ?? false },
+                        set: { enabled in Task { await state.setStoreAutoUpdate(app, enabled: enabled) } }
+                    ))
+                    .toggleStyle(.checkbox)
+                    .font(.caption2)
+                    .disabled(state.isInstalling)
                 }
             }
 

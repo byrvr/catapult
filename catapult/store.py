@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from urllib.parse import unquote
 import re
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
@@ -360,12 +361,14 @@ def catalog_from_altstore(source: Source, document: dict) -> list[StoreApp]:
             size = int(newest.get("size") or 0)
             version_date = newest.get("date") or ""
             changelog = newest.get("localizedDescription") or ""
+            sha256 = str(newest.get("sha256") or "").lower()
         else:
             version = app.get("version") or ""
             download_url = app.get("downloadURL") or ""
             size = int(app.get("size") or 0)
             version_date = app.get("versionDate") or ""
             changelog = app.get("versionDescription") or ""
+            sha256 = str(app.get("sha256") or "").lower()
 
         if not download_url:
             continue
@@ -384,6 +387,7 @@ def catalog_from_altstore(source: Source, document: dict) -> list[StoreApp]:
             icon_url=app.get("iconURL") or "",
             changelog=changelog[:4000],
             size=size,
+            sha256=sha256,
             version_date=version_date,
             prerelease=is_prerelease_tag(version),
         ))
@@ -402,7 +406,18 @@ async def fetch_catalog(source: Source) -> list[StoreApp]:
                 headers={"Accept": "application/vnd.github+json"},
             )
             response.raise_for_status()
-            return catalog_from_github_releases(source, response.json())
+            releases = response.json()
+            apps = catalog_from_github_releases(source, releases)
+            digests: dict[str, str] = {}
+            for url in checksum_urls_for(releases, apps):
+                try:
+                    sums = await client.get(url)
+                    sums.raise_for_status()
+                    digests.update(parse_checksums(sums.text))
+                except Exception as e:
+                    logger.info("Could not read checksums at %s: %s", url, e)
+            apply_checksums(apps, digests)
+            return apps
 
         response = await client.get(source.url)
         response.raise_for_status()
@@ -419,6 +434,36 @@ def parse_checksums(text: str) -> dict[str, str]:
         if len(parts) >= 2 and len(parts[0]) == 64:
             digests[parts[-1].lstrip("*")] = parts[0].lower()
     return digests
+
+
+def checksum_urls_for(releases: list[dict], apps: list[StoreApp]) -> list[str]:
+    """SHA256SUMS download URLs for the releases that produced ``apps``.
+
+    One request per release actually shown, not per release fetched:
+    unauthenticated GitHub allows 60 requests an hour.
+    """
+    wanted = {app.download_url for app in apps if app.download_url}
+    urls: list[str] = []
+    for release in releases:
+        assets = [a for a in release.get("assets", []) if a.get("name")]
+        if not any(a.get("browser_download_url") in wanted for a in assets):
+            continue
+        name = find_checksums_asset([a["name"] for a in assets])
+        if not name:
+            continue
+        url = next((a.get("browser_download_url", "") for a in assets if a["name"] == name), "")
+        if url and url not in urls:
+            urls.append(url)
+    return urls
+
+
+def apply_checksums(apps: list[StoreApp], digests: dict[str, str]) -> None:
+    """Fill ``sha256`` on apps whose asset filename appears in a SHA256SUMS map."""
+    for app in apps:
+        filename = unquote(app.download_url.rsplit("/", 1)[-1])
+        digest = digests.get(filename)
+        if digest:
+            app.sha256 = digest.lower()
 
 
 async def download_to(url: str, dest: Path, *, expected_sha256: str = "") -> Path:

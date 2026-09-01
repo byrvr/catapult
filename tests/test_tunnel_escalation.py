@@ -138,3 +138,57 @@ def test_recovery_does_not_reinstall_the_daemon():
 
     assert "_install_tunneld_launchdaemon" not in source
     assert "clear_tunnels" in source and "shutdown" in source
+
+
+# ── Recovery only when tunneld is actually wedged ────────────────────────────
+
+def _unreachable_target(manager, monkeypatch, live_tunnels: int):
+    recovered: list[bool] = []
+
+    async def ensure():
+        return True
+
+    async def poll(target, attempts=30):
+        return False
+
+    async def request_start(target):
+        return False
+
+    async def live_count():
+        return live_tunnels
+
+    async def recover(hard=False):
+        recovered.append(hard)
+        return {"status": "ok"}
+
+    async def no_sleep(seconds):
+        return None
+
+    monkeypatch.setattr(manager, "_ensure_tunneld", ensure)
+    monkeypatch.setattr(manager, "_poll_for_tunnel", poll)
+    monkeypatch.setattr(manager, "_request_tunnel_start", request_start)
+    monkeypatch.setattr(manager, "_live_tunnel_count", live_count, raising=False)
+    monkeypatch.setattr(manager, "_recover_tunneld", recover)
+    monkeypatch.setattr("catapult.device.asyncio.sleep", no_sleep)
+    return recovered
+
+
+async def test_recovery_is_skipped_while_other_tunnels_are_live(manager, monkeypatch):
+    """A tunneld serving another Apple TV is not wedged; the selected one is
+    just unreachable. Clearing every tunnel to 'recover' broke the install that
+    was running on the other device — from the hourly refresh, too."""
+    recovered = _unreachable_target(manager, monkeypatch, live_tunnels=1)
+
+    result = await manager._start_tunnel_inner(device_udid="ATV")
+
+    assert result["status"] == "error"
+    assert recovered == []
+
+
+async def test_recovery_runs_when_tunneld_serves_nothing(manager, monkeypatch):
+    recovered = _unreachable_target(manager, monkeypatch, live_tunnels=0)
+
+    result = await manager._start_tunnel_inner(device_udid="ATV")
+
+    assert result["status"] == "error"
+    assert recovered == [False, True]

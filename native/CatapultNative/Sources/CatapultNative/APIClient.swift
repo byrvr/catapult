@@ -301,6 +301,25 @@ extension APIClient {
         try await postJSON("/api/store/sources/remove", body: ["id": id], as: StoreSourceList.self)
     }
 
+    func setStoreAutoUpdate(appKey: String, deviceUDID: String, enabled: Bool) async throws -> StatusResponse {
+        struct Body: Encodable {
+            let appKey: String
+            let deviceUDID: String
+            let enabled: Bool
+
+            enum CodingKeys: String, CodingKey {
+                case appKey = "app_key"
+                case deviceUDID = "device_udid"
+                case enabled
+            }
+        }
+        return try await postJSON(
+            "/api/store/apps/auto-update",
+            body: Body(appKey: appKey, deviceUDID: deviceUDID, enabled: enabled),
+            as: StatusResponse.self
+        )
+    }
+
     func storeApps(deviceUDID: String?) async throws -> StoreCatalog {
         let query = (deviceUDID?.isEmpty == false)
             ? "?device_udid=\(deviceUDID!.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")"

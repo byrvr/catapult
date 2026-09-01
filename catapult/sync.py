@@ -44,6 +44,10 @@ CONFIG_ENV_PATH = Path.home() / ".catapult" / "config.env"
 
 APP_SUPPORT_DIR = Path.home() / "Library" / "Application Support" / "Catapult"
 CONFIG_PATH = APP_SUPPORT_DIR / "sync.json"
+MACHINE_ID_PATH = APP_SUPPORT_DIR / "machine-id"
+# One refresh cycle comfortably fits; a Mac that dies mid-cycle frees the other
+# one within this window.
+REFRESH_LEASE_TTL_SECONDS = 20 * 60
 
 # The default vault lives in the user's own iCloud Drive. This is ordinary
 # POSIX I/O from a non-sandboxed process: no entitlement, no Team ID, no
@@ -103,6 +107,9 @@ class SyncConfig:
     r2_bucket: str = ""
     r2_access_key_id: str = ""
     r2_secret_access_key: str = ""
+    # SigV4 signing region. "auto" is right for Cloudflare R2 and wrong for
+    # every other S3-compatible bucket (B2, Wasabi, iDrive, AWS itself).
+    region: str = "auto"
 
     @classmethod
     def from_env(cls) -> "SyncConfig":
@@ -115,6 +122,7 @@ class SyncConfig:
             r2_bucket=_sync_setting("CATAPULT_R2_BUCKET"),
             r2_access_key_id=_sync_setting("CATAPULT_R2_ACCESS_KEY_ID"),
             r2_secret_access_key=_sync_setting("CATAPULT_R2_SECRET_ACCESS_KEY"),
+            region=_sync_setting("CATAPULT_R2_REGION", "auto") or "auto",
         )
 
     @classmethod
@@ -141,6 +149,7 @@ class SyncConfig:
             r2_bucket=data.get("r2_bucket") or "",
             r2_access_key_id=_keychain_get("sync-r2-access-key-id") or "",
             r2_secret_access_key=_keychain_get("sync-r2-secret-access-key") or "",
+            region=(data.get("region") or "auto"),
         )
 
     def save(self) -> None:
@@ -153,6 +162,7 @@ class SyncConfig:
                     "folder": str(self.folder) if self.folder else "",
                     "r2_endpoint": self.r2_endpoint,
                     "r2_bucket": self.r2_bucket,
+                    "region": self.region,
                 },
                 indent=2,
             ),
@@ -571,20 +581,27 @@ class R2Store(RemoteStore):
         self.bucket = config.r2_bucket
         self.access_key = config.r2_access_key_id
         self.secret_key = config.r2_secret_access_key
-        self.region = "auto"
+        self.region = config.region or "auto"
         self.service = "s3"
+        # Tests inject an httpx.MockTransport here; production leaves it None.
+        self.transport: httpx.AsyncBaseTransport | None = None
+
+    def _client(self, timeout) -> httpx.AsyncClient:
+        return httpx.AsyncClient(timeout=timeout, transport=self.transport)
 
     def _url(self, key: str) -> str:
         return f"{self.endpoint}/{quote(self.bucket)}/{quote(key.strip('/'), safe='/')}"
 
-    def _sign_headers(self, method: str, url: str, payload: bytes = b"") -> dict:
+    def _sign_headers(
+        self, method: str, url: str, payload: bytes = b"", *, payload_hash: str | None = None
+    ) -> dict:
         parsed = urlparse(url)
         host = parsed.netloc
         canonical_uri = parsed.path or "/"
         now = _dt.datetime.now(_dt.timezone.utc)
         amz_date = now.strftime("%Y%m%dT%H%M%SZ")
         date_stamp = now.strftime("%Y%m%d")
-        payload_hash = hashlib.sha256(payload).hexdigest()
+        payload_hash = payload_hash or hashlib.sha256(payload).hexdigest()
         canonical_headers = (
             f"host:{host}\n"
             f"x-amz-content-sha256:{payload_hash}\n"
@@ -634,7 +651,7 @@ class R2Store(RemoteStore):
 
     async def get(self, key: str) -> bytes | None:
         url = self._url(key)
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with self._client(60) as client:
             response = await client.get(url, headers=self._sign_headers("GET", url))
         if response.status_code == 404:
             return None
@@ -643,7 +660,7 @@ class R2Store(RemoteStore):
 
     async def put(self, key: str, data: bytes) -> None:
         url = self._url(key)
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with self._client(120) as client:
             response = await client.put(
                 url,
                 content=data,
@@ -653,7 +670,7 @@ class R2Store(RemoteStore):
 
     async def exists(self, key: str) -> bool:
         url = self._url(key)
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with self._client(30) as client:
             response = await client.head(url, headers=self._sign_headers("HEAD", url))
         if response.status_code == 404:
             return False
@@ -662,11 +679,53 @@ class R2Store(RemoteStore):
 
     async def delete(self, key: str) -> None:
         url = self._url(key)
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with self._client(30) as client:
             response = await client.delete(url, headers=self._sign_headers("DELETE", url))
         if response.status_code == 404:
             return
         response.raise_for_status()
+
+    _TRANSFER_TIMEOUT = httpx.Timeout(connect=30.0, read=120.0, write=120.0, pool=30.0)
+
+    async def put_file(self, key: str, path: Path) -> None:
+        """Stream a file up without holding it in memory.
+
+        SigV4 wants the payload hash before the first byte goes out, so the
+        file is read twice — once to hash, once to send — and both passes
+        stream a megabyte at a time.
+        """
+        digest = vault.sha256_file(path)
+        url = self._url(key)
+        headers = self._sign_headers("PUT", url, payload_hash=digest)
+        headers["Content-Length"] = str(path.stat().st_size)
+
+        async def body():
+            with path.open("rb") as f:
+                while chunk := f.read(1024 * 1024):
+                    yield chunk
+
+        async with self._client(self._TRANSFER_TIMEOUT) as client:
+            response = await client.put(url, content=body(), headers=headers)
+        response.raise_for_status()
+
+    async def get_file(self, key: str, dest: Path) -> bool:
+        url = self._url(key)
+        async with self._client(self._TRANSFER_TIMEOUT) as client:
+            async with client.stream("GET", url, headers=self._sign_headers("GET", url)) as response:
+                if response.status_code == 404:
+                    return False
+                response.raise_for_status()
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                tmp = dest.with_name(dest.name + ".part")
+                try:
+                    with tmp.open("wb") as f:
+                        async for chunk in response.aiter_bytes(1024 * 1024):
+                            f.write(chunk)
+                    tmp.replace(dest)
+                except BaseException:
+                    tmp.unlink(missing_ok=True)
+                    raise
+        return True
 
 
 def _store_from_config(config: SyncConfig) -> RemoteStore | None:
@@ -739,6 +798,75 @@ def _merge_installs(local: list[dict], remote: list[dict]) -> list[dict]:
         merged.values(),
         key=lambda item: (item.get("app_name", ""), item.get("device_name", ""), item.get("last_installed", 0)),
     )
+
+
+def machine_id() -> str:
+    """A stable random identifier for this Mac, used to sign refresh leases.
+
+    Not the hostname, which changes with the network, and not the hardware
+    UUID, which would write a durable identifier of the user's machine into a
+    shared folder for no benefit.
+    """
+    try:
+        existing = MACHINE_ID_PATH.read_text("utf-8").strip()
+        if existing:
+            return existing
+    except OSError:
+        pass
+    value = secrets.token_hex(16)
+    try:
+        MACHINE_ID_PATH.parent.mkdir(parents=True, exist_ok=True)
+        MACHINE_ID_PATH.write_text(value, encoding="utf-8")
+    except OSError:
+        logger.warning("Could not persist the machine id; leases will not survive a relaunch")
+    return value
+
+
+def _read_lease(payload: bytes | None) -> dict:
+    if not payload:
+        return {}
+    try:
+        return json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        logger.warning("Remote lease.json is unreadable — treating it as free")
+        return {}
+
+
+async def acquire_refresh_lease(
+    store: RemoteStore, team_id: str, *, machine_id: str, now: float | None = None
+) -> bool:
+    """Take, or renew, the refresh lease. False when another Mac holds a live one.
+
+    Two Macs sharing a vault must not refresh the same apps at once: each would
+    sign and install its own build, and on a free team each CSR can revoke the
+    other's certificate. The lease is advisory — a folder sync has no atomic
+    compare-and-set — but it removes the common case of two hourly loops that
+    happen to line up.
+    """
+    now = now if now is not None else _dt.datetime.now(_dt.timezone.utc).timestamp()
+    current = _read_lease(await store.get(_lease_key(team_id)))
+    holder = current.get("locked_by")
+    try:
+        until = float(current.get("locked_until") or 0)
+    except (TypeError, ValueError):
+        until = 0.0
+    if holder and holder != machine_id and until > now:
+        logger.info("Refresh lease is held by another Mac for %.0f more seconds", until - now)
+        return False
+    lease = {
+        "locked_by": machine_id,
+        "locked_until": now + REFRESH_LEASE_TTL_SECONDS,
+        "operation": "refresh",
+    }
+    await store.put(_lease_key(team_id), json.dumps(lease, indent=2).encode("utf-8"))
+    return True
+
+
+async def release_refresh_lease(store: RemoteStore, team_id: str, *, machine_id: str) -> None:
+    """Drop the lease if this Mac holds it. Someone else's lease is left alone."""
+    current = _read_lease(await store.get(_lease_key(team_id)))
+    if current.get("locked_by") == machine_id:
+        await store.delete(_lease_key(team_id))
 
 
 async def load_vault_doc(store: RemoteStore, team_id: str) -> dict | None:

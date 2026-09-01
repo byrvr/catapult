@@ -78,7 +78,12 @@ struct Device: Codable, Hashable, Identifiable, Sendable {
     }
 
     var setupActionTitle: String {
-        needsFirstSetup ? "Setup" : "Connect"
+        // An untrusted USB iPhone/iPad is "set up" by trusting this Mac; the
+        // backend asks the device to show its Trust prompt.
+        if needsTrust && service == "usbmux" {
+            return "Trust"
+        }
+        return needsFirstSetup ? "Setup" : "Connect"
     }
 
     var canRunSetup: Bool {
@@ -454,6 +459,9 @@ struct StoreApp: Codable, Hashable, Identifiable, Sendable {
     let prerelease: Bool
     let installedVersion: String?
     let updateAvailable: Bool?
+    /// Per selected device: whether the daily store check may update this app.
+    let autoUpdate: Bool?
+    let pinned: Bool?
 
     var id: String { appKey }
 
@@ -464,6 +472,8 @@ struct StoreApp: Codable, Hashable, Identifiable, Sendable {
         case iconUrl = "icon_url"
         case installedVersion = "installed_version"
         case updateAvailable = "update_available"
+        case autoUpdate = "auto_update"
+        case pinned
     }
 
     var isInstalled: Bool { !(installedVersion ?? "").isEmpty }

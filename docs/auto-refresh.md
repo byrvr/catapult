@@ -97,9 +97,13 @@ profile carries the 7-day clock. Catapult persists the certificate and key in
 the Keychain and reuses them while Apple still lists the certificate and expiry
 is more than 7 days out.
 
-Revoking is explicit and user-initiated. It used to happen on every refresh,
-which invalidated the certificate belonging to any other machine or tool on the
-same Apple ID — Xcode, AltStore, a second Mac.
+When no usable certificate is stored, Catapult submits a certificate request
+first and revokes existing certificates only if Apple answers that the slot is
+taken (result code 7460), then retries once. On a paid team the revocation is
+limited to certificates Catapult itself created. Revoking used to happen up
+front on every refresh, which invalidated the certificate belonging to any
+other machine or tool on the same Apple ID — Xcode, AltStore, a second Mac —
+and two Catapult Macs on one Apple ID took turns doing it to each other.
 
 Note Apple's free-tier limits, which a scheduled loop can otherwise exhaust:
 10 App ID registrations per 7 days, 3 test devices per platform, 3 active apps.
