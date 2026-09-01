@@ -119,3 +119,96 @@ async def test_unlock_reports_when_there_is_no_vault(store, monkeypatch, tmp_pat
     result = await sync.unlock_vault(TEAM, recoverykey.encode(recoverykey.generate()))
 
     assert result["status"] == "needs_setup"
+
+
+async def test_legacy_key_opens_a_vault_another_mac_migrated(store, monkeypatch):
+    """Two Macs shared CATAPULT_SYNC_KEY. Mac #1 migrated it into a vault; Mac #2
+    still only has the legacy key. That key IS the data key, so Mac #2 must not
+    be reported locked with no recovery key to enter."""
+    legacy = b"L" * 32
+    monkeypatch.setattr(sync, "legacy_sync_key", lambda: legacy)
+    recovery_key = recoverykey.generate()
+    doc = {
+        "vault_format": sync.VAULT_FORMAT,
+        "team_id": TEAM,
+        "migrated_from": "CATAPULT_SYNC_KEY",
+        "wrap": sync.wrap_data_key(legacy, recovery_key, TEAM),
+    }
+    await store.put(sync._vault_key(TEAM), json.dumps(doc).encode())
+
+    assert await sync.open_vault(store, TEAM) == ("ok", legacy)
+
+
+@pytest.fixture
+def configured(store, monkeypatch):
+    """create_vault() reads the config only to find its store."""
+    monkeypatch.setattr(sync.SyncConfig, "load", classmethod(lambda cls: object()))
+    monkeypatch.setattr(sync, "_store_from_config", lambda config: store)
+    return store
+
+
+async def test_create_vault_refuses_to_overwrite_an_existing_vault(configured):
+    """The descriptor holds the only wrap of the data key. One unconfirmed click
+    used to overwrite it, lock every other Mac out, and leave the old manifest
+    undecryptable so every later sync reported wrong_key."""
+    first = await sync.create_vault("me@example.com", TEAM)
+    assert first["status"] == "ok"
+    await configured.put(sync._manifest_key(TEAM), b"manifest-under-the-first-key")
+
+    second = await sync.create_vault("me@example.com", TEAM)
+
+    assert second["status"] == "exists"
+    assert await configured.get(sync._manifest_key(TEAM)) == b"manifest-under-the-first-key"
+
+
+async def test_replacing_a_vault_keeps_the_old_one_aside(configured):
+    first = await sync.create_vault("me@example.com", TEAM)
+    await configured.put(sync._manifest_key(TEAM), b"old-manifest")
+    await configured.put(sync._ipa_key(TEAM, "ab" * 32), b"old-blob")
+
+    replaced = await sync.create_vault("me@example.com", TEAM, replace=True)
+
+    assert replaced["status"] == "ok"
+    assert replaced["recovery_key"] != first["recovery_key"]
+    # The new vault starts empty, so the next sync re-uploads from the local vault...
+    assert await configured.get(sync._manifest_key(TEAM)) is None
+    assert not await configured.exists(sync._ipa_key(TEAM, "ab" * 32))
+    # ...and nothing was destroyed.
+    kept = [p for p in (configured.root / "teams").iterdir() if p.name.startswith(f"{TEAM}.replaced-")]
+    assert len(kept) == 1
+    assert (kept[0] / "manifest.json.enc").read_bytes() == b"old-manifest"
+    # This Mac holds the new key and can open the new vault.
+    state, _ = await sync.open_vault(configured, TEAM)
+    assert state == "ok"
+
+
+@pytest.fixture
+def folder_config(store, monkeypatch):
+    from types import SimpleNamespace
+
+    config = SimpleNamespace(
+        provider="folder", folder=store.root, configured=True, r2_endpoint="", r2_bucket=""
+    )
+    monkeypatch.setattr(sync.SyncConfig, "load", classmethod(lambda cls: config))
+    return config
+
+
+async def test_status_reports_needs_setup_before_any_vault_exists(store, folder_config):
+    """Mac #1's first run. The pane used to say "This vault is locked, paste the
+    key from your other Mac" and hide the Create vault button."""
+    assert sync.status("me@example.com", TEAM)["vault_state"] == "needs_setup"
+
+
+async def test_status_reports_locked_when_the_vault_exists_without_a_key(store, folder_config):
+    doc, _, _ = sync.new_vault(TEAM)
+    await store.put(sync._vault_key(TEAM), json.dumps(doc).encode())
+
+    assert sync.status("me@example.com", TEAM)["vault_state"] == "locked"
+
+
+async def test_status_reports_ok_once_the_key_is_cached(store, folder_config):
+    doc, _, recovery_key = sync.new_vault(TEAM)
+    await store.put(sync._vault_key(TEAM), json.dumps(doc).encode())
+    sync.cache_recovery_key(TEAM, recovery_key)
+
+    assert sync.status("me@example.com", TEAM)["vault_state"] == "ok"

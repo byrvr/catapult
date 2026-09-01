@@ -251,8 +251,12 @@ def normalize_source(raw_url: str) -> Source:
     if not value:
         raise ValueError("Enter a GitHub repository or a source URL")
 
+    # Accept the repository itself, a bare owner/repo, and the releases or tags
+    # pages people naturally copy out of the address bar.
     match = re.match(
-        r"^(?:https?://github\.com/)?([\w.-]+)/([\w.-]+?)(?:\.git)?/?$", value
+        r"^(?:https?://github\.com/)?([\w.-]+)/([\w.-]+?)(?:\.git)?"
+        r"(?:/(?:releases|tags)(?:/.*)?)?/?$",
+        value,
     )
     if match and "/" in value:
         owner, repo = match.group(1), match.group(2)
@@ -423,7 +427,10 @@ async def download_to(url: str, dest: Path, *, expected_sha256: str = "") -> Pat
     digest = hashlib.sha256()
     tmp = dest.with_suffix(dest.suffix + ".part")
     try:
-        async with httpx.AsyncClient(timeout=None, follow_redirects=True) as client:
+        # No total timeout (IPAs are large and links can be slow), but a stalled
+        # connection or a silent server must not hang the install forever.
+        timeout = httpx.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0)
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
             async with client.stream("GET", url) as response:
                 response.raise_for_status()
                 with tmp.open("wb") as f:

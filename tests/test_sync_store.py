@@ -165,12 +165,27 @@ def test_status_is_not_locked_when_a_legacy_key_is_still_configured(tmp_path, mo
     assert sync.status(team_id=TEAM)["vault_state"] == "ok"
 
 
-def test_status_is_locked_without_any_key(tmp_path, monkeypatch):
+def _folder_without_a_key(tmp_path, monkeypatch):
     monkeypatch.setattr(sync, "CONFIG_PATH", tmp_path / "sync.json")
     monkeypatch.setattr(sync, "CONFIG_ENV_PATH", tmp_path / "absent.env")
     monkeypatch.setenv("CATAPULT_SYNC_PROVIDER", "folder")
     monkeypatch.setenv("CATAPULT_SYNC_FOLDER", str(tmp_path / "vault"))
     monkeypatch.delenv("CATAPULT_SYNC_KEY", raising=False)
     monkeypatch.setattr(sync, "cached_recovery_key", lambda team: None)
+
+
+def test_status_needs_setup_when_the_folder_holds_no_vault(tmp_path, monkeypatch):
+    """No vault anywhere is Mac #1's first run, not a locked vault. Reporting
+    "locked" here hid the Create vault button behind a paste field."""
+    _folder_without_a_key(tmp_path, monkeypatch)
+
+    assert sync.status(team_id=TEAM)["vault_state"] == "needs_setup"
+
+
+def test_status_is_locked_when_a_vault_exists_without_any_key(tmp_path, monkeypatch):
+    _folder_without_a_key(tmp_path, monkeypatch)
+    descriptor = tmp_path / "vault" / "teams" / TEAM / "vault.json"
+    descriptor.parent.mkdir(parents=True)
+    descriptor.write_text("{}")
 
     assert sync.status(team_id=TEAM)["vault_state"] == "locked"

@@ -232,10 +232,17 @@ final class AppState: ObservableObject {
 
     /// Returns the recovery key exactly once, for display. It is never stored
     /// in app state — losing it is recoverable, leaking it is not.
-    func createVault() async throws -> String? {
-        let response = try await client.createVault()
+    func createVault(replace: Bool = false) async throws -> String? {
+        let response = try await client.createVault(replace: replace)
         await loadSyncStatus()
         return response.recoveryKey
+    }
+
+    /// The key this Mac already holds — for a user who lost the copy they
+    /// saved, or whose vault was migrated from CATAPULT_SYNC_KEY in the
+    /// background with nobody there to see the key.
+    func showRecoveryKey() async throws -> String? {
+        try await client.recoveryKey().recoveryKey
     }
 
     func unlockVault(recoveryKey: String) async throws {
@@ -490,11 +497,18 @@ extension AppState {
         if isLoadingStore && !force { return }
         isLoadingStore = true
         defer { isLoadingStore = false }
-        storeSources = (try? await client.storeSources())?.sources ?? []
-        if let catalog = try? await client.storeApps(deviceUDID: selectedDevice?.udid) {
+        do {
+            storeSources = try await client.storeSources().sources
+            let catalog = try await client.storeApps(deviceUDID: selectedDevice?.udid)
             storeApps = catalog.apps
             storeErrors = catalog.errors
             storeFreeTeam = catalog.freeTeam
+        } catch is CancellationError {
+            // The tab was left before the reply came back; keep what we had.
+        } catch {
+            // Keep the last known sources and apps rather than flashing an
+            // empty "No sources yet" state, and say what actually went wrong.
+            show(error)
         }
     }
 
@@ -527,6 +541,11 @@ extension AppState {
             try await client.storeInstall(appKey: app.appKey, deviceUDID: device.udid) { message in
                 self.installMessage = message.message
                 self.installProgress = message.progress
+                if message.step == "error" {
+                    // The stream ends quietly on this step; without this the
+                    // Store tab showed nothing at all when an install failed.
+                    self.errorMessage = message.message
+                }
             }
             await loadStore(force: true)
         } catch {

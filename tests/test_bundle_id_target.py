@@ -11,14 +11,7 @@ installd to replace an App Store app. installd refuses:
 """
 
 
-def choose_target_bundle_id(
-    *, original_bundle_id: str, legacy_bundle_id: str,
-    installed_bundle_id: str | None, recorded_bundle_id: str | None,
-) -> str:
-    """Mirror of the selection in server.py's install flow."""
-    if installed_bundle_id == original_bundle_id and not recorded_bundle_id:
-        installed_bundle_id = None
-    return installed_bundle_id or recorded_bundle_id or legacy_bundle_id
+from catapult.refresh import choose_target_bundle_id
 
 
 ORIGINAL = "com.google.ios.youtube"
@@ -77,6 +70,21 @@ def test_namespaces_a_clean_first_install():
         legacy_bundle_id=LEGACY,
         installed_bundle_id=None,
         recorded_bundle_id=None,
+    )
+
+    assert target == LEGACY
+
+
+def test_second_install_still_avoids_the_app_store_copy():
+    """Regression: the device lookup returns the App Store copy first even when
+    Catapult's own copy is installed too. Once an install had been recorded,
+    the old guard ("no record at all") stopped firing, and every later install
+    or Store update targeted the App Store bundle ID again — IXErrorDomain 46."""
+    target = choose_target_bundle_id(
+        original_bundle_id=ORIGINAL,
+        legacy_bundle_id=LEGACY,
+        installed_bundle_id=ORIGINAL,   # lookup found the App Store copy
+        recorded_bundle_id=LEGACY,      # we installed alongside it before
     )
 
     assert target == LEGACY

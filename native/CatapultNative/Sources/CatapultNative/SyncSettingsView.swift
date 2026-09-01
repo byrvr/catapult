@@ -15,6 +15,7 @@ struct SyncSettingsView: View {
     @State private var busy = false
     @State private var message: String?
     @State private var isError = false
+    @State private var confirmReplace = false
 
     var body: some View {
         ScrollView {
@@ -118,6 +119,12 @@ struct SyncSettingsView: View {
                 Button("Create vault") { Task { await createVault() } }
                     .disabled(busy)
 
+            case "needs_icloud":
+                Label("iCloud Drive is turned off. Turn it on in System Settings, or choose another folder above.",
+                      systemImage: CatapultIcon.warning)
+                    .font(.caption)
+                    .foregroundStyle(Color.orange)
+
             case "locked", "wrong_key":
                 Text("This vault is locked. Paste the recovery key from your other Mac.")
                     .font(.caption)
@@ -130,15 +137,31 @@ struct SyncSettingsView: View {
                     Button("Unlock") { Task { await unlock() } }
                         .disabled(busy || enteredKey.isEmpty)
                 }
-                Button("Start a new vault instead") { Task { await createVault() } }
+                Button("Start a new vault instead…") { confirmReplace = true }
                     .buttonStyle(.link)
                     .font(.caption)
+                    .confirmationDialog(
+                        "Replace the vault?",
+                        isPresented: $confirmReplace,
+                        titleVisibility: .visible
+                    ) {
+                        Button("Replace vault", role: .destructive) {
+                            Task { await createVault(replace: true) }
+                        }
+                        Button("Cancel", role: .cancel) {}
+                    } message: {
+                        Text("A new recovery key is minted and every other Mac is locked out until you enter it there. The old vault is kept beside the new one as a backup.")
+                    }
 
             default:
                 Label("Vault unlocked on this Mac.", systemImage: CatapultIcon.ready)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Button("Sync now") { Task { await runSync() } }
+                    .disabled(busy)
+                Button("Show recovery key…") { Task { await showRecoveryKey() } }
+                    .buttonStyle(.link)
+                    .font(.caption)
                     .disabled(busy)
             }
         }
@@ -189,12 +212,26 @@ struct SyncSettingsView: View {
         }
     }
 
-    private func createVault() async {
+    private func createVault(replace: Bool = false) async {
         busy = true
         defer { busy = false }
         do {
-            if let key = try await state.createVault() {
+            if let key = try await state.createVault(replace: replace) {
                 recoveryKeyToShow = key
+            }
+        } catch {
+            show(error.localizedDescription, error: true)
+        }
+    }
+
+    private func showRecoveryKey() async {
+        busy = true
+        defer { busy = false }
+        do {
+            if let key = try await state.showRecoveryKey() {
+                recoveryKeyToShow = key
+            } else {
+                show("This Mac does not hold a recovery key for the vault.", error: true)
             }
         } catch {
             show(error.localizedDescription, error: true)
@@ -253,11 +290,12 @@ private struct IdentifiedKey: Identifiable {
     }
 }
 
-/// Shown exactly once, when a vault is created.
+/// Shown when a vault is created, and on request from the settings pane.
 private struct RecoveryKeySheet: View {
     let key: String
     @Binding var acknowledged: Bool
     let onDone: () -> Void
+    @State private var saveError: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -286,6 +324,11 @@ private struct RecoveryKeySheet: View {
                 } label: {
                     Label("Save to a file…", systemImage: CatapultIcon.chooseFile)
                 }
+            }
+            if let saveError {
+                Label(saveError, systemImage: CatapultIcon.warning)
+                    .font(.caption)
+                    .foregroundStyle(Color.orange)
             }
 
             Text("If you lose it, you can still start a new vault — your IPAs are also stored on this Mac.")
@@ -318,6 +361,13 @@ private struct RecoveryKeySheet: View {
         Enter this on another Mac under Settings > Sync to open the same vault.
         Catapult cannot recover this key for you.
         """
-        try? body.write(to: url, atomically: true, encoding: .utf8)
+        do {
+            try body.write(to: url, atomically: true, encoding: .utf8)
+            saveError = nil
+        } catch {
+            // Silently failing here let the user tick "I saved my recovery key"
+            // believing a file existed that was never written.
+            saveError = "Could not save the file: \(error.localizedDescription)"
+        }
     }
 }

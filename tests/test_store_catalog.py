@@ -177,6 +177,18 @@ def test_normalizes_a_github_url_with_trailing_slash_and_git():
     assert store.normalize_source("https://github.com/VortXTV/VortX.git/").id == "github:VortXTV/VortX"
 
 
+def test_normalizes_a_github_releases_page_url():
+    """The releases page is what people copy from the address bar. It used to be
+    misread as an AltStore JSON source and fail with an opaque decode error."""
+    assert store.normalize_source("https://github.com/VortXTV/VortX/releases").id == "github:VortXTV/VortX"
+    assert store.normalize_source("https://github.com/VortXTV/VortX/releases/tag/v1.0").id == "github:VortXTV/VortX"
+
+
+def test_a_github_file_url_is_still_an_altstore_source():
+    """A source JSON hosted in a repository is not a releases feed."""
+    assert store.normalize_source("https://github.com/o/r/blob/main/apps.json").kind == "altstore"
+
+
 def test_treats_other_urls_as_altstore_sources():
     source = store.normalize_source("https://example.com/apps.json")
 

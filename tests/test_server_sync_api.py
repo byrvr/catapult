@@ -97,3 +97,81 @@ def test_wake_command_is_returned_not_executed(client):
 
 def test_wake_command_validates_the_time(client):
     assert client.get("/api/power/wake-command", params={"hour": 99}).status_code == 400
+
+
+class _Session:
+    authenticated = True
+    apple_id = "me@example.com"
+
+
+def test_recovery_key_requires_authentication(client):
+    assert client.get("/api/sync/recovery-key").status_code == 401
+
+
+def test_sync_run_reports_informational_states_as_200(client, monkeypatch):
+    """A 500 made the Swift client throw and drop the body, so the settings pane
+    never learned it should show the unlock or create-vault controls."""
+    monkeypatch.setattr(server.auth_client, "session", _Session(), raising=False)
+
+    async def locked():
+        return {"status": "locked", "vault_state": "locked", "provider": "folder", "configured": True}
+
+    monkeypatch.setattr(server, "_sync_authenticated_state", locked)
+
+    response = client.post("/api/sync/run")
+
+    assert response.status_code == 200
+    assert response.json()["vault_state"] == "locked"
+
+
+def test_sync_run_still_reports_failures_as_500(client, monkeypatch):
+    monkeypatch.setattr(server.auth_client, "session", _Session(), raising=False)
+
+    async def failed():
+        return {"status": "error", "message": "boom"}
+
+    monkeypatch.setattr(server, "_sync_authenticated_state", failed)
+
+    assert client.post("/api/sync/run").status_code == 500
+
+
+def test_create_vault_refuses_to_overwrite_without_confirmation(client, monkeypatch):
+    monkeypatch.setattr(server.auth_client, "session", _Session(), raising=False)
+
+    async def team():
+        return "ABCDE12345"
+
+    monkeypatch.setattr(server, "_current_team_id", team)
+    seen = {}
+
+    async def fake_create(apple_id, team_id, *, replace=False):
+        seen["replace"] = replace
+        return {"status": "exists", "message": "A vault already exists here."}
+
+    monkeypatch.setattr(server._sync, "create_vault", fake_create)
+
+    response = client.post("/api/sync/create-vault")
+
+    assert response.status_code == 409
+    assert seen["replace"] is False
+
+
+def test_create_vault_passes_the_confirmed_replace_flag(client, monkeypatch):
+    monkeypatch.setattr(server.auth_client, "session", _Session(), raising=False)
+
+    async def team():
+        return "ABCDE12345"
+
+    monkeypatch.setattr(server, "_current_team_id", team)
+    seen = {}
+
+    async def fake_create(apple_id, team_id, *, replace=False):
+        seen["replace"] = replace
+        return {"status": "ok", "recovery_key": "CAT1-TEST", "message": ""}
+
+    monkeypatch.setattr(server._sync, "create_vault", fake_create)
+
+    response = client.post("/api/sync/create-vault", json={"replace": "true"})
+
+    assert response.status_code == 200
+    assert seen["replace"] is True

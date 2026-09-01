@@ -10,6 +10,8 @@
 - Device scanning no longer re-triggers the Trust dialog on every poll.
 - A slow or failed network scan no longer hides devices that are plugged in.
 - Device registration uses the UDID reported by the device rather than the usbmux list serial.
+- Running Setup for an Apple TV no longer marks every Wi-Fi iPhone and iPad on the network as ready to install.
+- Installing to a Wi-Fi iPhone or iPad that advertises the Apple TV pairing service now says it needs one cable pairing, instead of prompting for an admin password and polling for a tunnel that never comes.
 
 ### Auto-refresh
 
@@ -19,6 +21,8 @@
 - Catapult reuses its signing certificate instead of revoking every certificate on the account hourly, which used to break Xcode, AltStore, and any second Mac. Certificates are valid for a year; only the profile expires weekly.
 - App IDs are looked up before being registered, so a scheduled refresh cannot exhaust Apple's limit of 10 registrations per 7 days.
 - A power assertion is held across each refresh so it cannot be suspended mid-signing.
+- Installing an app that is also installed from the App Store no longer tries to replace the App Store copy on the second and later installs.
+- Settings → Sync shows the `pmset repeat wake` command for scheduling a nightly wake, so refreshes can run while the Mac sleeps.
 
 ### Cross-device sync
 
@@ -29,6 +33,24 @@
 - Writes are staged outside the synced folder, so a partial upload is no longer pushed to your other Macs.
 - Existing `CATAPULT_SYNC_KEY` vaults are adopted automatically with no re-upload.
 - Removed the DMG option that embedded R2 credentials in the disk image.
+- "Start a new vault" asks for confirmation and keeps the old vault beside the new one, instead of silently overwriting the vault descriptor and leaving every Mac reporting a wrong key.
+- A first Mac now sees "Create vault" instead of "This vault is locked" when the sync folder has no vault yet.
+- A Mac that still uses the old `CATAPULT_SYNC_KEY` can open a vault another Mac migrated from that key, and Settings → Sync can show the recovery key this Mac holds.
+- A failed sync no longer blanks the Developer Account view.
+
+### Store
+
+- New Store tab: add a GitHub repository (or its releases page) or an AltStore source, see the builds that fit the selected device, and install or update them through the normal signing pipeline. Repositories that publish several apps under fixed tags are supported.
+- Store installs show progress and errors on the Store tab.
+
+### Apple TV tunnel
+
+- Catapult no longer asks for an admin password on every tunnel. A wedged tunneld is recovered through its local control endpoints, and the hourly refresh never installs the daemon.
+- A background refresh that finds tunneld missing no longer blocks the next Setup click for a minute.
+
+### Signing
+
+- Nested app extensions and frameworks are signed under their own bundle identifiers.
 
 ## 0.3.8 - 2026-07-17
 

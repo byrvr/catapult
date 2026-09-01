@@ -123,3 +123,56 @@ def test_mdns_ipad_is_still_downgraded():
 
     assert mdns_ipad["service"] in INSTALLABLE_SERVICES
     assert merged_class not in TUNNEL_DEVICE_CLASSES
+
+
+class _FakeMux:
+    serial = "00008030-000A1B2C3D4E5F60"
+    connection_type = "USB"
+
+
+def _fake_usbmux(monkeypatch, *, paired: bool):
+    import pymobiledevice3.lockdown as lockdown_mod
+    import pymobiledevice3.usbmux as usbmux_mod
+
+    class FakeLockdown:
+        def __init__(self):
+            self.paired = paired
+
+        async def get_value(self, key=None):
+            # lockdown answers the basic keys before pairing, trusted or not.
+            return {"ProductType": "iPad13,4", "DeviceClass": "iPad", "DeviceName": "Tablet"}.get(key)
+
+    async def list_devices():
+        return [_FakeMux()]
+
+    async def create_using_usbmux(**kwargs):
+        assert kwargs.get("autopair") is False, "discovery must never trigger the Trust dialog"
+        return FakeLockdown()
+
+    monkeypatch.setattr(usbmux_mod, "list_devices", list_devices)
+    monkeypatch.setattr(lockdown_mod, "create_using_usbmux", create_using_usbmux)
+
+
+async def test_untrusted_usb_device_is_not_reported_installable(monkeypatch):
+    """create_using_usbmux(autopair=False) returns a client for an UNTRUSTED
+    device without raising, so 'the call succeeded' meant every plugged-in
+    iPhone was reported trusted and installable. Only a validated pair record
+    counts."""
+    _fake_usbmux(monkeypatch, paired=False)
+
+    (device,) = await DeviceManager()._scan_usb_devices()
+
+    assert device["installable"] is False
+    assert device["needs_setup"] is True
+    assert "Trust" in device["setup_hint"]
+    assert device["device_class"] == "ipados"
+
+
+async def test_trusted_usb_device_is_installable(monkeypatch):
+    _fake_usbmux(monkeypatch, paired=True)
+
+    (device,) = await DeviceManager()._scan_usb_devices()
+
+    assert device["installable"] is True
+    assert device["needs_setup"] is False
+    assert device["setup_hint"] == ""

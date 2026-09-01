@@ -48,8 +48,16 @@ struct APIClient: Sendable {
         )
     }
 
-    func createVault() async throws -> RecoveryKeyResponse {
-        try await postJSON("/api/sync/create-vault", body: [String: String](), as: RecoveryKeyResponse.self)
+    func createVault(replace: Bool = false) async throws -> RecoveryKeyResponse {
+        try await postJSON(
+            "/api/sync/create-vault",
+            body: ["replace": replace ? "true" : "false"],
+            as: RecoveryKeyResponse.self
+        )
+    }
+
+    func recoveryKey() async throws -> RecoveryKeyResponse {
+        try await get("/api/sync/recovery-key", as: RecoveryKeyResponse.self)
     }
 
     func unlockVault(recoveryKey: String) async throws -> StatusResponse {

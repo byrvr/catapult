@@ -249,8 +249,11 @@ struct AccountInfo: Codable, Sendable {
 
 struct SyncInfo: Codable, Hashable, Sendable {
     let status: String?
-    let provider: String
-    let configured: Bool
+    /// Optional: the account payload embeds the sync *error* shape
+    /// (`{"status": "error", "message": ...}`) under the same key, and a
+    /// failed sync must not make the whole account view undecodable.
+    let provider: String?
+    let configured: Bool?
     let portableKey: Bool?
     let folder: String?
     let r2Endpoint: String?
@@ -285,7 +288,7 @@ struct SyncInfo: Codable, Hashable, Sendable {
 
     /// Falls back to the pre-vault `status` field so an older backend still renders.
     var resolvedState: String {
-        vaultState ?? status ?? (configured ? "locked" : "disabled")
+        vaultState ?? status ?? ((configured ?? false) ? "locked" : "disabled")
     }
 }
 
