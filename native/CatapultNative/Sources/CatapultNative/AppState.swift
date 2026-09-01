@@ -529,6 +529,20 @@ extension AppState {
         await loadStore(force: true)
     }
 
+    /// Opt an installed store app in or out of the daily update check.
+    func setStoreAutoUpdate(_ app: StoreApp, enabled: Bool) async {
+        guard let device = selectedDevice else {
+            errorMessage = "Select a device first."
+            return
+        }
+        do {
+            _ = try await client.setStoreAutoUpdate(appKey: app.appKey, deviceUDID: device.udid, enabled: enabled)
+            await loadStore(force: true)
+        } catch {
+            show(error)
+        }
+    }
+
     func installFromStore(_ app: StoreApp) async {
         guard let device = selectedDevice else {
             errorMessage = "Select a device first."

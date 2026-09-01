@@ -33,6 +33,8 @@ Scan the local network for Apple devices (4-second mDNS timeout).
 ---
 
 ### `POST /api/devices/setup`
+For an Apple TV: pair (on-screen PIN) if needed, then start the tunnel. For an untrusted USB iPhone or iPad: ask the device to trust this Mac (the Trust prompt appears on the device) and stop there — there is no tunnel to start.
+
 Pair with a device and start a tunnel. Required before installing on Apple TV.
 
 **Request:**
@@ -120,18 +122,31 @@ Submit 2FA verification code.
 
 ## Sync Endpoints
 
+Cross-device sync keeps an encrypted manifest and encrypted IPA blobs in
+storage the user already owns: iCloud Drive or any synced folder by default,
+an S3-compatible bucket as an advanced option. A vault is opened with a
+recovery key. See [cross-device-sync.md](cross-device-sync.md) for the model.
+
 ### `GET /api/sync/status`
-Return the configured cross-device sync provider and whether the current key is
-portable across Macs.
+Configuration snapshot. Performs no network I/O; for a folder vault it reads
+the vault descriptor on disk so a first Mac sees `needs_setup`.
+
+`vault_state` is one of `disabled`, `needs_setup`, `needs_icloud`, `locked`,
+`ok`, `wrong_key`.
 
 **Response:**
 ```json
 {
-  "provider": "r2",
+  "provider": "folder",
   "configured": true,
-  "portable_key": true,
-  "r2_endpoint": "https://example.r2.cloudflarestorage.com",
-  "r2_bucket": "catapult",
+  "vault_state": "ok",
+  "vault_bytes": 412000000,
+  "icloud_available": true,
+  "icloud_path": "/Users/user/Library/Mobile Documents/com~apple~CloudDocs/Catapult",
+  "have_recovery_key": true,
+  "folder": "/Users/user/Library/Mobile Documents/com~apple~CloudDocs/Catapult",
+  "r2_endpoint": "",
+  "r2_bucket": "",
   "apple_id": "user@example.com",
   "team_id": "ABCDE12345"
 }
@@ -139,26 +154,121 @@ portable across Macs.
 
 ---
 
-### `POST /api/sync/run`
-Merge local install state with the encrypted remote manifest, upload missing IPA
-blobs, and download missing IPA blobs.
+### `POST /api/sync/configure`
+Choose where the vault lives. Replaces the old environment variables.
 
-If a provider is configured without a shared recovery key, the endpoint returns
-`needs_key`. If a second Mac uses the wrong key for an existing remote vault, it
-returns `wrong_key`.
+**Request:** `{"provider": "folder" | "r2" | "disabled", "folder": "<path>"}`.
+With `provider: "folder"` and no `folder`, the iCloud Drive path is used; that
+fails with `400 needs_icloud` when iCloud Drive is off. For `r2`, also pass
+`r2_endpoint`, `r2_bucket`, `r2_access_key_id`, `r2_secret_access_key` and
+optionally `region` (default `auto`, which is correct for Cloudflare R2 only).
+Credentials go to the Keychain, not the settings file.
+
+**Response:** the status payload above.
+
+---
+
+### `POST /api/sync/create-vault`
+Create the vault and return the recovery key **once**.
+
+Answers `409` with `{"status": "exists"}` when a vault already exists, unless
+the body carries `{"replace": true}`. Replacing moves the old vault aside to
+`teams/<team_id>.replaced-<timestamp>` and mints a new key; every other Mac is
+locked out until it gets the new key.
+
+**Response:**
+```json
+{"status": "ok", "recovery_key": "CAT1-K7X2M-9QZ4B-T3VHN-8RJ5W-DGP6Y-F", "message": "Save this recovery key. Catapult cannot recover it for you."}
+```
+
+---
+
+### `POST /api/sync/unlock`
+**Request:** `{"recovery_key": "CAT1-…"}`. `200 ok` when the key opens the
+vault; `400` with `wrong_key` or `needs_setup` otherwise.
+
+---
+
+### `GET /api/sync/recovery-key`
+The recovery key this Mac already holds, for a user who lost their copy or
+whose vault was migrated from `CATAPULT_SYNC_KEY` in the background. `404`
+when this Mac holds none. The key only ever travels to the local UI.
+
+---
+
+### `POST /api/sync/run`
+Merge local install state with the encrypted remote manifest, upload missing
+IPA blobs, and download missing IPA blobs. Downloads are decrypted and
+hash-verified before they reach the local vault.
+
+Informational vault states (`needs_setup`, `locked`, `wrong_key`,
+`needs_icloud`) come back with HTTP `200` and the state in `status`; `500` is
+reserved for `error`.
 
 **Response:**
 ```json
 {
   "status": "ok",
+  "vault_state": "ok",
   "provider": "folder",
   "configured": true,
-  "portable_key": true,
   "uploaded_ipas": 1,
   "downloaded_ipas": 0,
-  "install_count": 1
+  "install_count": 1,
+  "vault_bytes": 412000000
 }
 ```
+
+**Refresh lease.** While sync is configured, the hourly refresh cycle takes
+`teams/<team_id>/lease.json` (`{"locked_by", "locked_until", "operation"}`)
+for at most 20 minutes and skips the cycle if another Mac holds a live lease.
+
+---
+
+## Store Endpoints
+
+Sources are GitHub repositories (releases with `.ipa` assets) or AltStore
+`apps.json` URLs, stored in `~/Library/Application Support/Catapult/sources.json`.
+
+### `GET /api/store/sources`
+`{"sources": [{"id", "kind", "url", "include_prerelease", "last_checked_at"}]}`.
+
+### `POST /api/store/sources`
+**Request:** `{"url": "owner/repo" | "https://github.com/owner/repo[/releases]" | "https://…/apps.json"}`.
+The source is fetched once before it is saved; `400` if it cannot be read,
+`409` if it is already added.
+
+### `POST /api/store/sources/remove`
+**Request:** `{"id": "github:owner/repo"}`.
+
+### `POST /api/store/sources/update`
+**Request:** `{"id": "github:owner/repo", "include_prerelease": false}`.
+
+### `GET /api/store/apps?device_udid=…`
+The merged catalog, filtered to builds that fit the selected device. Each app
+carries `installed_version`, `update_available`, `auto_update` and `pinned`
+for **that device**, plus `sha256` when the release publishes a `SHA256SUMS`
+asset (or an AltStore source publishes a digest). Also returns `errors` (per
+source), `device_class`, and `free_team`.
+
+### `POST /api/store/apps/auto-update`
+**Request:** `{"device_udid": "…", "app_key": "…", "enabled": true}`. Opts an
+installed store app in or out of the daily update check; `404` when the app is
+not installed from the Store on that device. Updates install only when the
+device is reachable at check time.
+
+### `WS /ws/store-install`
+**Client → Server:** `{"app_key": "…", "device_udid": "…"}`. Downloads the
+build, verifies it against the published digest when there is one, and hands
+it to the same pipeline as `WS /ws/install`; the progress stream is identical.
+
+---
+
+## Power Endpoints
+
+### `GET /api/power/wake-command?hour=4&minute=15`
+Returns the `sudo pmset repeat wake …` command for a nightly wake so refreshes
+can run while the Mac sleeps. Returned, never executed.
 
 ---
 

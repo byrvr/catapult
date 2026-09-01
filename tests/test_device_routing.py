@@ -176,3 +176,161 @@ async def test_trusted_usb_device_is_installable(monkeypatch):
     assert device["installable"] is True
     assert device["needs_setup"] is False
     assert device["setup_hint"] == ""
+
+
+# ── Trust via Setup ───────────────────────────────────────────────────────────
+
+def _usb_row(udid="USB1", device_class="ipados"):
+    return {
+        "udid": udid, "name": "Tablet", "host": f"usb:{udid}", "port": 62078,
+        "service": "usbmux", "device_class": device_class,
+        "installable": False, "needs_setup": True,
+        "setup_hint": "Unlock this iPad and tap Trust, then scan again.",
+    }
+
+
+async def test_setup_on_an_untrusted_usb_device_requests_pairing(monkeypatch):
+    """Discovery uses autopair=False so scanning never pops the Trust dialog.
+    That leaves exactly one user-initiated place to trigger it: Setup."""
+    import pymobiledevice3.lockdown as lockdown_mod
+
+    seen = {}
+
+    class FakeLockdown:
+        paired = True
+
+    async def create_using_usbmux(**kwargs):
+        seen.update(kwargs)
+        return FakeLockdown()
+
+    monkeypatch.setattr(lockdown_mod, "create_using_usbmux", create_using_usbmux)
+    manager = DeviceManager()
+    manager._cache["USB1"] = _usb_row()
+
+    result = await manager.pair_device(device_udid="USB1")
+
+    assert result["status"] == "ok"
+    assert seen["serial"] == "USB1"
+    assert seen["autopair"] is True
+    assert manager._cache["USB1"]["installable"] is True
+    assert manager._cache["USB1"]["needs_setup"] is False
+
+
+async def test_setup_reports_when_trust_was_declined(monkeypatch):
+    import pymobiledevice3.lockdown as lockdown_mod
+
+    class FakeLockdown:
+        paired = False
+
+    async def create_using_usbmux(**kwargs):
+        return FakeLockdown()
+
+    monkeypatch.setattr(lockdown_mod, "create_using_usbmux", create_using_usbmux)
+    manager = DeviceManager()
+    manager._cache["USB1"] = _usb_row()
+
+    result = await manager.pair_device(device_udid="USB1")
+
+    assert result["status"] == "error"
+    assert "Trust" in result["message"]
+    assert manager._cache["USB1"]["installable"] is False
+
+
+async def test_setup_on_a_wifi_iphone_still_says_to_use_a_cable():
+    manager = DeviceManager()
+    manager._cache["NET1"] = {
+        "udid": "NET1", "name": "Phone", "host": "10.0.0.9", "port": 62078,
+        "service": "_apple-mobdev2._tcp.local.", "device_class": "ios",
+        "installable": False, "needs_setup": True,
+    }
+
+    result = await manager.pair_device(device_udid="NET1")
+
+    assert result["status"] == "error"
+    assert "cable" in result["message"]
+
+
+# ── The cached tunnel belongs to one Apple TV ────────────────────────────────
+
+from types import SimpleNamespace  # noqa: E402
+
+
+def _tv_row(udid, host, name):
+    return {"udid": udid, "name": name, "host": host, "port": 49152,
+            "service": "_remotepairing._tcp.local.", "device_class": "tvos"}
+
+
+def _tunneled(udid="UDID-A"):
+    rsd = FakeRSD(udid=udid, product_type="AppleTV14,1")
+    rsd.service = SimpleNamespace(address=("fd00::1", 49152))
+    return rsd
+
+
+async def test_cached_tunnel_is_reused_for_the_same_apple_tv(monkeypatch):
+    import pymobiledevice3.tunneld.api as api
+
+    manager = DeviceManager()
+    manager._cache["TV-A"] = _tv_row("TV-A", "10.0.0.5", "Living Room")
+    manager._cache_active_tunnel(_tunneled("UDID-A"), manager._cache["TV-A"])
+
+    async def listed(address, port):
+        return True
+
+    async def must_not_dial():
+        raise AssertionError("the cached identity should have been used")
+
+    monkeypatch.setattr(manager, "_tunnel_listed", listed)
+    monkeypatch.setattr(api, "get_tunneld_devices", must_not_dial)
+
+    assert await manager.get_real_udid(device_udid="TV-A") == ("UDID-A", "tvOS")
+
+
+async def test_cached_tunnel_is_not_reused_for_a_different_apple_tv(monkeypatch):
+    """Two Apple TVs, tunnel A cached, user selects B: registering B under A's
+    UDID signs a profile that does not include B, and the install fails."""
+    import pymobiledevice3.tunneld.api as api
+
+    manager = DeviceManager()
+    manager._cache["TV-A"] = _tv_row("TV-A", "10.0.0.5", "Living Room")
+    manager._cache["TV-B"] = _tv_row("TV-B", "10.0.0.6", "Bedroom")
+    manager._cache_active_tunnel(_tunneled("UDID-A"), manager._cache["TV-A"])
+
+    async def listed(address, port):
+        return True
+
+    async def get_tunneld_devices():
+        return [_tunneled("UDID-B")]
+
+    monkeypatch.setattr(manager, "_tunnel_listed", listed)
+    monkeypatch.setattr(api, "get_tunneld_devices", get_tunneld_devices)
+
+    udid, _ = await manager.get_real_udid(device_udid="TV-B")
+
+    assert udid == "UDID-B"
+
+
+async def test_start_tunnel_does_not_answer_already_active_for_another_apple_tv(monkeypatch):
+    manager = DeviceManager()
+    manager._cache["TV-A"] = _tv_row("TV-A", "10.0.0.5", "Living Room")
+    manager._cache["TV-B"] = _tv_row("TV-B", "10.0.0.6", "Bedroom")
+    manager._cache_active_tunnel(_tunneled("UDID-A"), manager._cache["TV-A"])
+    polled = []
+
+    async def listed(address, port):
+        return True
+
+    async def ensure():
+        return True
+
+    async def poll(target, attempts=30):
+        polled.append((target or {}).get("udid"))
+        return True
+
+    monkeypatch.setattr(manager, "_tunnel_listed", listed)
+    monkeypatch.setattr(manager, "_ensure_tunneld", ensure)
+    monkeypatch.setattr(manager, "_poll_for_tunnel", poll)
+
+    result = await manager._start_tunnel_inner(device_udid="TV-B")
+
+    assert result["status"] == "ok"
+    assert polled == ["TV-B"], "must look for B's tunnel instead of trusting A's cache"
