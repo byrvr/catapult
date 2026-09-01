@@ -408,7 +408,13 @@ class DeviceManager:
                         value = None
                     if value:
                         info[key] = str(value)
-                trusted = True
+                # With autopair=False the client also comes back for an
+                # UNTRUSTED device, without raising — lockdown answers the
+                # basic GetValue keys before pairing. Only a validated pair
+                # record makes the device installable.
+                trusted = bool(getattr(lockdown, "paired", False))
+                if not trusted:
+                    logger.info("usbmux device %s is connected but not trusted yet", udid)
             except Exception as e:
                 logger.info("usbmux device %s is visible but not ready: %s", udid, e)
 
@@ -1188,7 +1194,10 @@ echo installed
             )
             if result.get("status") == "ok":
                 self._recent_tunnel_failures.pop(key, None)
-            else:
+            elif not result.get("skipped_escalation"):
+                # A background caller that declined to install the daemon
+                # learned nothing about the device; caching that would hand the
+                # user's next Setup click the same refusal for a minute.
                 self._recent_tunnel_failures[key] = (time.time(), result)
             return result
 
@@ -1562,6 +1571,7 @@ echo installed
                 return {
                     "status": "error",
                     "message": "Apple TV support needs a one-time setup. Open Catapult and press Setup.",
+                    "skipped_escalation": True,
                 }
             result = await self._start_tunneld()
             if result["status"] != "ok":

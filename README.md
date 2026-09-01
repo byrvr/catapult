@@ -68,7 +68,7 @@ The Swift app supervises a local FastAPI backend at `127.0.0.1:9450`. The backen
 
 Installed apps are recorded in `~/.catapult/state.json`. Apple auth secrets are stored in the macOS Keychain where possible; the app uses saved session data so you do not need to sign in every time.
 
-For cross-device recovery, Catapult stores encrypted IPA blobs and an encrypted manifest in storage you already own — your iCloud Drive by default, or any folder your cloud client syncs, or an S3-compatible bucket. A second Mac needs the same Apple ID and one recovery key, which Catapult shows you once when the vault is created.
+For cross-device recovery, Catapult stores encrypted IPA blobs and an encrypted manifest in storage you already own — your iCloud Drive by default, or any folder your cloud client syncs, or an S3-compatible bucket (configured through the local API for now). A second Mac needs the same Apple ID and one recovery key, which Catapult shows when the vault is created and again on request from Settings → Sync.
 
 Sync is configured in Settings → Sync and stored in `~/Library/Application Support/Catapult/sync.json`, so it survives relaunches without any shell environment.
 

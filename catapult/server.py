@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 
 from catapult.apple_auth import AppleAuthClient
 from catapult.developer import DeveloperServices, team_is_free
-from catapult.device import DeviceManager
+from catapult.device import DeviceManager, NEEDS_SETUP_SERVICES
 from catapult.errors import normalize_error, redact_sensitive
 from catapult.ipa import IpaProcessor
 from catapult.jobs import ActivityJob, job_manager
@@ -314,7 +314,15 @@ async def setup_device(payload: dict = None):
             # companion-link/AirPlay row, while the installable row may come from a
             # different mDNS service or a changed pairing identifier after setup.
             for d in device_manager._cache.values():
-                if d.get("needs_setup") or (host and d.get("host") == host):
+                # Only rows the tunnel can actually serve: the selected host and
+                # other Apple TV remotepairing rows. Wi-Fi iPhones/iPads are
+                # needs_setup too, and a tunnel does nothing for them — flipping
+                # them here made every Wi-Fi iPhone "Ready" after one TV setup.
+                is_tunnel_row = (
+                    d.get("service") in NEEDS_SETUP_SERVICES
+                    and d.get("device_class") not in {"ios", "ipados"}
+                )
+                if (host and d.get("host") == host) or (d.get("needs_setup") and is_tunnel_row):
                     d["installable"] = True
                     d["needs_setup"] = False
                     device_manager._tunneled_hosts.add(d["host"])
@@ -373,6 +381,33 @@ async def sync_status():
         return _sync.status(session.apple_id, "")
 
 
+@app.get("/api/sync/recovery-key")
+async def sync_recovery_key():
+    """Show the recovery key this Mac already holds, on demand.
+
+    Covers the CATAPULT_SYNC_KEY migration, which mints a recovery key in the
+    background with nobody there to see it, and the plain lost-the-paper case.
+    The key only ever travels to the local UI.
+    """
+    session = auth_client.session
+    if not session or not session.authenticated:
+        return JSONResponse({"status": "error", "message": "Not authenticated"}, status_code=401)
+    team_id = await _current_team_id()
+    if not team_id:
+        return JSONResponse({"status": "error", "message": "No team available"}, status_code=400)
+    key = _sync.recovery_key_for_display(team_id)
+    if key is None:
+        return JSONResponse(
+            {"status": "locked", "message": "This Mac does not hold a recovery key for the vault."},
+            status_code=404,
+        )
+    return {
+        "status": "ok",
+        "recovery_key": key,
+        "message": "Keep this key private. Anyone holding it can open the vault.",
+    }
+
+
 async def _current_team_id() -> str:
     session = auth_client.session
     if not session or not session.authenticated:
@@ -426,19 +461,28 @@ async def configure_sync(payload: dict = None):
 
 
 @app.post("/api/sync/create-vault")
-async def create_vault():
-    """Create a vault and return the recovery key ONCE, for display."""
+async def create_vault(payload: dict = None):
+    """Create a vault and return the recovery key ONCE, for display.
+
+    Answers 409 when a vault already exists unless the body carries
+    ``replace: true``; the settings pane asks for confirmation before sending
+    that, because replacing locks every other Mac out.
+    """
     session = auth_client.session
     if not session or not session.authenticated:
         return JSONResponse({"status": "error", "message": "Not authenticated"}, status_code=401)
     team_id = await _current_team_id()
     if not team_id:
         return JSONResponse({"status": "error", "message": "No team available"}, status_code=400)
+    replace = str((payload or {}).get("replace", "")).lower() in {"1", "true", "yes"}
     try:
-        return await _sync.create_vault(session.apple_id, team_id)
+        result = await _sync.create_vault(session.apple_id, team_id, replace=replace)
     except Exception as e:
         logger.exception("Could not create sync vault")
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+    if result.get("status") == "exists":
+        return JSONResponse(result, status_code=409)
+    return result
 
 
 @app.post("/api/sync/unlock")
@@ -490,7 +534,10 @@ async def run_sync():
     if not session or not session.authenticated:
         return JSONResponse({"status": "error", "message": "Not authenticated"}, status_code=401)
     result = await _sync_authenticated_state()
-    status_code = 200 if result.get("status") in {"ok", "disabled", "skipped"} else 500
+    # Informational vault states are a normal answer, not a server failure. A
+    # 500 made the client throw and drop the body, so the settings pane never
+    # learned it should show the unlock or create-vault controls.
+    status_code = 500 if result.get("status") == "error" else 200
     return JSONResponse(result, status_code=status_code)
 
 
@@ -1165,6 +1212,15 @@ async def _install_app(
             f"the tunnel. Details: {e}"
         ) from e
     if "remotepairing" in device_info.get("service", ""):
+        if device_info.get("device_class") in {"ios", "ipados"}:
+            # A Wi-Fi iPhone or iPad advertises _remotepairing too, but tunneld
+            # cannot serve it. Say so before start_tunnel() fires an admin
+            # prompt and a multi-minute poll for a tunnel that never comes.
+            raise RuntimeError(
+                f"{device_info.get('name') or 'This device'} is on the network, but this Mac "
+                "has not been paired with it. Connect it with a cable once, unlock it, "
+                "and tap Trust — after that it also works over Wi-Fi."
+            )
         tunnel = await device_manager.start_tunnel(
             device_udid=device_udid,
             device_host=device_info.get("host", ""),
@@ -1216,26 +1272,26 @@ async def _install_app(
         [original_bundle_id, legacy_bundle_id],
     )
     installed_bundle_id = installed_app.get("bundle_id") if installed_app else None
-    if installed_bundle_id == original_bundle_id and not recorded_bundle_id:
+    target_bundle_id = _refresh.choose_target_bundle_id(
+        original_bundle_id=original_bundle_id,
+        legacy_bundle_id=legacy_bundle_id,
+        installed_bundle_id=installed_bundle_id,
+        recorded_bundle_id=recorded_bundle_id,
+    )
+    if installed_bundle_id == original_bundle_id and target_bundle_id != original_bundle_id:
         # The copy on the device carries the app's real bundle ID and Catapult
-        # has no record of installing it — so it is the App Store build. A
-        # development-signed build cannot replace it: installd rejects the
-        # install with IXErrorDomain 46, "a coordinated app install already
-        # exists ... (creator App Store)". Fall through to the namespaced ID and
-        # install alongside it instead.
+        # never installed it under that ID — so it is the App Store build. A
+        # development-signed build cannot replace it (IXErrorDomain 46, "a
+        # coordinated app install already exists ... (creator App Store)");
+        # install alongside it under the namespaced ID instead.
         logger.info(
-            "%s is already installed by the App Store — installing under the "
-            "Catapult bundle ID instead of trying to replace it",
+            "%s is already installed by the App Store — installing under %s "
+            "instead of trying to replace it",
             original_bundle_id,
+            target_bundle_id,
         )
         installed_bundle_id = None
         installed_app = None
-
-    target_bundle_id = (
-        installed_bundle_id
-        or recorded_bundle_id
-        or legacy_bundle_id
-    )
     if installed_app and target_bundle_id != original_bundle_id:
         await progress(
             "signing",
