@@ -67,12 +67,7 @@ async def _on_startup():
     if restored and auth_client.session:
         asyncio.create_task(_sync_authenticated_state())
     # Start opportunistic auto-refresh background loop.
-    def _components():
-        return (
-            device_manager, auth_client, dev_services, signer, ipa_processor, job_manager,
-            _install_store_app,
-        )
-    asyncio.create_task(_refresh.run_refresh_loop(_components))
+    asyncio.create_task(_refresh.run_refresh_loop(_server_components))
 
     # Warm the first device scan off the request path: right after boot it
     # competes with session restore and tunneld startup and can run well past
@@ -461,6 +456,7 @@ async def configure_sync(payload: dict = None):
         r2_bucket=payload.get("r2_bucket") or "",
         r2_access_key_id=payload.get("r2_access_key_id") or "",
         r2_secret_access_key=payload.get("r2_secret_access_key") or "",
+        region=(payload.get("region") or "auto"),
     )
     config.save()
     logger.info("Sync configured: provider=%s", provider)
@@ -1192,6 +1188,8 @@ async def _install_app(
     ipa_path: str,
     progress,
     device_name_hint: str = "",
+    *,
+    allow_escalation: bool = True,
 ):
     session = auth_client.session
 
@@ -1234,6 +1232,7 @@ async def _install_app(
         tunnel = await device_manager.start_tunnel(
             device_udid=device_udid,
             device_host=device_info.get("host", ""),
+            allow_escalation=allow_escalation,
         )
         if tunnel.get("status") != "ok":
             raise RuntimeError(tunnel.get("message") or "Apple TV tunnel is not ready.")
@@ -1250,6 +1249,7 @@ async def _install_app(
         real_udid, sub_platform = await device_manager.get_real_udid(
             device_udid=device_udid,
             device_host=device_info.get("host", ""),
+            allow_escalation=allow_escalation,
         )
 
     # 2. Team + certificate
@@ -1360,7 +1360,7 @@ async def _install_app(
 
     # 6. Install
     await progress("installing", 80, f"Installing to {device_info['name']}...")
-    await device_manager.install(device_udid, signed_path)
+    await device_manager.install(device_udid, signed_path, allow_escalation=allow_escalation)
 
     logger.info(
         "Install complete: %s signed as %s → %s",
@@ -1642,11 +1642,15 @@ async def set_store_auto_update(payload: dict = None):
     return {"status": "ok", "auto_update": enabled}
 
 
-async def _install_store_app(device_udid: str, app: "_store.StoreApp", report) -> dict:
+async def _install_store_app(
+    device_udid: str, app: "_store.StoreApp", report, *, allow_escalation: bool = True
+) -> dict:
     """Download a catalog app and hand it to the normal install pipeline.
 
     Shared by the Store tab's install socket and the daily update check, so
-    both verify the published checksum and record the store origin the same way.
+    both verify the published checksum and record the store origin the same
+    way. The daily check passes allow_escalation=False: nobody is there to
+    answer an admin-password prompt.
     """
     await report("download", 5, f"Downloading {app.name} {app.version}...")
     downloads = Path.home() / ".catapult" / "downloads"
@@ -1654,9 +1658,25 @@ async def _install_store_app(device_udid: str, app: "_store.StoreApp", report) -
     await _store.download_to(app.download_url, target, expected_sha256=app.sha256)
 
     await report("download", 20, "Verifying..." if app.sha256 else "Preparing...")
-    result = await _install_app(device_udid, str(target), report)
+    result = await _install_app(device_udid, str(target), report, allow_escalation=allow_escalation)
     _refresh.tag_store_install(device_udid, str(target), app.app_key, app.version)
     return result
+
+
+def _server_components():
+    """What the refresh loop needs from the server.
+
+    The store installer it gets never escalates: an unattended daily check
+    must not pop an admin-password dialog, so a device whose tunnel needs the
+    daemon installed is simply skipped until someone presses Setup.
+    """
+    async def background_store_install(device_udid, app, report):
+        return await _install_store_app(device_udid, app, report, allow_escalation=False)
+
+    return (
+        device_manager, auth_client, dev_services, signer, ipa_processor, job_manager,
+        background_store_install,
+    )
 
 
 async def _resolve_store_app(app_key: str) -> "_store.StoreApp | None":
