@@ -662,6 +662,8 @@ class DeviceManager:
         and are paired by plugging them in and tapping Trust.
         """
         known = self._cache.get(device_udid or "") or {}
+        if known.get("service") == "usbmux" and not known.get("installable"):
+            return await self._request_usb_trust(device_udid or "", known)
         if known.get("device_class") in {"ios", "ipados"}:
             label = "iPad" if known.get("device_class") == "ipados" else "iPhone"
             return {
@@ -757,6 +759,40 @@ class DeviceManager:
             self._pairing_state = "error"
             logger.exception("Pairing thread raised")
             return {"status": "error", "message": f"Pairing failed: {type(e).__name__}: {e}"}
+
+    async def _request_usb_trust(self, udid: str, known: dict) -> dict:
+        """Ask a USB device to trust this Mac — the one user-initiated pairing.
+
+        Discovery and app listing use autopair=False so the 5-second scan loop
+        never pops the Trust dialog. Setup is where the user asked for it.
+        """
+        try:
+            from pymobiledevice3.lockdown import create_using_usbmux
+        except Exception as e:
+            return {"status": "error", "message": f"USB pairing is not available: {e}"}
+
+        label = "iPad" if known.get("device_class") == "ipados" else "device"
+        trusted = False
+        try:
+            lockdown = await create_using_usbmux(serial=udid, pair_timeout=90, autopair=True)
+            trusted = bool(getattr(lockdown, "paired", False))
+        except Exception as e:
+            logger.info("USB pairing with %s did not complete: %s", udid, e)
+        if not trusted:
+            return {
+                "status": "error",
+                "message": (
+                    f"This Mac is not trusted yet. Unlock the {label}, tap Trust "
+                    "when it asks, then press Setup again."
+                ),
+            }
+        known["installable"] = True
+        known["needs_setup"] = False
+        known["paired"] = True
+        known["setup_hint"] = ""
+        known.setdefault("properties", {})["trusted"] = True
+        logger.info("USB device %s trusted this Mac", udid)
+        return {"status": "ok", "message": f"Trusted. The {label} is ready to install."}
 
     def _selected_device(self, device_udid: str | None = None, device_host: str | None = None) -> dict | None:
         if device_udid and device_udid in self._cache:
@@ -951,6 +987,8 @@ class DeviceManager:
     _tunnel_port: int | None = None
     _tunnel_udid: str | None = None  # Real device UDID from tunneld
     _tunnel_sub_platform: str | None = None  # "tvOS" or None, from RSD peer info
+    _tunnel_target_host: str | None = None  # which selected device the cache is for
+    _tunnel_target_udid: str | None = None
     _tunneld_owned: bool = False  # True once Catapult has verified its managed helper
     TUNNELD_URL = "http://127.0.0.1:49151"
 
@@ -1347,6 +1385,8 @@ echo installed
         peer_info = getattr(rsd, "peer_info", {}) or {}
         product_type = (peer_info.get("Properties", {}) or {}).get("ProductType", "")
         self._tunnel_sub_platform = "tvOS" if "appletv" in product_type.lower() else None
+        self._tunnel_target_host = (target or {}).get("host") or None
+        self._tunnel_target_udid = (target or {}).get("udid") or None
         if target and target.get("host"):
             self._tunneled_hosts.add(target["host"])
         logger.info(
@@ -1384,6 +1424,50 @@ echo installed
                         pass
             await asyncio.sleep(2)
         return False
+
+    def _cached_tunnel_matches(self, target: dict | None) -> bool:
+        """Whether the cached tunnel is the one ``target`` asked for.
+
+        The match is loose on purpose: Apple TV mDNS identifiers rotate, so a
+        target that names nothing the cache recorded still matches. But a
+        target on a different host, or with a different identifier, than the
+        tunnel was cached for is another device — handing it the cached UDID
+        registered and signed for the wrong Apple TV.
+        """
+        if not target:
+            return True
+        host = target.get("host")
+        if host and self._tunnel_target_host and host != self._tunnel_target_host:
+            return False
+        udid = target.get("udid")
+        if (
+            udid
+            and self._tunnel_target_udid
+            and udid not in (self._tunnel_target_udid, self._tunnel_udid)
+        ):
+            return False
+        return True
+
+    def _clear_cached_tunnel(self) -> None:
+        self._tunnel_address = None
+        self._tunnel_port = None
+        self._tunnel_udid = None
+        self._tunnel_sub_platform = None
+        self._tunnel_target_host = None
+        self._tunnel_target_udid = None
+
+    async def _live_tunnel_count(self) -> int:
+        """How many tunnels tunneld maintains right now, from its listing."""
+        import httpx
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(self.TUNNELD_URL, timeout=3)
+                if resp.status_code != 200:
+                    return 0
+                return sum(len(tunnels) for tunnels in (resp.json() or {}).values())
+        except Exception as e:
+            logger.debug("tunneld listing failed: %s", e)
+            return 0
 
     async def _tunnel_listed(self, address: str, port: int) -> bool:
         """Check tunneld's HTTP listing for a tunnel without dialing the device.
@@ -1552,13 +1636,14 @@ echo installed
 
         if self._tunnel_address and self._tunnel_port:
             if await self._tunnel_listed(self._tunnel_address, self._tunnel_port):
-                return {"status": "ok", "message": "Tunnel already active"}
-
-            logger.info("Cached tunnel is stale; clearing and waiting for a live tunnel")
-            self._tunnel_address = None
-            self._tunnel_port = None
-            self._tunnel_udid = None
-            self._tunnel_sub_platform = None
+                if self._cached_tunnel_matches(target):
+                    return {"status": "ok", "message": "Tunnel already active"}
+                # Live, but for a different Apple TV. Leave it be and look for
+                # the selected one below.
+                logger.info("Cached tunnel serves another device; looking for the selected one")
+            else:
+                logger.info("Cached tunnel is stale; clearing and waiting for a live tunnel")
+                self._clear_cached_tunnel()
 
         # Start tunneld if not running
         freshly_started = False
@@ -1612,8 +1697,11 @@ echo installed
         # fault, so the old `uptime >= STALE_TUNNELD_UPTIME_S` check fired
         # whenever an Apple TV was merely unreachable — asleep, off the network,
         # unpaired — and reinstalled a healthy daemon as root to "fix" it.
-        # Recovery now costs nothing, so it is simply always attempted.
-        if not freshly_started:
+        # Recovery costs nothing — but it is only recovery when tunneld serves
+        # nothing at all. A daemon with another Apple TV's tunnel live is not
+        # wedged; the selected device is simply unreachable, and clearing every
+        # tunnel to "fix" that broke the other device's install.
+        if not freshly_started and await self._live_tunnel_count() == 0:
             for hard in (False, True):
                 restart = await self._recover_tunneld(hard=hard)
                 if restart.get("status") != "ok":
@@ -1624,9 +1712,7 @@ echo installed
                     message = f"Tunnel active at {self._tunnel_address}:{self._tunnel_port}"
                     return {"status": "ok", "message": message}
 
-        self._tunnel_address = None
-        self._tunnel_port = None
-        self._tunnel_udid = None
+        self._clear_cached_tunnel()
         if target:
             name = target.get("name") or target.get("host") or target.get("udid") or "device"
             return {"status": "error", "message": f"Tunnel not established for {name} — device may need re-pairing"}
@@ -1661,7 +1747,12 @@ echo installed
         # Prefer the identity cached when the tunnel came up — dialing the RSD
         # again right after another connection closed can transiently fail and
         # made installs abort with "No active Apple TV tunnel" despite a live one.
-        if self._tunnel_udid and self._tunnel_address and self._tunnel_port:
+        if (
+            self._tunnel_udid
+            and self._tunnel_address
+            and self._tunnel_port
+            and self._cached_tunnel_matches(target)
+        ):
             if await self._tunnel_listed(self._tunnel_address, self._tunnel_port):
                 logger.info(
                     "Real device UDID (cached): %s, subPlatform: %s",

@@ -40,8 +40,9 @@ Alternatives:
   isolation with no auth code. Settings → Sync → "Choose a folder…".
 - **Cloudflare R2** or any S3-compatible bucket, for people who want one.
   There is no Settings UI for it yet: configure it with
-  `POST /api/sync/configure` (`provider: "r2"` plus the bucket details) or the
-  legacy environment variables.
+  `POST /api/sync/configure` (`provider: "r2"` plus the bucket details and,
+  for anything other than R2, a `region`) or the legacy environment variables.
+  Blobs stream to and from the bucket a megabyte at a time.
 
 Sync is **off** until you turn it on. Writing IPAs into someone's iCloud Drive
 uninvited would quietly consume their 5 GB free tier, which is shared with
@@ -169,11 +170,15 @@ publishing working bucket keys to GitHub Releases.
 
 ## Concurrent Macs
 
-Two Macs sharing a vault should not refresh the same app at once. A lease at
-`teams/<team_id>/lease.json` (recording `locked_by`, `locked_until`, and
-`operation`) is the plan for that and is **not implemented yet**: today the two
-refresh loops run independently and the last writer wins on the manifest.
+Two Macs sharing a vault must not refresh the same app at once. Before each
+hourly refresh cycle a Mac takes a lease at `teams/<team_id>/lease.json`
+(`locked_by` is a random per-Mac id, `locked_until` is 20 minutes out,
+`operation` is `refresh`) and releases it afterwards. A Mac that finds a live
+lease held by another machine skips that cycle and tries again next hour; a
+Mac that dies mid-cycle frees the other one when the lease expires. A synced
+folder has no atomic compare-and-set, so the lease is advisory: it removes the
+common case of two hourly loops lining up, not every race.
 
-The lease alone would not be sufficient — certificate reuse is the other half, since
+The lease alone is not sufficient — certificate reuse is the other half, since
 a refresh used to revoke every certificate on the account and break whatever
 the other Mac had installed. See [Auto-refresh](auto-refresh.md).

@@ -79,3 +79,118 @@ def test_check_is_due_after_a_day():
     state = {"store_checked_at": 1_000_000.0}
 
     assert refresh.store_check_is_due(state, now=1_000_000.0 + 86_401)
+
+
+# ── wiring: the daily check inside the refresh loop ──────────────────────────
+
+from catapult import store as _store  # noqa: E402
+
+
+def _catalog_app(version="v0.3.14-beta.12"):
+    return _store.StoreApp(
+        source_id="github:VortXTV/VortX",
+        app_key="github:VortXTV/VortX#tvos:",
+        name="VortX",
+        version=version,
+        platform="tvos",
+        download_url="https://x/vortx.ipa",
+    )
+
+
+class FakeDevices:
+    def __init__(self, reachable):
+        self.reachable = set(reachable)
+
+    async def get_device_info(self, udid):
+        if udid not in self.reachable:
+            raise RuntimeError(f"{udid} is not connected")
+        return {"udid": udid, "installable": True, "name": udid}
+
+
+def _components(devices, installer):
+    return lambda: (devices, None, None, None, None, None, installer)
+
+
+async def test_daily_check_installs_updates_only_to_reachable_devices(tmp_path, monkeypatch):
+    monkeypatch.setattr(refresh, "STATE_FILE", tmp_path / "state.json")
+    refresh.save_state({"installs": [_record(device_udid="HERE"), _record(device_udid="AWAY")]})
+    app = _catalog_app()
+    installed = []
+
+    async def fetch_catalog(source):
+        return [app]
+
+    async def installer(device_udid, catalog_app, progress):
+        installed.append((device_udid, catalog_app.app_key))
+        return {"status": "ok"}
+
+    summary = await refresh.run_store_update_check(
+        _components(FakeDevices({"HERE"}), installer),
+        sources=[_store.normalize_source("VortXTV/VortX")],
+        fetch_catalog=fetch_catalog,
+        now=2_000_000.0,
+    )
+
+    assert installed == [("HERE", app.app_key)]
+    assert summary["updated"] == ["HERE"]
+    assert summary["unreachable"] == ["AWAY"]
+    assert refresh.load_state()["store_checked_at"] == 2_000_000.0
+
+
+async def test_daily_check_is_skipped_within_a_day(tmp_path, monkeypatch):
+    monkeypatch.setattr(refresh, "STATE_FILE", tmp_path / "state.json")
+    refresh.save_state({"installs": [_record()], "store_checked_at": 2_000_000.0 - 100})
+    calls = []
+
+    async def fetch_catalog(source):
+        calls.append(source.id)
+        return [_catalog_app()]
+
+    async def installer(device_udid, catalog_app, progress):
+        calls.append("install")
+        return {"status": "ok"}
+
+    summary = await refresh.run_store_update_check(
+        _components(FakeDevices({"DEV1"}), installer),
+        sources=[_store.normalize_source("VortXTV/VortX")],
+        fetch_catalog=fetch_catalog,
+        now=2_000_000.0,
+    )
+
+    assert summary["status"] == "skipped"
+    assert calls == []
+
+
+async def test_a_failing_source_does_not_stop_the_others(tmp_path, monkeypatch):
+    monkeypatch.setattr(refresh, "STATE_FILE", tmp_path / "state.json")
+    refresh.save_state({"installs": [_record()]})
+    installed = []
+
+    async def fetch_catalog(source):
+        if source.id == "github:broken/repo":
+            raise RuntimeError("offline")
+        return [_catalog_app()]
+
+    async def installer(device_udid, catalog_app, progress):
+        installed.append(device_udid)
+        return {"status": "ok"}
+
+    summary = await refresh.run_store_update_check(
+        _components(FakeDevices({"DEV1"}), installer),
+        sources=[_store.normalize_source("broken/repo"), _store.normalize_source("VortXTV/VortX")],
+        fetch_catalog=fetch_catalog,
+        now=2_000_000.0,
+    )
+
+    assert installed == ["DEV1"]
+    assert summary["source_errors"] == ["github:broken/repo"]
+
+
+def test_set_store_auto_update_flags_the_matching_record(tmp_path, monkeypatch):
+    monkeypatch.setattr(refresh, "STATE_FILE", tmp_path / "state.json")
+    refresh.save_state({"installs": [_record(store_auto_update=False)]})
+
+    assert refresh.set_store_auto_update("DEV1", "github:VortXTV/VortX#tvos:", True)
+
+    assert refresh.load_state()["installs"][0]["store_auto_update"] is True
+    assert not refresh.set_store_auto_update("DEV1", "github:nobody/nothing#ios:", True)

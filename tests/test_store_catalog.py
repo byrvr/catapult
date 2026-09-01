@@ -373,3 +373,51 @@ def test_vortx_still_groups_by_platform_and_variant():
     apps = store.catalog_from_github_releases(source, [_release("v0.3.14-beta.12", VORTX_ASSETS)])
 
     assert len(apps) == 3
+
+
+def test_checksum_urls_are_fetched_only_for_releases_that_produced_an_app():
+    """One request per release actually shown, not one per release page:
+    unauthenticated GitHub allows 60 requests an hour."""
+    releases = [
+        {"tag_name": "v2.0", "assets": [
+            {"name": "App-tvOS-v2.0.ipa", "browser_download_url": "https://x/v2/App-tvOS-v2.0.ipa"},
+            {"name": "SHA256SUMS.txt", "browser_download_url": "https://x/v2/SHA256SUMS.txt"},
+        ]},
+        {"tag_name": "v1.0", "assets": [
+            {"name": "App-tvOS-v1.0.ipa", "browser_download_url": "https://x/v1/App-tvOS-v1.0.ipa"},
+            {"name": "SHA256SUMS.txt", "browser_download_url": "https://x/v1/SHA256SUMS.txt"},
+        ]},
+    ]
+    source = store.normalize_source("o/App")
+    apps = store.catalog_from_github_releases(source, releases)
+
+    assert store.checksum_urls_for(releases, apps) == ["https://x/v2/SHA256SUMS.txt"]
+
+
+def test_apply_checksums_fills_sha256_by_asset_filename():
+    apps = [store.StoreApp(source_id="s", app_key="k", name="App", version="v2.0",
+                           platform="tvos", download_url="https://x/v2/App-tvOS-v2.0.ipa")]
+
+    store.apply_checksums(apps, {"App-tvOS-v2.0.ipa": "AB" * 32, "other.ipa": "cd" * 32})
+
+    assert apps[0].sha256 == "ab" * 32
+
+
+def test_apply_checksums_decodes_percent_encoded_asset_names():
+    apps = [store.StoreApp(source_id="s", app_key="k", name="A", version="1",
+                           platform="ios", download_url="https://x/App%20Lite-iOS-1.ipa")]
+
+    store.apply_checksums(apps, {"App Lite-iOS-1.ipa": "ef" * 32})
+
+    assert apps[0].sha256 == "ef" * 32
+
+
+def test_altstore_sha256_is_carried_when_the_source_publishes_it():
+    source = store.normalize_source("https://example.com/apps.json")
+    document = {"name": "S", "apps": [{"name": "A", "bundleIdentifier": "b.a", "versions": [
+        {"version": "1.0", "downloadURL": "https://x/a.ipa", "sha256": "AB" * 32},
+    ]}]}
+
+    (app,) = store.catalog_from_altstore(source, document)
+
+    assert app.sha256 == "ab" * 32

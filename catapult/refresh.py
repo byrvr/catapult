@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import shlex
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -229,16 +230,19 @@ def choose_target_bundle_id(
 
 
 def _keychain_set(account: str, data: str) -> bool:
-    """Store a value in macOS Keychain."""
-    # Delete existing entry first (ignore errors if not found)
-    subprocess.run(
-        ["security", "delete-generic-password", "-s", _KEYCHAIN_SERVICE, "-a", account],
-        capture_output=True,
+    """Store a value in macOS Keychain.
+
+    The command is fed to ``security -i`` over stdin with the value hex-encoded
+    (``-X``), so the secret never sits in the process table the way a
+    ``-w <secret>`` argument does. ``-U`` updates an existing item in place;
+    ``security -i`` exits non-zero when the inner command fails.
+    """
+    script = (
+        f"add-generic-password -s {shlex.quote(_KEYCHAIN_SERVICE)} "
+        f"-a {shlex.quote(account)} -X {data.encode('utf-8').hex()} -U\n"
     )
     result = subprocess.run(
-        ["security", "add-generic-password", "-s", _KEYCHAIN_SERVICE, "-a", account,
-         "-w", data, "-U"],
-        capture_output=True,
+        ["security", "-i"], input=script, capture_output=True, text=True,
     )
     return result.returncode == 0
 
@@ -362,14 +366,40 @@ async def run_refresh_loop(get_server_components):
                     f"Catapult is refreshing {len(pending)} app(s)"
                 ):
                     await _run_refresh_cycle(pending, get_server_components)
+            if store_check_is_due(state):
+                # Daily, per the store design: check every source and install
+                # opted-in updates wherever the device is reachable.
+                with power.prevent_idle_sleep("Catapult is checking store sources for updates"):
+                    summary = await run_store_update_check(get_server_components)
+                if summary.get("status") == "ok":
+                    logger.info(
+                        "Store check: %d source(s), %d updated, %d unreachable, %d failed",
+                        summary["sources"], len(summary["updated"]),
+                        len(summary["unreachable"]), len(summary["failed"]),
+                    )
         except Exception:
             logger.exception("Auto-refresh error")
 
         await sleep_until(next_check_at)
 
 
+async def _refresh_lease_context(dev_services, session):
+    """(store, team_id, machine_id) for the cycle lease, or None when sync is off."""
+    from catapult import sync as _sync  # sync imports this module; keep it local
+
+    store = _sync._store_from_config(_sync.SyncConfig.load())
+    if store is None:
+        return None
+    team = await dev_services.get_team(session)
+    return store, team["teamId"], _sync.machine_id()
+
+
 async def _run_refresh_cycle(pending: list[dict], get_server_components) -> None:
-    """Refresh every due record once. Errors are handled per record."""
+    """Refresh every due record once. Errors are handled per record.
+
+    When sync is configured, the cycle runs under the vault's refresh lease so
+    two Macs sharing a vault do not sign and install the same apps at once.
+    """
     components = tuple(get_server_components())
     device_manager, auth_client, dev_services, signer, ipa_processor = components[:5]
     activity_manager = components[5] if len(components) > 5 else None
@@ -393,31 +423,65 @@ async def _run_refresh_cycle(pending: list[dict], get_server_components) -> None
             )
         return
 
-    for rec in pending:
-        job = None
-        if activity_manager:
-            job = activity_manager.start(
-                "refresh",
-                f"Refresh {rec.get('app_name') or Path(rec.get('ipa_path', '')).name or 'app'}",
-                target=rec.get("device_name") or rec.get("device_udid", ""),
-                message="Refreshing saved install...",
-            )
-        result = await _refresh_install(rec, device_manager, auth_client,
-                                        dev_services, signer, ipa_processor)
-        if activity_manager and job:
-            if result.get("status") == "ok":
-                activity_manager.complete(
-                    job,
-                    message=result.get("message") or "Auto-refresh complete.",
+    lease = None
+    try:
+        lease = await _refresh_lease_context(dev_services, session)
+        if lease is not None:
+            from catapult import sync as _sync
+
+            store, team_id, machine = lease
+            if not await _sync.acquire_refresh_lease(store, team_id, machine_id=machine):
+                logger.info("Auto-refresh skipped — another Mac holds the refresh lease")
+                if activity_manager:
+                    job = activity_manager.start(
+                        "refresh",
+                        "Auto-refresh skipped",
+                        target=f"{len(pending)} install(s)",
+                        message="Another Mac is refreshing this vault right now.",
+                    )
+                    activity_manager.complete(
+                        job, message="Another Mac is refreshing this vault right now; skipped."
+                    )
+                return
+    except Exception:
+        logger.debug("Refresh lease unavailable; continuing without it", exc_info=True)
+        lease = None
+
+    try:
+        for rec in pending:
+            job = None
+            if activity_manager:
+                job = activity_manager.start(
+                    "refresh",
+                    f"Refresh {rec.get('app_name') or Path(rec.get('ipa_path', '')).name or 'app'}",
+                    target=rec.get("device_name") or rec.get("device_udid", ""),
+                    message="Refreshing saved install...",
                 )
-            else:
-                normalized = normalize_error(result.get("message") or "Auto-refresh failed.")
-                activity_manager.fail(
-                    job,
-                    normalized.message,
-                    category=normalized.category,
-                    detail=normalized.detail,
-                )
+            result = await _refresh_install(rec, device_manager, auth_client,
+                                            dev_services, signer, ipa_processor)
+            if activity_manager and job:
+                if result.get("status") == "ok":
+                    activity_manager.complete(
+                        job,
+                        message=result.get("message") or "Auto-refresh complete.",
+                    )
+                else:
+                    normalized = normalize_error(result.get("message") or "Auto-refresh failed.")
+                    activity_manager.fail(
+                        job,
+                        normalized.message,
+                        category=normalized.category,
+                        detail=normalized.detail,
+                    )
+    finally:
+        if lease is not None:
+            from catapult import sync as _sync
+
+            store, team_id, machine = lease
+            try:
+                await _sync.release_refresh_lease(store, team_id, machine_id=machine)
+            except Exception:
+                logger.debug("Could not release the refresh lease", exc_info=True)
 
 
 async def _refresh_install(rec, device_manager, auth_client, dev_services, signer, ipa_processor):
@@ -581,6 +645,99 @@ def mark_store_checked(now: float | None = None) -> None:
     state = load_state()
     state["store_checked_at"] = now if now is not None else _now_ts()
     save_state(state)
+
+
+def set_store_auto_update(device_udid: str, app_key: str, enabled: bool) -> bool:
+    """Opt one installed store app in or out of the daily update. Off by default."""
+    state = load_state()
+    changed = False
+    for rec in state.get("installs", []):
+        if rec.get("device_udid") == device_udid and rec.get("store_app_key") == app_key:
+            rec["store_auto_update"] = bool(enabled)
+            changed = True
+    if changed:
+        save_state(state)
+    return changed
+
+
+async def run_store_update_check(
+    get_server_components,
+    *,
+    sources=None,
+    fetch_catalog=None,
+    now: float | None = None,
+) -> dict:
+    """The daily store check, folded into the refresh loop.
+
+    Fetch every source, find installs that opted into auto-update and whose
+    source publishes a newer build, and install them — but only where the
+    device is reachable right now. Nothing installs to a device that is not
+    there; those records are simply looked at again at the next daily check.
+    """
+    from catapult import store as _store
+
+    now = now if now is not None else _now_ts()
+    state = load_state()
+    if not store_check_is_due(state, now):
+        return {"status": "skipped"}
+    mark_store_checked(now)
+
+    components = tuple(get_server_components())
+    device_manager = components[0]
+    installer = components[6] if len(components) > 6 else None
+    fetch = fetch_catalog or _store.fetch_catalog
+    sources = _store.load_sources() if sources is None else list(sources)
+
+    catalog: dict[str, "_store.StoreApp"] = {}
+    source_errors: list[str] = []
+    for source in sources:
+        try:
+            for app in await fetch(source):
+                current = catalog.get(app.app_key)
+                if current is None or _store.is_newer(app.version, current.version):
+                    catalog[app.app_key] = app
+        except Exception as e:
+            logger.info("Store check: source %s failed: %s", source.id, e)
+            source_errors.append(source.id)
+
+    versions = {key: app.version for key, app in catalog.items()}
+    updated: list[str] = []
+    unreachable: list[str] = []
+    failed: list[str] = []
+    for rec in store_updates_due(state, versions, now):
+        udid = rec.get("device_udid", "")
+        app = catalog[rec["store_app_key"]]
+        try:
+            device = await device_manager.get_device_info(udid)
+            if not device.get("installable", True):
+                raise RuntimeError("the device is not ready for installation")
+        except Exception as e:
+            logger.info("Store update of %s on %s deferred: %s", app.name, udid, e)
+            unreachable.append(udid)
+            continue
+        if installer is None:
+            logger.warning("Store update of %s: no installer available", app.name)
+            failed.append(udid)
+            continue
+
+        async def progress(step, pct, message, _app=app, _udid=udid):
+            logger.info("Store update %s on %s: %s", _app.name, _udid, message)
+
+        try:
+            await installer(udid, app, progress)
+            updated.append(udid)
+        except Exception:
+            logger.exception("Store update of %s on %s failed", app.name, udid)
+            failed.append(udid)
+
+    return {
+        "status": "ok",
+        "sources": len(sources),
+        "updated": updated,
+        "unreachable": unreachable,
+        "failed": failed,
+        "source_errors": source_errors,
+    }
 
 
 def tag_store_install(device_udid: str, ipa_path: str, app_key: str, version: str) -> None:
