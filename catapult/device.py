@@ -441,7 +441,7 @@ class DeviceManager:
                 "device_class": device_class,
                 "setup_hint": "" if trusted else (
                     f"Unlock this {'iPad' if device_class == 'ipados' else 'device'} "
-                    "and tap Trust, then scan again."
+                    "and press Trust here, then tap Trust on the device."
                 ),
                 "connection": connection,
                 "installable": trusted,
@@ -455,7 +455,7 @@ class DeviceManager:
                     "ConnectionType": connection_type,
                     "trusted": trusted,
                     "setup_hint": "" if trusted else
-                        "Unlock this device and tap Trust, then scan again.",
+                        "Unlock this device and press Trust here, then tap Trust on the device.",
                 },
             })
         return devices
@@ -774,16 +774,20 @@ class DeviceManager:
         label = "iPad" if known.get("device_class") == "ipados" else "device"
         trusted = False
         try:
-            lockdown = await create_using_usbmux(serial=udid, pair_timeout=90, autopair=True)
+            # Under the native client's 60-second request timeout: the prompt
+            # appears on the device immediately, so 45 seconds is plenty.
+            lockdown = await create_using_usbmux(serial=udid, pair_timeout=45, autopair=True)
             trusted = bool(getattr(lockdown, "paired", False))
         except Exception as e:
             logger.info("USB pairing with %s did not complete: %s", udid, e)
+        # A scan may have replaced the cached row while we waited.
+        known = self._cache.get(udid, known)
         if not trusted:
             return {
                 "status": "error",
                 "message": (
                     f"This Mac is not trusted yet. Unlock the {label}, tap Trust "
-                    "when it asks, then press Setup again."
+                    "when it asks, then press Trust here again."
                 ),
             }
         known["installable"] = True
@@ -1356,6 +1360,14 @@ echo installed
             # tunnel for exactly the same reason, and taking "the only tunnel we
             # have" would install the app onto the Apple TV. Only fall back when
             # the classes are compatible.
+            if self._known_apple_tv_count() > 1:
+                # With two Apple TVs around, "the only tunnel" is a coin flip,
+                # and the losing side installs onto the wrong device.
+                logger.warning(
+                    "Refusing to guess: one tunnel is up but %d Apple TVs are known",
+                    self._known_apple_tv_count(),
+                )
+                return None
             target_class = str(target.get("device_class", "")) or "unknown"
             sole_class = self._rsd_device_class(rsds[0])
             if target_class != "unknown" and sole_class != "unknown" and target_class != sole_class:
@@ -1425,6 +1437,13 @@ echo installed
             await asyncio.sleep(2)
         return False
 
+    def _known_apple_tv_count(self) -> int:
+        """Distinct Apple TV hosts seen by discovery."""
+        return len({
+            d.get("host") for d in self._cache.values()
+            if d.get("device_class") == "tvos" and d.get("host")
+        })
+
     def _cached_tunnel_matches(self, target: dict | None) -> bool:
         """Whether the cached tunnel is the one ``target`` asked for.
 
@@ -1436,6 +1455,14 @@ echo installed
         """
         if not target:
             return True
+        if (
+            self._tunnel_target_host is None
+            and self._tunnel_target_udid is None
+            and self._known_apple_tv_count() > 1
+        ):
+            # Cached without a target (a bare "start tunnel"), and more than
+            # one Apple TV is around: we cannot tell whose tunnel this is.
+            return False
         host = target.get("host")
         if host and self._tunnel_target_host and host != self._tunnel_target_host:
             return False
@@ -1712,7 +1739,9 @@ echo installed
                     message = f"Tunnel active at {self._tunnel_address}:{self._tunnel_port}"
                     return {"status": "ok", "message": message}
 
-        self._clear_cached_tunnel()
+        if self._cached_tunnel_matches(target):
+            # Only our own stale entry — another Apple TV's live tunnel stays cached.
+            self._clear_cached_tunnel()
         if target:
             name = target.get("name") or target.get("host") or target.get("udid") or "device"
             return {"status": "error", "message": f"Tunnel not established for {name} — device may need re-pairing"}
@@ -1722,6 +1751,8 @@ echo installed
         self,
         device_udid: str | None = None,
         device_host: str | None = None,
+        *,
+        allow_escalation: bool = True,
     ) -> tuple[str, str | None]:
         """Get the real device UDID from RSD and detect platform (tvOS vs iOS).
 
@@ -1763,7 +1794,9 @@ echo installed
 
         rsds = await get_tunneld_devices()
         if not rsds:
-            tunnel = await self.start_tunnel(device_udid=device_udid, device_host=device_host)
+            tunnel = await self.start_tunnel(
+                device_udid=device_udid, device_host=device_host, allow_escalation=allow_escalation
+            )
             if tunnel.get("status") == "ok":
                 rsds = await get_tunneld_devices()
 
@@ -1919,7 +1952,7 @@ echo installed
 
     # ── Installation ──
 
-    async def install(self, udid: str, ipa_path: Path):
+    async def install(self, udid: str, ipa_path: Path, *, allow_escalation: bool = True):
         device = await self.get_device_info(udid)
         host = device["host"]
         port = device.get("port", 62078)
@@ -1935,7 +1968,7 @@ echo installed
         # won't re-prompt for admin when tunneld is already running.
         if "remotepairing" in service and not installable:
             logger.info("Tunnel not marked ready for %s — ensuring before install...", device["name"])
-            tunnel = await self.start_tunnel(device_udid=udid, device_host=host)
+            tunnel = await self.start_tunnel(device_udid=udid, device_host=host, allow_escalation=allow_escalation)
             if tunnel.get("status") == "ok":
                 installable = True
 
@@ -1970,7 +2003,7 @@ echo installed
             logger.debug("tunneld query failed: %s", e)
             rsds = []
         if not rsds and ("remotepairing" in service or device.get("requires_tunnel")):
-            tunnel = await self.start_tunnel(device_udid=udid, device_host=host)
+            tunnel = await self.start_tunnel(device_udid=udid, device_host=host, allow_escalation=allow_escalation)
             if tunnel.get("status") == "ok":
                 try:
                     rsds = await get_tunneld_devices()

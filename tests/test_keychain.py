@@ -47,4 +47,18 @@ def test_secret_travels_to_security_over_stdin_hex_encoded(monkeypatch):
     stdin = interactive[-1]["input"]
     assert secret.encode().hex() in stdin
     assert "add-generic-password" in stdin and " -U" in stdin
-    assert " acct" in stdin and refresh._KEYCHAIN_SERVICE in stdin
+    assert "-a 'acct'" in stdin and refresh._KEYCHAIN_SERVICE in stdin
+
+
+def test_accounts_are_quoted_the_way_security_i_reads_them(monkeypatch):
+    """`security -i` strips one pair of quotes but does not join adjacent quoted
+    segments, so shlex-style quoting (`'o'"'"'brien'`) splits an Apple ID with an
+    apostrophe into several tokens."""
+    run = Recorder()
+    monkeypatch.setattr(refresh.subprocess, "run", run)
+
+    refresh._keychain_set("o'brien@example.com", "secret")
+
+    stdin = [kw for argv, kw in run.calls if argv[:2] == ["security", "-i"]][-1]["input"]
+    assert "-a \"o'brien@example.com\"" in stdin
+    assert "'\"'\"'" not in stdin

@@ -175,3 +175,19 @@ def test_create_vault_passes_the_confirmed_replace_flag(client, monkeypatch):
 
     assert response.status_code == 200
     assert seen["replace"] is True
+
+
+def test_configure_stores_the_region_for_s3_compatible_buckets(client, monkeypatch):
+    """The region field existed on SyncConfig but the endpoint rebuilt the config
+    without it, so nothing but R2's "auto" was ever reachable from the app."""
+    monkeypatch.setattr(sync, "_keychain_set", lambda account, value: True)
+    monkeypatch.setattr(sync, "_keychain_get", lambda account: "k")
+
+    response = client.post("/api/sync/configure", json={
+        "provider": "r2", "r2_endpoint": "https://s3.eu-central-003.example.com",
+        "r2_bucket": "catapult", "r2_access_key_id": "a", "r2_secret_access_key": "s",
+        "region": "eu-central-003",
+    })
+
+    assert response.status_code == 200
+    assert sync.SyncConfig.load().region == "eu-central-003"
