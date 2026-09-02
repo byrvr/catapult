@@ -1597,8 +1597,12 @@ async def list_store_apps(device_udid: str = ""):
                 return rec
         return None
 
+    # "Installed before": any record, on any device, that is very likely this
+    # entry — including installs made by hand before the Store existed.
+    matched = _match_records_to_entries(entries, all_records)
+
     apps: list[dict] = []
-    for entry in entries:
+    for i, entry in enumerate(entries):
         app = entry.to_dict()
         rec = _record_for(entry.app_key) or {}
         current = rec.get("store_version") or ""
@@ -1606,11 +1610,8 @@ async def list_store_apps(device_udid: str = ""):
         app["update_available"] = bool(current) and _store.is_newer(app["version"], current)
         app["auto_update"] = bool(rec.get("store_auto_update"))
         app["pinned"] = bool(rec.get("store_pinned"))
-        # "Installed before": any record, on any device, that is very likely
-        # this entry — including installs made by hand before the Store existed.
-        matched = [r for r in all_records if _store.matches_install_record(entry, r)]
-        app["installed_before"] = bool(matched)
-        app["installed_on"] = sorted({r.get("device_name") or r.get("device_udid", "") for r in matched})
+        app["installed_before"] = bool(matched[i])
+        app["installed_on"] = _installed_on(matched[i])
         apps.append(app)
 
     return {
@@ -1619,6 +1620,50 @@ async def list_store_apps(device_udid: str = ""):
         "device_class": device_class,
         "free_team": await _team_is_free(),
     }
+
+
+def _match_records_to_entries(entries: list, records: list[dict]) -> list[list[dict]]:
+    """For each catalog entry, the install records that are (very likely) it.
+
+    A record is one install, so when it only *likely* matches several entries
+    of one source — tweaks of one app version that all sit inside the size
+    tolerance — it is attributed to the closest entry by size alone.
+    """
+    strengths = [
+        {idx: strength for idx, rec in enumerate(records)
+         if (strength := _store.match_strength(entry, rec))}
+        for entry in entries
+    ]
+    for idx, rec in enumerate(records):
+        by_source: dict[str, list[int]] = {}
+        for i, entry in enumerate(entries):
+            if strengths[i].get(idx) == "likely":
+                by_source.setdefault(entry.source_id, []).append(i)
+        rec_size = int(rec.get("ipa_size") or 0)
+        for candidates in by_source.values():
+            if len(candidates) < 2 or not rec_size:
+                continue
+            best = min(
+                candidates,
+                key=lambda i: abs(entries[i].size - rec_size) if entries[i].size else float("inf"),
+            )
+            for i in candidates:
+                if i != best:
+                    strengths[i].pop(idx, None)
+    return [[records[idx] for idx in sorted(by_idx)] for by_idx in strengths]
+
+
+def _installed_on(records: list[dict]) -> list[str]:
+    """Device names for a set of install records: one per device, newest name."""
+    by_device: dict[str, tuple[float, str]] = {}
+    for rec in records:
+        key = rec.get("device_udid") or rec.get("device_name") or ""
+        stamp = float(rec.get("last_installed") or 0)
+        name = (rec.get("device_name") or "").strip()
+        current = by_device.get(key)
+        if current is None or stamp >= current[0]:
+            by_device[key] = (stamp, name)
+    return sorted({name or "another device" for _, name in by_device.values()})
 
 
 def _backfill_app_versions(records: list[dict]) -> bool:
