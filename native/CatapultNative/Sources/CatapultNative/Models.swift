@@ -454,6 +454,10 @@ struct StoreApp: Codable, Hashable, Identifiable, Sendable {
     let variant: String
     let developer: String
     let iconUrl: String
+    /// Resolved by the backend: the source's icon, a locally extracted one
+    /// served as a backend-relative path, or the GitHub owner's avatar.
+    /// Empty when nothing was found and the app draws a monogram instead.
+    let icon: String?
     let changelog: String
     let size: Int
     let prerelease: Bool
@@ -476,6 +480,7 @@ struct StoreApp: Codable, Hashable, Identifiable, Sendable {
         case sourceId = "source_id"
         case name, version, platform, variant, developer, changelog, size, prerelease
         case iconUrl = "icon_url"
+        case icon
         case installedVersion = "installed_version"
         case updateAvailable = "update_available"
         case autoUpdate = "auto_update"
@@ -490,12 +495,21 @@ struct StoreApp: Codable, Hashable, Identifiable, Sendable {
         ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file)
     }
 
-    var platformLabel: String {
+    /// Nil for a platform the app does not recognise, so rows never read
+    /// "Unknown platform".
+    var platformLabel: String? {
         switch platform {
-        case "tvos": return variant.isEmpty ? "Apple TV" : "Apple TV · \(variant)"
-        case "ios": return "iPhone & iPad"
-        default: return "Unknown platform"
+        case "tvos": variant.isEmpty ? "Apple TV" : "Apple TV · \(variant)"
+        case "ios": "iPhone & iPad"
+        default: nil
         }
+    }
+
+    /// The row's second line: developer, version, platform when known, size.
+    var metaLabel: String {
+        [developer, version, platformLabel ?? "", sizeLabel]
+            .filter { !$0.isEmpty }
+            .joined(separator: " · ")
     }
 }
 

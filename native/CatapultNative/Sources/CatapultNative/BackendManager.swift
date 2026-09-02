@@ -121,6 +121,9 @@ final class BackendManager: ObservableObject {
 
             var environment = ProcessInfo.processInfo.environment
             environment["PYTHONUNBUFFERED"] = "1"
+            if let helper = iconHelperURL() {
+                environment["CATAPULT_ICON_HELPER"] = helper.path
+            }
             if bundledBackend, let supportRoot {
                 environment["UV_PROJECT_ENVIRONMENT"] = supportRoot.appending(path: "BackendEnv").path
                 environment["UV_CACHE_DIR"] = supportRoot.appending(path: "uv-cache").path
@@ -363,13 +366,15 @@ final class BackendManager: ObservableObject {
             "--port",
             "9450"
         ]
+        var environmentVariables = ["PYTHONUNBUFFERED": "1"]
+        if let helper = iconHelperURL() {
+            environmentVariables["CATAPULT_ICON_HELPER"] = helper.path
+        }
         let plist: [String: Any] = [
             "Label": catapultBackgroundAgentLabel,
             "ProgramArguments": programArguments,
             "WorkingDirectory": root.path,
-            "EnvironmentVariables": [
-                "PYTHONUNBUFFERED": "1",
-            ],
+            "EnvironmentVariables": environmentVariables,
             "RunAtLoad": true,
             "KeepAlive": true,
             "StandardOutPath": logDirectory.appending(path: "agent.log").path,
@@ -387,6 +392,16 @@ final class BackendManager: ObservableObject {
         _ = runCommand("/bin/launchctl", ["bootstrap", domain, plistURL.path])
         _ = runCommand("/bin/launchctl", ["enable", "\(domain)/\(catapultBackgroundAgentLabel)"])
         return changed
+    }
+
+    /// The icon extraction helper ships next to the app binary, both inside the
+    /// .app bundle and in a `swift build` products directory.
+    private nonisolated func iconHelperURL() -> URL? {
+        guard let executableURL = Bundle.main.executableURL else {
+            return nil
+        }
+        let helper = executableURL.deletingLastPathComponent().appending(path: "catapult-icon")
+        return FileManager.default.isExecutableFile(atPath: helper.path) ? helper : nil
     }
 
     private nonisolated func backendPythonURL(supportRoot: URL) -> URL {

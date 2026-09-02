@@ -14,7 +14,13 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
+import plistlib
+import shutil
+import subprocess
+import tempfile
 import uuid
+import zipfile
 from pathlib import PurePosixPath
 from urllib.parse import unquote
 import re
@@ -27,6 +33,14 @@ logger = logging.getLogger(__name__)
 
 APP_SUPPORT_DIR = Path.home() / "Library" / "Application Support" / "Catapult"
 SOURCES_PATH = APP_SUPPORT_DIR / "sources.json"
+ICON_CACHE_DIR = APP_SUPPORT_DIR / "icons"
+DOWNLOAD_CACHE_DIR = Path.home() / ".catapult" / "downloads"
+# Where catapult-icon lives when CATAPULT_ICON_HELPER does not say: a
+# development checkout's build, then the installed app bundle.
+ICON_HELPER_PATHS = (
+    Path(__file__).resolve().parents[1] / "native/CatapultNative/.build/release/catapult-icon",
+    Path("/Applications/Catapult.app/Contents/MacOS/catapult-icon"),
+)
 
 GITHUB_API = "https://api.github.com"
 # Unauthenticated GitHub allows 60 requests/hour per IP. A daily check per
@@ -303,6 +317,9 @@ class StoreApp:
     developer: str = ""
     bundle_id: str = ""
     icon_url: str = ""
+    # Filled by the server, not the adapters: icon_url, then an icon pulled
+    # out of an IPA already on this Mac, then the GitHub owner's avatar.
+    icon: str = ""
     changelog: str = ""
     size: int = 0
     sha256: str = ""
@@ -566,6 +583,15 @@ def apply_checksums(apps: list[StoreApp], digests: dict[str, str]) -> None:
             app.sha256 = digest.lower()
 
 
+def download_cache_path(download_url: str) -> Path:
+    """Where a catalog download lands.
+
+    Keyed by URL so the Store tab and the daily check fetch one asset into one
+    file, and so an IPA fetched before can be found again without a record.
+    """
+    return DOWNLOAD_CACHE_DIR / f"{hashlib.sha256(download_url.encode()).hexdigest()[:16]}.ipa"
+
+
 async def download_to(url: str, dest: Path, *, expected_sha256: str = "") -> Path:
     """Stream a download to disk, verifying the digest when one is known."""
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -596,3 +622,232 @@ async def download_to(url: str, dest: Path, *, expected_sha256: str = "") -> Pat
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
+
+
+# ── icons ───────────────────────────────────────────────────────────────────
+
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+_APP_ROOT = re.compile(r"^Payload/[^/]+\.app/")
+_APP_ROOT_ICON = re.compile(r"^Payload/[^/]+\.app/AppIcon[^/]*\.png$")
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+# The size Xcode appends to an icon file name: AppIcon60x60, AppIcon83.5x83.5.
+_ICON_FILE_SIZE = re.compile(r"\d+(?:\.\d+)?x\d+(?:\.\d+)?$")
+# CoreUI opens even a 100 MB catalog in well under a second; the timeout only
+# guards against a wedged helper holding up a catalog load.
+HELPER_TIMEOUT = 15
+
+
+def _png_width(data: bytes) -> int:
+    """Pixel width from a PNG's IHDR chunk, 0 when there is none.
+
+    IHDR is walked to rather than read at a fixed offset: pngcrush, as Xcode
+    runs it, puts a CgBI chunk in front of it.
+    """
+    if not data.startswith(_PNG_SIGNATURE):
+        return 0
+    offset = len(_PNG_SIGNATURE)
+    while offset + 8 <= len(data):
+        length = int.from_bytes(data[offset:offset + 4], "big")
+        if data[offset + 4:offset + 8] == b"IHDR":
+            return int.from_bytes(data[offset + 8:offset + 12], "big")
+        offset += 12 + length
+    return 0
+
+
+class IconUnavailable(Exception):
+    """The icon could not be looked for on this Mac right now.
+
+    No helper installed, a helper that hung, or a catalog CoreUI could not
+    open: none of that says anything about the IPA, so unlike a genuine
+    "no icon" it is not remembered, and a later load tries again.
+    """
+
+
+def icon_from_ipa(path: str | Path) -> bytes | None:
+    """The app's icon as PNG bytes, or None. Raises IconUnavailable when the
+    catalog could not be tried at all.
+
+    The largest AppIcon*.png at the .app root wins when there is one. Only
+    the root counts: PlugIns, Watch and Frameworks carry icons of their own.
+    Largest means the widest by IHDR, since Xcode recompresses PNGs and byte
+    size alone would mislead; size only breaks ties. Modern bundles ship no
+    loose PNG at all and keep the icon in Assets.car, which takes the helper.
+    """
+    try:
+        with zipfile.ZipFile(path) as archive:
+            return _loose_icon(archive) or _catalog_icon(archive)
+    except IconUnavailable:
+        raise
+    except Exception:
+        # Best effort by contract: a missing file, a non-zip, or a corrupt
+        # member must not take the catalog request down with it.
+        return None
+
+
+def _loose_icon(archive: zipfile.ZipFile) -> bytes | None:
+    best: tuple[int, int] | None = None
+    icon: bytes | None = None
+    for name in archive.namelist():
+        if not _APP_ROOT_ICON.match(name):
+            continue
+        data = archive.read(name)
+        width = _png_width(data)
+        if not width:
+            continue  # named like an icon, but not a PNG
+        rank = (width, len(data))
+        if best is None or rank > best:
+            best, icon = rank, data
+    return icon
+
+
+def _catalog_icon(archive: zipfile.ZipFile) -> bytes | None:
+    """The icon out of the .app root's Assets.car, through catapult-icon."""
+    try:
+        root = _app_root(archive)
+        if not root or root + "Assets.car" not in archive.namelist():
+            return None
+        helper = icon_helper_path()
+        if helper is None:
+            raise IconUnavailable("no catapult-icon helper on this Mac")
+        names = icon_names(_bundle_info(archive, root + "Info.plist"))
+        scratch = Path(tempfile.mkdtemp(prefix="catapult-icon-"))
+        try:
+            car = scratch / "Assets.car"
+            with archive.open(root + "Assets.car") as member, car.open("wb") as out:
+                shutil.copyfileobj(member, out)
+            return _run_icon_helper(helper, car, names, scratch / "icon.png")
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+    except IconUnavailable:
+        raise
+    except Exception as e:
+        logger.debug("Could not read the icon out of the asset catalog: %s", e)
+        return None
+
+
+def _app_root(archive: zipfile.ZipFile) -> str:
+    """"Payload/<name>.app/", or "" when the archive is not an IPA."""
+    for name in archive.namelist():
+        if match := _APP_ROOT.match(name):
+            return match.group(0)
+    return ""
+
+
+def _bundle_info(archive: zipfile.ZipFile, member: str) -> dict:
+    try:
+        info = plistlib.loads(archive.read(member))
+    except Exception:
+        return {}
+    return info if isinstance(info, dict) else {}
+
+
+def icon_names(info: dict) -> list[str]:
+    """Asset names an Info.plist points the primary icon at, best first.
+
+    CFBundleIconName is the catalog asset itself; CFBundleIconFiles carry the
+    same name with a size appended. AppIcon comes last as the Xcode default,
+    for bundles whose plist says nothing.
+    """
+    primaries = [
+        (info.get(key) or {}).get("CFBundlePrimaryIcon") or {}
+        for key in ("CFBundleIcons", "CFBundleIcons~ipad")
+    ]
+    names = [primary.get("CFBundleIconName") for primary in primaries]
+    for primary in primaries:
+        for filename in primary.get("CFBundleIconFiles") or []:
+            if isinstance(filename, str):
+                names.append(_ICON_FILE_SIZE.sub("", filename))
+    names.append("AppIcon")
+    return list(dict.fromkeys(name for name in names if name and isinstance(name, str)))
+
+
+def _run_icon_helper(helper: Path, car: Path, names: list[str], out: Path) -> bytes | None:
+    for name in names:
+        try:
+            result = subprocess.run(
+                [str(helper), str(car), name, str(out)], capture_output=True, timeout=HELPER_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise IconUnavailable(f"catapult-icon took longer than {HELPER_TIMEOUT}s") from e
+        if result.returncode == 0 and out.is_file():
+            return out.read_bytes()
+        if result.returncode in (2, 3):
+            # 2: we called it wrong; 3: CoreUI could not open the catalog here.
+            # Exit 1 is the one answer that is about the IPA: no such icon.
+            raise IconUnavailable(f"catapult-icon exited {result.returncode}")
+    return None
+
+
+def icon_helper_path() -> Path | None:
+    """Where catapult-icon is, or None when this Mac has no copy."""
+    override = os.environ.get("CATAPULT_ICON_HELPER")
+    candidates = [Path(override)] if override else []
+    candidates += list(ICON_HELPER_PATHS)
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def _icon_key(sha256: str) -> str:
+    """The digest as a cache file stem, or "" when it is not a digest at all."""
+    digest = (sha256 or "").lower()
+    return digest if _SHA256.fullmatch(digest) else ""
+
+
+def cached_icon(ipa_path: str | Path, sha256: str) -> Path | None:
+    """The icon for an IPA, extracted once and kept under ICON_CACHE_DIR.
+
+    <sha>.png on a hit, an empty <sha>.none on a miss, so a 130 MB archive is
+    opened once rather than on every catalog load.
+    """
+    key = _icon_key(sha256)
+    if not key:
+        return None
+    png = ICON_CACHE_DIR / f"{key}.png"
+    miss = ICON_CACHE_DIR / f"{key}.none"
+    if png.is_file():
+        return png
+    if miss.exists():
+        return None
+
+    try:
+        data = icon_from_ipa(ipa_path)
+    except IconUnavailable as e:
+        logger.debug("Icon for %s cannot be extracted right now: %s", key[:12], e)
+        return None
+    ICON_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    if data is None:
+        miss.touch()
+        return None
+    # Landed by rename: a catalog load on another request must never be
+    # served the half-written file a plain write leaves visible.
+    tmp = png.with_name(f".{png.name}.{uuid.uuid4().hex[:8]}.part")
+    try:
+        tmp.write_bytes(data)
+        tmp.replace(png)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    return png
+
+
+def cached_icon_path(sha256: str) -> Path | None:
+    """A cached icon by digest, or None.
+
+    The digest is checked before any path is built: it arrives straight off
+    the icon URL.
+    """
+    key = _icon_key(sha256)
+    if not key:
+        return None
+    path = ICON_CACHE_DIR / f"{key}.png"
+    return path if path.is_file() else None
+
+
+def owner_avatar_url(source: Source) -> str:
+    """The GitHub owner's avatar for a GitHub source, "" for anything else."""
+    if source.kind != "github":
+        return ""
+    owner = source.id.removeprefix("github:").split("/")[0]
+    return f"https://github.com/{owner}.png?size=128"

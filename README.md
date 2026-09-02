@@ -59,7 +59,7 @@ To run the native app directly during development:
 
 ```bash
 cd native/CatapultNative
-swift run
+swift run CatapultNative
 ```
 
 ## How It Works

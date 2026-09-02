@@ -258,8 +258,18 @@ version qualify, the record counts for the closest one only). A hand install
 whose file carried no recognisable name is matched by version, so it stops
 being marked once the source publishes a newer version; installing it once
 from the Store links it permanently. Loading the catalog also backfills
-`app_version` on older install records from the vaulted IPA, once. Also returns `errors` (per
-source), `device_class`, and `free_team`.
+`app_version` on older install records from the vaulted IPA, once. Each app
+also carries `icon`: the source's own icon URL, else `/api/store/icon?sha=…`
+when an IPA of this entry is already on this Mac (a matched install record's
+file, or the download cache) and an icon could be pulled out of it — a loose
+`AppIcon*.png`, or the primary icon from `Assets.car` through the
+`catapult-icon` helper (found via `CATAPULT_ICON_HELPER`, the dev build, or
+the app bundle) — else the GitHub owner's avatar, else `""`. Also returns
+`errors` (per source), `device_class`, and `free_team`.
+
+### `GET /api/store/icon?sha=<64 hex>`
+The icon extracted from a local IPA with that SHA-256, as `image/png` with
+`Cache-Control: max-age=86400`; `404` for an unknown or malformed digest.
 
 ### `POST /api/store/apps/auto-update`
 **Request:** `{"device_udid": "…", "app_key": "…", "enabled": true}`. Opts an

@@ -20,6 +20,8 @@ mkdir -p "${MACOS_DIR}" "${RESOURCES_DIR}" "${BACKEND_DIR}"
 
 cp "${PACKAGE_DIR}/.build/release/CatapultNative" "${MACOS_DIR}/${APP_NAME}"
 chmod +x "${MACOS_DIR}/${APP_NAME}"
+cp "${PACKAGE_DIR}/.build/release/catapult-icon" "${MACOS_DIR}/catapult-icon"
+chmod +x "${MACOS_DIR}/catapult-icon"
 
 UV_SOURCE="${CATAPULT_UV:-}"
 if [[ -z "${UV_SOURCE}" ]]; then

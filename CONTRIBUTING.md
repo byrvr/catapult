@@ -11,7 +11,7 @@ git clone https://github.com/byrvr/catapult.git
 cd catapult
 uv sync
 cd native/CatapultNative
-swift run
+swift run CatapultNative
 ```
 
 Build a release-style DMG from the repository root:

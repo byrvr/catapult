@@ -1571,7 +1571,8 @@ async def list_store_apps(device_udid: str = ""):
 
     entries: list["_store.StoreApp"] = []
     errors: list[dict] = []
-    for source in _store.load_sources():
+    sources = {source.id: source for source in _store.load_sources()}
+    for source in sources.values():
         try:
             for app in await _store.fetch_catalog(source):
                 if device_class and not _store.platform_fits_device(app.platform, device_class):
@@ -1603,6 +1604,9 @@ async def list_store_apps(device_udid: str = ""):
 
     apps: list[dict] = []
     for i, entry in enumerate(entries):
+        # Off the event loop: this may read a zip, run the helper, or hash a
+        # download-cache file the first time an IPA is seen.
+        entry.icon = await asyncio.to_thread(_icon_for, entry, sources[entry.source_id], matched[i])
         app = entry.to_dict()
         rec = _record_for(entry.app_key) or {}
         current = rec.get("store_version") or ""
@@ -1666,6 +1670,72 @@ def _installed_on(records: list[dict]) -> list[str]:
     return sorted({name or "another device" for _, name in by_device.values()})
 
 
+def _icon_for(entry: "_store.StoreApp", source: "_store.Source", records: list[dict]) -> str:
+    """What the row shows: the source's own icon, one pulled out of an IPA
+    already on this Mac, the GitHub owner's avatar, or "" for a monogram."""
+    if entry.icon_url:
+        return entry.icon_url
+    try:
+        digest = _local_icon_digest(entry, records)
+    except OSError as e:
+        # A full disk or an unwritable Application Support costs this row its
+        # real icon, not the whole Store tab.
+        logger.debug("Icon cache unavailable for %s: %s", entry.name, e)
+        digest = ""
+    if digest:
+        return f"/api/store/icon?sha={digest}"
+    return _store.owner_avatar_url(source)
+
+
+def _local_icon_digest(entry: "_store.StoreApp", records: list[dict]) -> str:
+    """Digest of a local IPA of this entry whose icon is (by now) cached, or ""."""
+    settled = False
+    for rec in records:
+        digest = (rec.get("ipa_sha256") or "").lower()
+        path = _vault.resolve_ipa_path(rec)
+        if not (path and digest):
+            continue
+        if _store.cached_icon(path, digest):
+            return digest
+        settled = True
+    if settled:
+        # The record's IPA is this build and its miss is remembered; the
+        # download cache holds the same bytes and would only say so again.
+        return ""
+    cached = _store.download_cache_path(entry.download_url)
+    if not cached.is_file():
+        return ""
+    st = cached.stat()
+    # The published checksum names the file only while the sizes agree: the
+    # cache may hold an earlier upload of a re-published asset.
+    if entry.sha256 and entry.size == st.st_size:
+        digest = entry.sha256
+    else:
+        digest = _download_cache_digest(cached, st)
+    return digest if _store.cached_icon(cached, digest) else ""
+
+
+def _download_cache_digest(cached: Path, st: os.stat_result) -> str:
+    """SHA-256 of a download-cache file, hashed once per size and mtime.
+
+    A cache file has no install record to remember its digest, and reading
+    130 MB on every catalog load is not acceptable, so the answer sits in a
+    sidecar under the icon cache.
+    """
+    memo = _store.ICON_CACHE_DIR / f"{cached.stem}.sha256"
+    stamp = f"{st.st_size}:{st.st_mtime_ns}:"
+    try:
+        remembered = memo.read_text(encoding="utf-8")
+        if remembered.startswith(stamp) and len(remembered) == len(stamp) + 64:
+            return remembered[len(stamp):]
+    except OSError:
+        pass
+    digest = _vault.sha256_file(cached)
+    memo.parent.mkdir(parents=True, exist_ok=True)
+    memo.write_text(stamp + digest, encoding="utf-8")
+    return digest
+
+
 def _backfill_app_versions(records: list[dict]) -> bool:
     """Fill ``app_version`` on records that predate the field, from the vault copy.
 
@@ -1714,6 +1784,15 @@ async def set_store_auto_update(payload: dict = None):
     return {"status": "ok", "auto_update": enabled}
 
 
+@app.get("/api/store/icon")
+async def store_icon(sha: str = ""):
+    """An icon pulled out of a local IPA, keyed by that IPA's SHA-256."""
+    path = _store.cached_icon_path(sha)
+    if path is None:
+        return JSONResponse({"status": "error", "message": "No icon for that digest."}, status_code=404)
+    return FileResponse(path, media_type="image/png", headers={"Cache-Control": "max-age=86400"})
+
+
 async def _install_store_app(
     device_udid: str, app: "_store.StoreApp", report, *, allow_escalation: bool = True
 ) -> dict:
@@ -1725,8 +1804,7 @@ async def _install_store_app(
     answer an admin-password prompt.
     """
     await report("download", 5, f"Downloading {app.name} {app.version}...")
-    downloads = Path.home() / ".catapult" / "downloads"
-    target = downloads / f"{hashlib.sha256(app.download_url.encode()).hexdigest()[:16]}.ipa"
+    target = _store.download_cache_path(app.download_url)
     await _store.download_to(app.download_url, target, expected_sha256=app.sha256)
 
     await report("download", 20, "Verifying..." if app.sha256 else "Preparing...")
