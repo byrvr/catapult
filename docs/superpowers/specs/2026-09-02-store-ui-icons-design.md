@@ -10,7 +10,7 @@ pipeline as they are.
 
 ## Rows
 
-A row is 56pt tall with 12pt padding, on the existing card background:
+A row is the 44pt icon plus 12pt padding, on the existing card background:
 
 ```
 [icon 44pt]  YouTubePlus   (Installed 21.24.3) (Update available) (pre-release)
@@ -55,12 +55,38 @@ The backend resolves one `icon` string per catalog entry, in this order:
 
 ### Extraction (`catapult/store.py`)
 
-`icon_from_ipa(path) -> bytes | None` opens the IPA as a zip and returns the
-largest PNG whose name starts with `AppIcon` and lives at the `.app` root
+`icon_from_ipa(path) -> bytes | None` opens the IPA as a zip and first looks
+for loose PNGs whose name starts with `AppIcon` at the `.app` root
 (`Payload/<name>.app/AppIcon60x60@2x.png`, not inside `PlugIns/`, `Watch/`
-or frameworks). "Largest" means the largest pixel width read from the PNG
-IHDR chunk; file size breaks ties. tvOS bundles carry their icons only in
-`Assets.car` and yield `None`.
+or frameworks), returning the largest by IHDR pixel width, file size breaking
+ties.
+
+Modern apps ship no loose icon PNGs: the icon lives only in the compiled
+`Assets.car`, as an "Icon Image" asset whose name the Info.plist gives under
+`CFBundleIcons.CFBundlePrimaryIcon.CFBundleIconName` (YouTube's is
+`logo_youtube_2024_q4_color`). When no loose PNG exists, `icon_from_ipa`
+reads the candidate names from the plist — `CFBundleIconName` from
+`CFBundleIcons` and `CFBundleIcons~ipad`, then each `CFBundleIconFiles` entry
+with a trailing `<w>x<h>` size stripped, then `AppIcon` — extracts
+`Assets.car` to a temporary directory, and runs the helper
+`catapult-icon <Assets.car> <name> <out.png>` for each name until one
+succeeds. The helper is found through `CATAPULT_ICON_HELPER`, then the dev
+checkout's `native/CatapultNative/.build/release/catapult-icon`, then
+`/Applications/Catapult.app/Contents/MacOS/catapult-icon`; with no helper the
+result is `None` and the row falls back to the avatar.
+
+### Helper (`native/CatapultNative/Sources/CatapultIcon/main.swift`)
+
+A second executable product of the Swift package, `catapult-icon`, copied
+into `Contents/MacOS/` by `build-app.sh`. It reads the catalog with macOS's
+own CoreUI framework (`CUICatalog`, loaded at runtime), asks
+`iconImageWithName:scaleFactor:deviceIdiom:…:desiredSize:` for the idioms
+marketing, phone, pad, tv and universal at sizes 1024 down to 60, keeps the
+largest bitmap, falls back to `imageWithName:…` for image-set icons, and
+writes a PNG. Exit 0 on success, 1 when the catalog has no such icon, 2 on
+bad arguments, 3 when the catalog cannot be opened. The app passes the
+helper's path to the backend as `CATAPULT_ICON_HELPER`, both for the
+development backend it spawns and in the login agent's environment.
 
 `cached_icon(ipa_path, sha256) -> Path | None` memoizes on disk under
 `~/Library/Application Support/Catapult/icons/`: `<sha>.png` on success, an
@@ -88,7 +114,9 @@ name's hash, same rounded rectangle.
 
 - `icon_from_ipa`: picks the largest of two `AppIcon*.png` files by IHDR
   width; ignores PNGs under `PlugIns/`; returns `None` with no icons; returns
-  `None` for a non-zip.
+  `None` for a non-zip; with only an `Assets.car`, runs the helper with the
+  plist's icon name first (a fake helper script in the tests records its
+  arguments and writes a fixed PNG) and returns `None` when no helper exists.
 - `cached_icon`: writes `<sha>.png` once and reuses it; writes the `.none`
   marker and does not rescan.
 - `owner_avatar_url`: GitHub and AltStore sources.
@@ -99,5 +127,5 @@ name's hash, same rounded rectangle.
 ## Out of scope
 
 Grouping by source, a changelog disclosure, moving the sources pane, tvOS
-icon extraction from `Assets.car`, and icon caching on the Swift side beyond
-what `AsyncImage` does.
+layered icons (the helper handles flat icon assets only), and icon caching on
+the Swift side beyond what `AsyncImage` does.
