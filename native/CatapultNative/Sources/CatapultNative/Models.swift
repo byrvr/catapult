@@ -462,8 +462,14 @@ struct StoreApp: Codable, Hashable, Identifiable, Sendable {
     /// Per selected device: whether the daily store check may update this app.
     let autoUpdate: Bool?
     let pinned: Bool?
+    /// Across every device: an install record, even one made by hand before
+    /// the Store existed, matches this entry. `installedOn` names the devices.
+    let installedBefore: Bool?
+    let installedOn: [String]?
 
     var id: String { appKey }
+
+    var wasInstalledBefore: Bool { isInstalled || installedBefore == true }
 
     enum CodingKeys: String, CodingKey {
         case appKey = "app_key"
@@ -474,6 +480,8 @@ struct StoreApp: Codable, Hashable, Identifiable, Sendable {
         case updateAvailable = "update_available"
         case autoUpdate = "auto_update"
         case pinned
+        case installedBefore = "installed_before"
+        case installedOn = "installed_on"
     }
 
     var isInstalled: Bool { !(installedVersion ?? "").isEmpty }

@@ -438,3 +438,68 @@ def test_checksums_parse_the_bsd_style_format():
     digests = store.parse_checksums("SHA256 (App-tvOS-v2.0.ipa) = " + "CD" * 32 + "\n")
 
     assert digests == {"App-tvOS-v2.0.ipa": "cd" * 32}
+
+
+# ── "Installed before": matching install records to catalog entries ──────────
+
+def test_app_version_prefix_strips_tweak_and_tag_suffixes():
+    assert store.app_version_prefix("21.24.3-5.2.2") == "21.24.3"
+    assert store.app_version_prefix("v0.3.14-beta.12") == "0.3.14"
+    assert store.app_version_prefix("21.24.3") == "21.24.3"
+    assert store.app_version_prefix("beta") == ""
+
+
+def _entry(**overrides):
+    base = dict(source_id="github:mrdrvt99/YouProEXTRA", app_key="github:mrdrvt99/YouProEXTRA#YouTubePlus:unknown:",
+                name="YouTubePlus", version="21.24.3-5.2.2", platform="unknown",
+                download_url="https://x/YouTubePlus_21.24.3_5.2.2.ipa", size=128_944_853)
+    base.update(overrides)
+    return store.StoreApp(**base)
+
+
+YOUTUBE_ON_IPAD = {
+    "device_udid": "IPAD", "device_name": "Ruslan's iPad", "app_name": "YouTube",
+    "source_bundle_id": "com.google.ios.youtube", "app_version": "21.24.3",
+    "ipa_sha256": "983ea623" + "0" * 56, "ipa_size": 128_834_727,
+}
+
+
+def test_store_installed_records_match_by_key():
+    assert store.matches_install_record(_entry(), {**YOUTUBE_ON_IPAD, "store_app_key": _entry().app_key})
+
+
+def test_records_match_by_published_digest():
+    assert store.matches_install_record(_entry(sha256="983ea623" + "0" * 56), YOUTUBE_ON_IPAD)
+
+
+def test_github_entries_match_by_app_version_and_asset_size():
+    """No bundle id in a GitHub release; the YouTube version baked into the tag
+    plus the asset size is what tells one tweak of the same app from another."""
+    assert store.matches_install_record(_entry(), YOUTUBE_ON_IPAD)
+
+
+def test_a_different_tweak_of_the_same_app_version_does_not_match():
+    youpro = _entry(name="YouProExtra", version="21.24.3-1.3.1", size=119_894_440)
+
+    assert not store.matches_install_record(youpro, YOUTUBE_ON_IPAD)
+
+
+def test_a_different_app_version_does_not_match():
+    youmod = _entry(name="YouMod", version="21.35.3-2.0.0", size=128_284_527)
+
+    assert not store.matches_install_record(youmod, YOUTUBE_ON_IPAD)
+
+
+def test_a_record_without_a_version_cannot_match_by_size_alone():
+    assert not store.matches_install_record(_entry(), {**YOUTUBE_ON_IPAD, "app_version": ""})
+
+
+def test_altstore_entries_match_by_bundle_id_unless_version_or_size_disagree():
+    tweak = _entry(source_id="altstore:x", app_key="altstore:x#com.google.ios.youtube",
+                   bundle_id="com.google.ios.youtube", version="21.24.3", size=0)
+
+    assert store.matches_install_record(tweak, YOUTUBE_ON_IPAD)
+    assert not store.matches_install_record(tweak, {**YOUTUBE_ON_IPAD, "app_version": "20.1.0"})
+    assert not store.matches_install_record(
+        _entry(bundle_id="com.google.ios.youtube", size=100_000_000), YOUTUBE_ON_IPAD
+    )

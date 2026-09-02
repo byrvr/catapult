@@ -5,10 +5,27 @@ import SwiftUI
 /// The catalog is filtered to the selected device, so an Apple TV never sees an
 /// iOS build. Installs run through the same pipeline as the Install tab; the
 /// update badge comes from comparing the installed version with the source.
+private enum StoreFilter: Hashable {
+    case all, installed, new
+}
+
 struct StoreView: View {
     @EnvironmentObject private var state: AppState
     @State private var newSourceURL = ""
     @State private var showingSources = false
+    @State private var filter: StoreFilter = .all
+
+    /// Apps that pass the All / Installed / New filter. "Installed" includes
+    /// anything installed before, on any device, not only Store installs.
+    private var visibleApps: [StoreApp] {
+        state.storeApps.filter { app in
+            switch filter {
+            case .all: true
+            case .installed: app.wasInstalledBefore
+            case .new: !app.wasInstalledBefore
+            }
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -37,6 +54,14 @@ struct StoreView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
+            Picker("Show", selection: $filter) {
+                Text("All").tag(StoreFilter.all)
+                Text("Installed").tag(StoreFilter.installed)
+                Text("New").tag(StoreFilter.new)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 220)
             Button {
                 showingSources.toggle()
             } label: {
@@ -135,6 +160,13 @@ struct StoreView: View {
                 : "This source publishes no build for the selected device."
             EmptyState(icon: "shippingbox", title: "Nothing to install here", detail: detail)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if visibleApps.isEmpty {
+            EmptyState(
+                icon: "line.3.horizontal.decrease.circle",
+                title: filter == .installed ? "Nothing installed before" : "Nothing new",
+                detail: "No apps match the current filter."
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             ScrollView {
                 if state.storeFreeTeam {
@@ -148,7 +180,7 @@ struct StoreView: View {
                     .padding(.top, 12)
                 }
                 LazyVStack(spacing: 8) {
-                    ForEach(state.storeApps) { app in
+                    ForEach(visibleApps) { app in
                         StoreAppRow(app: app)
                     }
                 }
@@ -190,6 +222,17 @@ private struct StoreAppRow: View {
                 Text("\(app.version) · \(app.platformLabel) · \(app.sizeLabel)")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+                if app.installedBefore == true, !app.isInstalled {
+                    // Matched to an install record from any device, including
+                    // hand installs that predate the Store.
+                    let devices = (app.installedOn ?? []).joined(separator: ", ")
+                    Text(devices.isEmpty ? "Installed before" : "Installed before on \(devices)")
+                        .font(.caption2)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.secondary.opacity(0.15), in: Capsule())
+                        .foregroundStyle(.secondary)
+                }
                 if app.isInstalled, let installed = app.installedVersion {
                     Text(app.updateAvailable == true
                          ? "Installed \(installed) — update available"

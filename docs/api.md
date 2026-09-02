@@ -248,7 +248,11 @@ The source is fetched once before it is saved; `400` if it cannot be read,
 The merged catalog, filtered to builds that fit the selected device. Each app
 carries `installed_version`, `update_available`, `auto_update` and `pinned`
 for **that device**, plus `sha256` when the release publishes a `SHA256SUMS`
-asset (or an AltStore source publishes a digest). Also returns `errors` (per
+asset (or an AltStore source publishes a digest). `installed_before` and
+`installed_on` say whether any install record on any device matches the
+entry — by store link, published digest, bundle id, or the app version baked
+into the tag together with the asset size — so hand installs that predate the
+Store are still recognised. Also returns `errors` (per
 source), `device_class`, and `free_team`.
 
 ### `POST /api/store/apps/auto-update`

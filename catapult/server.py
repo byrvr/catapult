@@ -1379,6 +1379,7 @@ async def _install_app(
         ipa_size=vaulted["size"],
         original_filename=vaulted["original_filename"],
         expires_at=_provisioning.profile_expiration_ts(profile),
+        app_version=ipa_info.get("version", ""),
     )
     await _sync_state_for_team(session.apple_id, team_id)
 
@@ -1568,21 +1569,23 @@ async def list_store_apps(device_udid: str = ""):
         except Exception:
             logger.debug("Could not resolve device for store filter", exc_info=True)
 
-    apps: list[dict] = []
+    entries: list["_store.StoreApp"] = []
     errors: list[dict] = []
     for source in _store.load_sources():
         try:
             for app in await _store.fetch_catalog(source):
                 if device_class and not _store.platform_fits_device(app.platform, device_class):
                     continue
-                apps.append(app.to_dict())
+                entries.append(app)
         except Exception as e:
             logger.info("Source %s failed: %s", source.id, e)
             errors.append({"source_id": source.id, "message": str(e)})
 
-    records = [
-        rec for rec in _refresh.load_state().get("installs", []) if rec.get("store_app_key")
-    ]
+    state = _refresh.load_state()
+    all_records = state.get("installs", [])
+    if _backfill_app_versions(all_records):
+        _refresh.save_state(state)
+    records = [rec for rec in all_records if rec.get("store_app_key")]
 
     def _record_for(app_key: str) -> dict | None:
         # Installed state is per device: the same catalog entry can be on the
@@ -1594,13 +1597,21 @@ async def list_store_apps(device_udid: str = ""):
                 return rec
         return None
 
-    for app in apps:
-        rec = _record_for(app["app_key"]) or {}
+    apps: list[dict] = []
+    for entry in entries:
+        app = entry.to_dict()
+        rec = _record_for(entry.app_key) or {}
         current = rec.get("store_version") or ""
         app["installed_version"] = current
         app["update_available"] = bool(current) and _store.is_newer(app["version"], current)
         app["auto_update"] = bool(rec.get("store_auto_update"))
         app["pinned"] = bool(rec.get("store_pinned"))
+        # "Installed before": any record, on any device, that is very likely
+        # this entry — including installs made by hand before the Store existed.
+        matched = [r for r in all_records if _store.matches_install_record(entry, r)]
+        app["installed_before"] = bool(matched)
+        app["installed_on"] = sorted({r.get("device_name") or r.get("device_udid", "") for r in matched})
+        apps.append(app)
 
     return {
         "apps": apps,
@@ -1608,6 +1619,22 @@ async def list_store_apps(device_udid: str = ""):
         "device_class": device_class,
         "free_team": await _team_is_free(),
     }
+
+
+def _backfill_app_versions(records: list[dict]) -> bool:
+    """Fill ``app_version`` on records that predate the field, from the vault copy.
+
+    Returns True when anything changed so the caller can persist it once.
+    """
+    changed = False
+    for rec in records:
+        if rec.get("app_version"):
+            continue
+        version = _vault.ipa_app_version(_vault.resolve_ipa_path(rec))
+        if version:
+            rec["app_version"] = version
+            changed = True
+    return changed
 
 
 async def _team_is_free() -> bool:
