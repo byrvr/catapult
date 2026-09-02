@@ -62,6 +62,7 @@
 ### Signing
 
 - Nested app extensions and frameworks are signed under their own bundle identifiers.
+- A watchOS app inside an IPA is dropped before signing. It named the original app as its companion, so once Catapult namespaced the bundle identifier the whole install was rejected with `InvalidCompanionAppBundleIdentifier`. App Store builds ship it as a placeholder with no executable, and Catapult provisions no watchOS App IDs, so nothing that would have worked is lost.
 
 ## 0.3.8 - 2026-07-17
 

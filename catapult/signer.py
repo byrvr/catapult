@@ -60,6 +60,8 @@ class Signer:
             app_dir = await self._ipa.extract(ipa_path, work_dir)
             logger.info("Extracted %s to %s", ipa_path.name, app_dir)
 
+            self.strip_watch_apps(app_dir)
+
             # Update bundle ID for sideloading
             if new_bundle_id:
                 self._update_bundle_id(app_dir, new_bundle_id)
@@ -422,6 +424,26 @@ class Signer:
             if identifier:
                 return str(identifier)
         return None
+
+    # An App Store build ships its watchOS app either as a real bundle under
+    # Watch/ or, more often, as an on-demand placeholder under this name.
+    WATCH_DIRS = ("com.apple.WatchPlaceholder", "Watch")
+
+    def strip_watch_apps(self, app_dir: Path):
+        """Drop any watchOS app from the payload before signing.
+
+        A placeholder has no executable, so it could never run sideloaded, and
+        a real watch app would need watchOS App IDs and profiles that Catapult
+        does not create. Either way its WKCompanionAppBundleIdentifier still
+        names the original app, and once the bundle ID is namespaced installd
+        rejects the entire install with InvalidCompanionAppBundleIdentifier.
+        """
+        for name in self.WATCH_DIRS:
+            watch_dir = app_dir / name
+            if not watch_dir.is_dir():
+                continue
+            shutil.rmtree(watch_dir, ignore_errors=True)
+            logger.info("Removed the watch app at %s: Catapult cannot provision watchOS", name)
 
     def _update_bundle_id(self, app_dir: Path, new_id: str):
         """Rewrite CFBundleIdentifier in the app and nested app extensions."""
