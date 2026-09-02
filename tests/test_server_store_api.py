@@ -76,3 +76,37 @@ def test_auto_update_toggle_404s_for_an_unknown_install(client, monkeypatch):
     )
 
     assert response.status_code == 404
+
+
+def test_catalog_marks_apps_installed_before_across_devices(client, monkeypatch):
+    """A YouTube tweak installed by hand before the Store existed has no store
+    link, but the vault knows its version and size. Only the matching entry is
+    marked, and it says which devices it went to."""
+    source = store.normalize_source("mrdrvt99/YouProEXTRA")
+    monkeypatch.setattr(server._store, "load_sources", lambda: [source])
+
+    def entry(name, version, size):
+        return store.StoreApp(source_id=source.id, app_key=f"{source.id}#{name}:unknown:",
+                              name=name, version=version, platform="unknown",
+                              download_url=f"https://x/{name}.ipa", size=size)
+
+    async def fetch_catalog(src):
+        return [entry("YouTubePlus", "21.24.3-5.2.2", 128_944_853),
+                entry("YouProExtra", "21.24.3-1.3.1", 119_894_440),
+                entry("YouMod", "21.35.3-2.0.0", 128_284_527)]
+
+    record = {"app_name": "YouTube", "source_bundle_id": "com.google.ios.youtube",
+              "app_version": "21.24.3", "ipa_sha256": "9" * 64, "ipa_size": 128_834_727}
+    monkeypatch.setattr(server._store, "fetch_catalog", fetch_catalog)
+    monkeypatch.setattr(server._refresh, "load_state", lambda: {"installs": [
+        {**record, "device_udid": "IPAD", "device_name": "Ruslan's iPad"},
+        {**record, "device_udid": "IPHONE", "device_name": "Ruslan's iPhone"},
+    ]})
+
+    body = client.get("/api/store/apps").json()
+    by_name = {app["name"]: app for app in body["apps"]}
+
+    assert by_name["YouTubePlus"]["installed_before"] is True
+    assert by_name["YouTubePlus"]["installed_on"] == ["Ruslan's iPad", "Ruslan's iPhone"]
+    assert by_name["YouProExtra"]["installed_before"] is False
+    assert by_name["YouMod"]["installed_before"] is False

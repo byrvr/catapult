@@ -202,6 +202,51 @@ def version_key(tag: str) -> tuple:
     return (tuple(numeric), 1 if not suffix else 0, tuple(suffix))
 
 
+def app_version_prefix(version: str) -> str:
+    """The app's own version out of a tag or filename version.
+
+    "21.24.3-5.2.2" is YouTube 21.24.3 with tweak build 5.2.2; "v0.3.14-beta.12"
+    is 0.3.14. The numeric prefix is what an installed IPA's Info.plist reports.
+    """
+    match = re.match(r"^v?(\d+(?:\.\d+)*)", (version or "").strip())
+    return match.group(1) if match else ""
+
+
+# Two builds of the same tweak differ by a few hundred KB; two different tweaks
+# of the same app differ by several MB.
+INSTALL_SIZE_TOLERANCE = 0.02
+
+
+def matches_install_record(app: StoreApp, record: dict) -> bool:
+    """Whether an install record is, very likely, this catalog entry.
+
+    Store-tagged records and published digests are exact. Everything else is
+    the "installed before the Store existed" case: a GitHub asset carries no
+    bundle id, and every YouTube tweak shares com.google.ios.youtube anyway,
+    so the app version baked into the tag plus the asset size tell one tweak
+    from another.
+    """
+    if app.app_key and record.get("store_app_key") == app.app_key:
+        return True
+    if app.sha256 and record.get("ipa_sha256") == app.sha256:
+        return True
+
+    version = app_version_prefix(app.version)
+    record_version = app_version_prefix(record.get("app_version") or "")
+    same_version = bool(version and record_version and version == record_version)
+    record_size = int(record.get("ipa_size") or 0)
+    size_known = bool(app.size and record_size)
+    close_size = size_known and abs(record_size - app.size) / app.size <= INSTALL_SIZE_TOLERANCE
+
+    if app.bundle_id and record.get("source_bundle_id") == app.bundle_id:
+        if version and record_version and not same_version:
+            return False
+        if size_known and not close_size:
+            return False
+        return True
+    return same_version and close_size
+
+
 def is_newer(candidate: str, installed: str | None) -> bool:
     if not installed:
         return True

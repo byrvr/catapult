@@ -131,6 +131,7 @@ def record_install(
     ipa_size: int | None = None,
     original_filename: str = "",
     expires_at: float | None = None,
+    app_version: str = "",
 ):
     state = load_state()
     installs = state.get("installs", [])
@@ -170,6 +171,8 @@ def record_install(
                 rec["ipa_size"] = ipa_size
             if original_filename:
                 rec["original_filename"] = original_filename
+            if app_version:
+                rec["app_version"] = app_version
             rec["fail_count"] = 0
             rec.pop("next_attempt_at", None)
             save_state(state)
@@ -184,6 +187,7 @@ def record_install(
         "ipa_sha256": ipa_sha256,
         "ipa_size": ipa_size,
         "original_filename": original_filename,
+        "app_version": app_version,
     })
     _stamp_refresh_schedule(installs[-1], installed_at, expires_at)
     state["installs"] = installs
@@ -614,6 +618,7 @@ async def _refresh_install(rec, device_manager, auth_client, dev_services, signe
             ipa_size=rec.get("ipa_size"),
             original_filename=rec.get("original_filename", ""),
             expires_at=provisioning.profile_expiration_ts(profile),
+            app_version=ipa_info.get("version", ""),
         )
         logger.info("Auto-refresh complete: %s", ipa_path)
         return {"status": "ok", "message": "Auto-refresh complete."}
