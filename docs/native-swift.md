@@ -9,7 +9,7 @@ as a local backend. This keeps the fragile Apple provisioning, signing, and
 
 ```bash
 cd native/CatapultNative
-swift run
+swift run CatapultNative
 ```
 
 The app finds the repository root, starts:

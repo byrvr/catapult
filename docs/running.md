@@ -22,7 +22,7 @@ uv sync
 Build and run the SwiftUI macOS app:
 ```bash
 cd native/CatapultNative
-swift run
+swift run CatapultNative
 ```
 
 The native app starts the local Python engine automatically.
