@@ -50,6 +50,7 @@
 - Installed store apps can opt into daily automatic updates from the Store tab; an update installs only when the device is reachable, never asks for an admin password, and yields to another Mac's refresh lease.
 - Downloads are verified against the release's `SHA256SUMS` file when it publishes one, and against the digest an AltStore source publishes.
 - Apps you installed before, on any device and even by hand before the Store existed, are marked with the devices they went to, and the catalog can be filtered to All, Installed, or New. Install records now carry the app version so those matches keep working.
+- The Store shows app icons: the source's own, the real icon pulled from an IPA already on this Mac (including from Assets.car), or the publisher's avatar.
 
 ### Apple TV tunnel
 
