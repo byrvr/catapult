@@ -212,27 +212,58 @@ def app_version_prefix(version: str) -> str:
     return match.group(1) if match else ""
 
 
-# Two builds of the same tweak differ by a few hundred KB; two different tweaks
-# of the same app differ by several MB.
-INSTALL_SIZE_TOLERANCE = 0.02
+def _version_tuple(prefix: str) -> tuple[int, ...]:
+    """Numeric version with trailing zeros dropped, so 2.0 equals v2.0.0."""
+    parts = [int(piece) for piece in prefix.split(".")] if prefix else []
+    while parts and parts[-1] == 0:
+        parts.pop()
+    return tuple(parts)
 
 
-def matches_install_record(app: StoreApp, record: dict) -> bool:
-    """Whether an install record is, very likely, this catalog entry.
+_HASH_STEM = re.compile(r"^(?:[0-9a-f]{32}|[0-9a-f]{64})$", re.I)
 
-    Store-tagged records and published digests are exact. Everything else is
-    the "installed before the Store existed" case: a GitHub asset carries no
-    bundle id, and every YouTube tweak shares com.google.ios.youtube anyway,
-    so the app version baked into the tag plus the asset size tell one tweak
-    from another.
+
+def _asset_name(filename: str) -> str:
+    """The app name a filename carries, or "" for hash-named vault copies."""
+    stem = PurePosixPath(unquote(filename or "")).stem
+    if not stem or _HASH_STEM.match(stem):
+        return ""
+    name = app_name_for_asset(filename)
+    return "" if _HASH_STEM.match(name) else name.casefold()
+
+
+# Two builds of the same tweak differ by a few hundred KB; different tweaks
+# of the same app version differ by more than a percent.
+INSTALL_SIZE_TOLERANCE = 0.01
+
+
+def match_strength(app: StoreApp, record: dict) -> str | None:
+    """How surely an install record is this catalog entry.
+
+    "exact": the record was installed from this entry (store link) or is the
+    published asset byte for byte (digest). "likely": the record was installed
+    by hand and matches by the name in its original filename, by bundle id, or
+    — for GitHub assets that carry no bundle id — by the app version baked into
+    the tag together with the asset size. Every YouTube tweak shares
+    com.google.ios.youtube, so version and size are what tell them apart, and
+    a filename such as YouTubePlus_21.20.1_5.1.0.ipa keeps naming its tweak
+    after the source has moved on to a newer version.
     """
-    if app.app_key and record.get("store_app_key") == app.app_key:
-        return True
+    key = record.get("store_app_key") or ""
+    if app.app_key and key == app.app_key:
+        return "exact"
     if app.sha256 and record.get("ipa_sha256") == app.sha256:
-        return True
+        return "exact"
+    if key and app.source_id and key.startswith(app.source_id + "#"):
+        return None  # a different entry of this very source
 
-    version = app_version_prefix(app.version)
-    record_version = app_version_prefix(record.get("app_version") or "")
+    entry_name = _asset_name(app.download_url.rsplit("/", 1)[-1])
+    record_name = _asset_name(record.get("original_filename") or "")
+    if entry_name and record_name:
+        return "likely" if entry_name == record_name else None
+
+    version = _version_tuple(app_version_prefix(app.version))
+    record_version = _version_tuple(app_version_prefix(record.get("app_version") or ""))
     same_version = bool(version and record_version and version == record_version)
     record_size = int(record.get("ipa_size") or 0)
     size_known = bool(app.size and record_size)
@@ -240,11 +271,16 @@ def matches_install_record(app: StoreApp, record: dict) -> bool:
 
     if app.bundle_id and record.get("source_bundle_id") == app.bundle_id:
         if version and record_version and not same_version:
-            return False
+            return None
         if size_known and not close_size:
-            return False
-        return True
-    return same_version and close_size
+            return None
+        return "likely"
+    return "likely" if (same_version and close_size) else None
+
+
+def matches_install_record(app: StoreApp, record: dict) -> bool:
+    """Whether an install record is, very likely, this catalog entry."""
+    return match_strength(app, record) is not None
 
 
 def is_newer(candidate: str, installed: str | None) -> bool:

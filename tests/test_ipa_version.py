@@ -25,3 +25,13 @@ def test_missing_or_broken_files_yield_an_empty_version(tmp_path):
     assert vault.ipa_app_version(tmp_path / "absent.ipa") == ""
     (tmp_path / "junk.ipa").write_bytes(b"not a zip")
     assert vault.ipa_app_version(tmp_path / "junk.ipa") == ""
+
+
+def test_a_non_dict_or_malformed_plist_yields_an_empty_version(tmp_path):
+    with zipfile.ZipFile(tmp_path / "list.ipa", "w") as z:
+        z.writestr("Payload/A.app/Info.plist", plistlib.dumps(["not", "a", "dict"]))
+    with zipfile.ZipFile(tmp_path / "broken.ipa", "w") as z:
+        z.writestr("Payload/A.app/Info.plist", b"<?xml version='1.0'?><plist><dict><key>x")
+
+    assert vault.ipa_app_version(tmp_path / "list.ipa") == ""
+    assert vault.ipa_app_version(tmp_path / "broken.ipa") == ""
