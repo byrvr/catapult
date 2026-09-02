@@ -86,8 +86,12 @@ def ipa_app_version(path: str | Path | None) -> str:
             for name in archive.namelist():
                 if re.match(r"^Payload/[^/]+\.app/Info\.plist$", name):
                     info = plistlib.loads(archive.read(name))
+                    if not isinstance(info, dict):
+                        return ""
                     return str(info.get("CFBundleShortVersionString") or info.get("CFBundleVersion") or "")
-    except (OSError, zipfile.BadZipFile, plistlib.InvalidFileException, ValueError, KeyError):
+    except Exception:
+        # Best effort by contract: a corrupt member, a malformed plist, or a
+        # bad deflate stream must not take the catalog request down with it.
         return ""
     return ""
 

@@ -503,3 +503,57 @@ def test_altstore_entries_match_by_bundle_id_unless_version_or_size_disagree():
     assert not store.matches_install_record(
         _entry(bundle_id="com.google.ios.youtube", size=100_000_000), YOUTUBE_ON_IPAD
     )
+
+
+# ── Review fixes: stronger signals, fewer false positives ────────────────────
+
+def test_a_store_key_for_another_entry_of_the_same_source_rules_the_record_out():
+    """A record that names a different entry of this source is that entry,
+    however close the sizes are."""
+    record = {**YOUTUBE_ON_IPAD, "store_app_key": "github:mrdrvt99/YouProEXTRA#YouProExtra:unknown:"}
+
+    assert not store.matches_install_record(_entry(), record)
+
+
+def test_version_prefixes_compare_numerically():
+    """A tag of v2.0.0 and an Info.plist of 2.0 are the same version."""
+    entry = _entry(bundle_id="com.foo.bar", version="v2.0.0", size=0)
+
+    assert store.matches_install_record(entry, {"source_bundle_id": "com.foo.bar", "app_version": "2.0"})
+
+
+def test_a_recognisable_filename_survives_source_updates():
+    """The IPA was downloaded as YouTubePlus_21.20.1_5.1.0.ipa; the source has
+    since moved on to 21.24.3. The name in the filename still says which tweak
+    it was, so the badge does not vanish at the first upstream release."""
+    record = {**YOUTUBE_ON_IPAD, "app_version": "21.20.1", "ipa_size": 120_000_000,
+              "original_filename": "YouTubePlus_21.20.1_5.1.0.ipa"}
+
+    assert store.match_strength(_entry(), record) == "likely"
+
+
+def test_a_recognisable_filename_naming_another_tweak_rules_it_out():
+    record = {**YOUTUBE_ON_IPAD, "ipa_size": 128_944_853,
+              "original_filename": "YouProExtra_21.24.3_1.3.1.ipa"}
+
+    assert not store.matches_install_record(_entry(), record)
+
+
+def test_hash_named_files_carry_no_name_and_fall_back_to_version_and_size():
+    record = {**YOUTUBE_ON_IPAD, "original_filename": "983ea623" + "0" * 56 + ".ipa"}
+
+    assert store.matches_install_record(_entry(), record)
+
+
+def test_size_tolerance_separates_tweaks_of_one_version():
+    """Two builds of the same tweak differ by a few hundred KB; different
+    tweaks of the same app version differ by more than 1%."""
+    assert store.matches_install_record(_entry(size=129_400_000), YOUTUBE_ON_IPAD)       # 0.4% off
+    assert not store.matches_install_record(_entry(size=130_800_000), YOUTUBE_ON_IPAD)   # 1.5% off
+
+
+def test_match_strength_tells_exact_links_from_heuristics():
+    assert store.match_strength(_entry(), {**YOUTUBE_ON_IPAD, "store_app_key": _entry().app_key}) == "exact"
+    assert store.match_strength(_entry(sha256="983ea623" + "0" * 56), YOUTUBE_ON_IPAD) == "exact"
+    assert store.match_strength(_entry(), YOUTUBE_ON_IPAD) == "likely"
+    assert store.match_strength(_entry(name="YouMod", version="21.35.3-2.0.0"), YOUTUBE_ON_IPAD) is None

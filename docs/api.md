@@ -249,10 +249,16 @@ The merged catalog, filtered to builds that fit the selected device. Each app
 carries `installed_version`, `update_available`, `auto_update` and `pinned`
 for **that device**, plus `sha256` when the release publishes a `SHA256SUMS`
 asset (or an AltStore source publishes a digest). `installed_before` and
-`installed_on` say whether any install record on any device matches the
-entry — by store link, published digest, bundle id, or the app version baked
-into the tag together with the asset size — so hand installs that predate the
-Store are still recognised. Also returns `errors` (per
+`installed_on` (device names, one per device) say whether any install record
+on any device matches the entry. Store installs match by their link, published
+digests match exactly, and hand installs match by the app name in the file
+they were installed from, by bundle id, or by the app version baked into the
+tag together with the asset size (within 1%; when several tweaks of one
+version qualify, the record counts for the closest one only). A hand install
+whose file carried no recognisable name is matched by version, so it stops
+being marked once the source publishes a newer version; installing it once
+from the Store links it permanently. Loading the catalog also backfills
+`app_version` on older install records from the vaulted IPA, once. Also returns `errors` (per
 source), `device_class`, and `free_team`.
 
 ### `POST /api/store/apps/auto-update`

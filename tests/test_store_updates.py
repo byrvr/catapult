@@ -216,3 +216,17 @@ async def test_a_check_where_every_source_failed_is_retried_next_hour(tmp_path, 
 
     assert summary["source_errors"] == ["github:VortXTV/VortX"]
     assert refresh.load_state().get("store_checked_at") is None
+
+
+def test_record_install_stores_the_app_version(tmp_path, monkeypatch):
+    from catapult import vault
+
+    monkeypatch.setattr(refresh, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(vault, "IPA_VAULT_DIR", tmp_path / "IPAs")
+    ipa = tmp_path / "app.ipa"
+    ipa.write_bytes(b"PK\x03\x04" + b"x" * 100)
+
+    refresh.record_install("DEV1", str(ipa), "iPad", bundle_id="com.x.app", app_version="21.24.3")
+
+    (record,) = refresh.load_state()["installs"]
+    assert record["app_version"] == "21.24.3"
