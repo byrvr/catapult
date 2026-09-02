@@ -8,7 +8,10 @@ matched to a remote encrypted blob by SHA-256.
 from __future__ import annotations
 
 import hashlib
+import plistlib
+import re
 import shutil
+import zipfile
 from pathlib import Path
 
 
@@ -67,6 +70,26 @@ def resolve_ipa_path(record: dict) -> Path | None:
         if candidate.exists():
             return candidate
     return None
+
+
+def ipa_app_version(path: str | Path | None) -> str:
+    """CFBundleShortVersionString from an IPA's Info.plist, or "" if unreadable.
+
+    Install records made before the Store existed carry no version; this reads
+    it off the vaulted copy so those installs can still be matched to catalog
+    entries.
+    """
+    if not path:
+        return ""
+    try:
+        with zipfile.ZipFile(path) as archive:
+            for name in archive.namelist():
+                if re.match(r"^Payload/[^/]+\.app/Info\.plist$", name):
+                    info = plistlib.loads(archive.read(name))
+                    return str(info.get("CFBundleShortVersionString") or info.get("CFBundleVersion") or "")
+    except (OSError, zipfile.BadZipFile, plistlib.InvalidFileException, ValueError, KeyError):
+        return ""
+    return ""
 
 
 def has_ipa(sha256: str | None) -> bool:
