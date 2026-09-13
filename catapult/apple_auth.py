@@ -115,19 +115,70 @@ def _decrypt_spd(session_key: bytes, data: bytes) -> dict:
     return plistlib.loads(decrypted)
 
 
+class GSAError(RuntimeError):
+    """Apple's GrandSlam service returned something we could not use."""
+
+
 class AppleAuthClient:
     def __init__(self):
         self.session: AuthSession | None = None
-        # Use macOS system trust store so Apple's CA is trusted
-        ctx = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        self._client = httpx.AsyncClient(timeout=30, verify=ctx)
+        self._client = self._new_client()
         self._last_password: str = ""
+
+    @staticmethod
+    def _new_client() -> httpx.AsyncClient:
+        # Use macOS system trust store so Apple's CA is trusted.
+        ctx = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        return httpx.AsyncClient(timeout=30, verify=ctx)
+
+    async def _reset_client(self) -> None:
+        """Drop the connection pool and open a fresh one.
+
+        GSA's edge terminates a keep-alive connection on a backend node; when
+        that node fails, every later request on the same connection comes back
+        as a 5xx HTML error page instead of a plist. A brand-new connection
+        lands on a healthy node.
+        """
+        old, self._client = self._client, self._new_client()
+        try:
+            await old.aclose()
+        except Exception:
+            pass
 
     async def _gsa_request(self, request_body: dict) -> dict:
         body = plistlib.dumps({"Header": {"Version": "1.0.1"}, "Request": request_body})
-        resp = await self._client.post(GSA_ENDPOINT, content=body, headers=gsa_request_headers())
-        logger.debug("GSA HTTP %d (%d bytes)", resp.status_code, len(resp.content))
-        return plistlib.loads(resp.content)
+        detail = ""
+        for attempt in range(5):
+            if attempt:
+                await asyncio.sleep(min(attempt, 3))
+            try:
+                resp = await self._client.post(
+                    GSA_ENDPOINT, content=body, headers=gsa_request_headers()
+                )
+            except httpx.HTTPError as e:
+                detail = f"transport error: {e}"
+                logger.warning("GSA request failed (%s) — retrying on a fresh connection", detail)
+                await self._reset_client()
+                continue
+
+            ctype = resp.headers.get("content-type", "")
+            logger.debug("GSA HTTP %d %s (%d bytes)", resp.status_code, ctype, len(resp.content))
+            if resp.status_code >= 500 or "html" in ctype.lower():
+                # A pinned-node failure: not a plist, retrying on a new
+                # connection recovers it. See _reset_client.
+                detail = f"HTTP {resp.status_code} {ctype or '?'}: {resp.text[:160]!r}"
+                logger.warning("GSA returned a non-plist response (%s) — retrying", detail)
+                await self._reset_client()
+                continue
+            try:
+                return plistlib.loads(resp.content)
+            except Exception:
+                detail = f"HTTP {resp.status_code} {ctype or '?'}: {resp.text[:160]!r}"
+                logger.warning("GSA response did not parse as a plist (%s) — retrying", detail)
+                await self._reset_client()
+                continue
+
+        raise GSAError(f"Apple's sign-in service kept returning an error ({detail}). Try again in a moment.")
 
     async def authenticate(self, apple_id: str, password: str) -> dict:
         self._last_password = password
