@@ -38,20 +38,30 @@ def _cert_pem(not_after=dt.datetime(2027, 1, 1)):
     return cert.public_bytes(serialization.Encoding.PEM), key
 
 
-class Harness:
-    """A DeveloperServices whose Apple calls are scripted."""
+MACHINE = "MACHINE-UUID-1"
 
-    def __init__(self, monkeypatch, *, stored=None, csr_result_codes=()):
+
+class Harness:
+    """A DeveloperServices whose Apple calls are scripted.
+
+    ``revocations`` records the scope of every revocation Catapult asked for;
+    ``revoke_counts`` scripts how many certificates each of those found.
+    """
+
+    def __init__(self, monkeypatch, *, stored=None, csr_result_codes=(), revoke_counts=()):
         self.services = DeveloperServices()
         self.requests: list[str] = []
-        self.revocations: list[bool] = []
+        self.csr_fields: list[dict] = []
+        self.revocations: list[dict] = []
         self.saved: list[object] = []
         codes = list(csr_result_codes)
+        counts = list(revoke_counts)
         self.cert_pem, _ = _cert_pem()
 
         async def fake_request(session, action, fields=None):
             self.requests.append(action)
             if action == CSR:
+                self.csr_fields.append(dict(fields or {}))
                 code = codes.pop(0) if codes else 0
                 if code:
                     raise DeveloperServicesError("blocked", result_code=code)
@@ -60,8 +70,15 @@ class Harness:
                 return {"certificates": [{"certificateId": "ABC123", "serialNumber": "1234"}]}
             raise AssertionError(f"unexpected request {action}")
 
-        async def fake_revoke(session, team_id, *, catapult_only=False):
-            self.revocations.append(catapult_only)
+        async def fake_revoke(session, team_id, *, catapult_only=False, machine_id=None):
+            scope = {"catapult_only": catapult_only}
+            if machine_id is not None:
+                scope["machine_id"] = machine_id
+            self.revocations.append(scope)
+            return counts.pop(0) if counts else 1
+
+        monkeypatch.setattr("catapult.developer.RETRY_DELAY_SECONDS", 0)
+        monkeypatch.setattr(DeveloperServices, "_machine_id", staticmethod(lambda: MACHINE))
 
         async def fake_download(session, team_id):
             return self.cert_pem
@@ -102,16 +119,68 @@ async def test_revokes_only_when_apple_says_the_slot_is_taken(monkeypatch):
 
     await h.services.get_or_create_cert(object(), TEAM)
 
-    assert h.revocations == [False]  # personal team: every cert may go
+    assert h.revocations == [{"catapult_only": False}]  # personal team: every cert may go
     assert h.requests.count(CSR) == 2
 
 
-async def test_paid_team_revocation_is_scoped_to_catapult_certs(monkeypatch):
+async def test_paid_team_revokes_this_macs_certificates_first(monkeypatch):
+    """A blocked CSR on a paid team is almost always this Mac's own stale or
+    pending request. Revoking every Catapult certificate on the team — the old
+    behaviour — sent the account holder one revocation mail per certificate."""
     h = Harness(monkeypatch, csr_result_codes=[7460, 0])
 
     await h.services.get_or_create_cert(object(), TEAM, personal_team=False)
 
-    assert h.revocations == [True]
+    assert h.revocations == [{"catapult_only": True, "machine_id": MACHINE}]
+    assert h.requests.count(CSR) == 2
+
+
+async def test_paid_team_widens_to_all_catapult_certs_only_if_still_blocked(monkeypatch):
+    h = Harness(monkeypatch, csr_result_codes=[7460, 7460, 0])
+
+    await h.services.get_or_create_cert(object(), TEAM, personal_team=False)
+
+    assert h.revocations == [
+        {"catapult_only": True, "machine_id": MACHINE},
+        {"catapult_only": True},
+    ]
+    assert h.requests.count(CSR) == 3
+
+
+async def test_paid_team_skips_the_retry_when_nothing_of_this_mac_was_found(monkeypatch):
+    """No certificate carried this Mac's id, so the same CSR would be refused
+    again: widen straight away rather than ask Apple twice."""
+    h = Harness(monkeypatch, csr_result_codes=[7460, 0], revoke_counts=[0, 3])
+
+    await h.services.get_or_create_cert(object(), TEAM, personal_team=False)
+
+    assert h.revocations == [
+        {"catapult_only": True, "machine_id": MACHINE},
+        {"catapult_only": True},
+    ]
+    assert h.requests.count(CSR) == 2
+
+
+async def test_paid_team_gives_up_after_the_widest_scope(monkeypatch):
+    h = Harness(monkeypatch, csr_result_codes=[7460, 7460, 7460])
+
+    with pytest.raises(DeveloperServicesError) as excinfo:
+        await h.services.get_or_create_cert(object(), TEAM, personal_team=False)
+
+    assert excinfo.value.result_code == 7460
+    assert h.requests.count(CSR) == 3
+    assert h.revocations[-1] == {"catapult_only": True}
+
+
+async def test_csr_carries_this_macs_stable_machine_id(monkeypatch):
+    """A random UUID per request made every certificate look like a different
+    machine's, so nothing could tell this Mac's stale certificates apart."""
+    h = Harness(monkeypatch)
+
+    await h.services.get_or_create_cert(object(), TEAM)
+
+    assert [f["machineId"] for f in h.csr_fields] == [MACHINE]
+    assert h.csr_fields[0]["machineName"] == "Catapult"
 
 
 async def test_other_csr_errors_propagate_without_revoking(monkeypatch):
@@ -121,3 +190,37 @@ async def test_other_csr_errors_propagate_without_revoking(monkeypatch):
         await h.services.get_or_create_cert(object(), TEAM)
 
     assert h.revocations == []
+
+
+async def test_revocation_scope_and_count(monkeypatch):
+    """Only Catapult's certificates from this Mac are revoked, and the count
+    reflects what was actually sent to Apple — a certificate with neither a
+    serial nor an id cannot be revoked and must not make a retry look useful."""
+    services = DeveloperServices()
+    requests: list[tuple[str, dict]] = []
+
+    async def fake_request(session, action, fields=None):
+        requests.append((action, dict(fields or {})))
+        if action == "ios/listAllDevelopmentCerts.action":
+            return {"certificates": [
+                {"machineName": "Catapult", "machineId": MACHINE, "serialNumber": "1"},
+                {"machineName": "Catapult", "machineId": MACHINE, "certificateId": "ID2"},
+                {"machineName": "Catapult", "machineId": MACHINE},
+                {"machineName": "Catapult", "machineId": "OTHER-MAC", "serialNumber": "9"},
+                {"machineName": "Xcode", "serialNumber": "7"},
+            ]}
+        if action == "ios/revokeDevelopmentCert.action":
+            return {}
+        raise AssertionError(f"unexpected request {action}")
+
+    services._request = fake_request
+
+    revoked = await services._revoke_all_certs(
+        object(), TEAM, catapult_only=True, machine_id=MACHINE
+    )
+
+    assert revoked == 2
+    assert [f for a, f in requests if a == "ios/revokeDevelopmentCert.action"] == [
+        {"teamId": TEAM, "serialNumber": "1"},
+        {"teamId": TEAM, "certificateId": "ID2"},
+    ]

@@ -26,6 +26,10 @@
 - Settings → Sync shows the `pmset repeat wake` command for scheduling a nightly wake, so refreshes can run while the Mac sleeps.
 - Catapult asks Apple for a new certificate before revoking anything, and revokes only when Apple reports the slot is taken. Two Macs on one Apple ID no longer take turns revoking each other's certificate.
 - Keychain writes no longer place the secret on the `security` command line.
+- Fixed a stored certificate being treated as "revoked elsewhere" — and a new one minted per call — when Apple's listing carried no `certificateId` for it and the CSR response had no serial. The certificate is now matched on its own serial and content as well.
+- If the Keychain cannot store the signing identity, it is kept in a 0600 file under `~/.catapult` instead of being minted again on the next call.
+- When Apple reports the certificate slot is taken on a paid team, Catapult revokes only the certificates this Mac minted first, and widens to all of its own certificates on the team only if Apple still refuses. A blocked request used to revoke every Catapult certificate on the team at once, one revocation mail each.
+- A refresh now reaches the device before it touches Apple, so an Apple TV that is off or on another network no longer costs a certificate, a device registration, and a profile per retry.
 
 ### Cross-device sync
 

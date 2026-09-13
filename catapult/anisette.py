@@ -48,6 +48,16 @@ def _load_or_create_identity() -> tuple[str, str]:
 _DEVICE_ID, _LOCAL_USER_ID = _load_or_create_identity()
 
 
+def device_identifier() -> str:
+    """The persisted UUID this Mac presents to Apple.
+
+    Also used as the ``machineId`` on certificate requests, so Apple's
+    certificate list shows which Mac minted which certificate and recovery
+    from a blocked CSR can be limited to this Mac's own stale entries.
+    """
+    return _DEVICE_ID
+
+
 def _fetch_otp() -> dict:
     """Fetch just the OTP values (X-Apple-I-MD, X-Apple-I-MD-M) from any source."""
     native = _try_native_macos()

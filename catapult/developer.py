@@ -2,7 +2,8 @@
 
 Implements the provisioning flow used by AltSign/AltStore/ReProvision:
   1. Fetch team
-  2. Fetch existing certs -> revoke all -> submit new CSR
+  2. Reuse the stored signing certificate while Apple still lists it;
+     otherwise submit a new CSR, revoking only what Apple says is in the way
   3. Register device (idempotent, resultCode 35 = already exists)
   4. Register app ID (idempotent, or look up existing)
   5. Delete any stale provisioning profile for the app
@@ -28,7 +29,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
 from catapult import signing_identity
-from catapult.anisette import get_anisette_http_headers
+from catapult.anisette import device_identifier, get_anisette_http_headers
 from catapult.apple_auth import AuthSession
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,10 @@ RC_SUCCESS = 0
 RC_ALREADY_EXISTS = 35
 RC_NOT_ALLOWED = 1200
 RC_BUNDLE_ID_UNAVAILABLE = 9401
+
+# Pause between revoking certificates and resubmitting a blocked CSR, so
+# Apple has propagated the revocation. Tests set it to 0.
+RETRY_DELAY_SECONDS = 2.0
 
 
 class DeveloperServicesError(RuntimeError):
@@ -253,8 +258,13 @@ class DeveloperServices:
             logger.warning("Failed to revoke cert id=%s: %s", certificate_id, e)
 
     async def _revoke_all_certs(
-        self, session: AuthSession, team_id: str, *, catapult_only: bool = False
-    ):
+        self,
+        session: AuthSession,
+        team_id: str,
+        *,
+        catapult_only: bool = False,
+        machine_id: str | None = None,
+    ) -> int:
         """Revoke development certs to make room for a new one.
 
         Free Apple IDs can only have a limited number of dev certs.
@@ -262,7 +272,12 @@ class DeveloperServices:
 
         On a shared paid team revoking everything would kill other members'
         certificates, so ``catapult_only`` restricts revocation to certs
-        Catapult itself created (machineName "Catapult").
+        Catapult itself created (machineName "Catapult"), and ``machine_id``
+        narrows that further to certificates this Mac minted — every one of
+        them lands in the account holder's inbox as a separate "Your
+        Certificate Has Been Revoked" mail, so revoke as few as possible.
+
+        Returns the number of certificates revocation was attempted for.
         """
         certs = await self._list_certs(session, team_id)
         if catapult_only:
@@ -274,6 +289,20 @@ class DeveloperServices:
                     cert.get("certificateId", "?"),
                 )
             certs = [c for c in certs if c.get("machineName") == "Catapult"]
+        if machine_id:
+            skipped = [c for c in certs if c.get("machineId") != machine_id]
+            for cert in skipped:
+                logger.info(
+                    "Leaving cert alone (minted by another Mac): %s (id=%s)",
+                    cert.get("machineName", "?"),
+                    cert.get("certificateId", "?"),
+                )
+            certs = [c for c in certs if c.get("machineId") == machine_id]
+        if not certs:
+            logger.info("No development certificates in scope to revoke")
+            return 0
+        logger.info("Revoking %d development certificate(s)", len(certs))
+        revoked = 0
         for cert in certs:
             serial = cert.get("serialNumber", "")
             name = cert.get("machineName", "?")
@@ -292,6 +321,75 @@ class DeveloperServices:
                     "Cert %s has no serialNumber, skipping revoke",
                     cert.get("certificateId", "?"),
                 )
+                continue
+            revoked += 1
+        return revoked
+
+    @staticmethod
+    def _machine_id() -> str:
+        """A stable id for this Mac on certificate requests.
+
+        A random UUID per CSR (the old behaviour) made every certificate look
+        like it came from a different machine, so nothing could tell this
+        Mac's stale certificates from a second Mac's live one.
+        """
+        try:
+            return device_identifier()
+        except Exception:
+            return str(uuid.uuid4()).upper()
+
+    async def _recover_blocked_csr(
+        self,
+        session: AuthSession,
+        team_id: str,
+        csr_fields: dict,
+        *,
+        personal_team: bool,
+        machine_id: str,
+    ) -> dict:
+        """Apple answered a CSR with 7460 — "already have a current certificate
+        or a pending certificate request". Revoke the smallest set that can be
+        in the way, then resubmit.
+
+        A personal (free) team allows one development certificate per Apple
+        ID, so every certificate has to go — AltStore does the same. On a paid
+        team the block is almost always this Mac's own stale or pending
+        request, so its certificates go first; only if Apple still refuses do
+        all of Catapult's certificates on the team follow. Never touch
+        certificates minted by Xcode or another tool.
+        """
+        if personal_team:
+            scopes = [{"catapult_only": False}]
+        else:
+            scopes = [
+                {"catapult_only": True, "machine_id": machine_id},
+                {"catapult_only": True},
+            ]
+        blocked: DeveloperServicesError | None = None
+        for index, scope in enumerate(scopes):
+            logger.info(
+                "CSR was blocked by an existing or pending certificate; "
+                "revoking %s and retrying",
+                "this Mac's Catapult certificates" if scope.get("machine_id")
+                else "Catapult's certificates on the team" if scope["catapult_only"]
+                else "the team's development certificates",
+            )
+            revoked = await self._revoke_all_certs(session, team_id, **scope)
+            if not revoked and index < len(scopes) - 1:
+                # Nothing was revoked, so the same request would be refused
+                # again; widen the scope instead of asking Apple twice.
+                continue
+            await asyncio.sleep(RETRY_DELAY_SECONDS)
+            try:
+                return await self._request(
+                    session, "ios/submitDevelopmentCSR.action", csr_fields
+                )
+            except DeveloperServicesError as e:
+                if e.result_code != 7460:
+                    raise
+                blocked = e
+        assert blocked is not None
+        raise blocked
 
     async def get_or_create_cert(
         self, session: AuthSession, team_id: str, *, personal_team: bool = True
@@ -314,9 +412,10 @@ class DeveloperServices:
 
         Only when there is no usable identity do we mint one: generate a fresh
         RSA key + CSR and submit it. Existing certificates are revoked only if
-        Apple reports the slot is taken (result code 7460), then the CSR is
-        retried once. Revoking up front, the AltSign way, meant two Catapult
-        Macs on one Apple ID took turns killing each other's certificate.
+        Apple reports the slot is taken (result code 7460), and then as few as
+        possible — see ``_recover_blocked_csr``. Revoking up front, the AltSign
+        way, meant two Catapult Macs on one Apple ID took turns killing each
+        other's certificate.
 
         Returns (cert_pem_bytes, private_key).
         """
@@ -350,8 +449,9 @@ class DeveloperServices:
         csr_pem = csr.public_bytes(serialization.Encoding.PEM).decode()
 
         # Step 4: Submit CSR
-        # AltSign sends: csrContent, machineId (UUID), machineName
-        machine_id = str(uuid.uuid4()).upper()
+        # AltSign sends: csrContent, machineId (UUID), machineName. The
+        # machineId is this Mac's persistent id, not a fresh UUID per request.
+        machine_id = self._machine_id()
         logger.info("Submitting development CSR (machineId=%s)", machine_id)
         csr_fields = {
             "teamId": team_id,
@@ -368,16 +468,12 @@ class DeveloperServices:
         except DeveloperServicesError as e:
             if e.result_code != 7460:
                 raise
-            logger.info(
-                "CSR was blocked by an existing or pending certificate; "
-                "revoking and retrying once"
-            )
-            await self._revoke_all_certs(session, team_id, catapult_only=not personal_team)
-            await asyncio.sleep(2)
-            data = await self._request(
+            data = await self._recover_blocked_csr(
                 session,
-                "ios/submitDevelopmentCSR.action",
+                team_id,
                 csr_fields,
+                personal_team=personal_team,
+                machine_id=machine_id,
             )
 
         cert_req = data.get("certRequest", {})

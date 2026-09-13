@@ -524,14 +524,11 @@ async def _refresh_install(rec, device_manager, auth_client, dev_services, signe
             missing = ipa_path or rec.get("ipa_sha256", "")
             raise RuntimeError(f"IPA file is missing: {missing}. Choose the IPA again before refreshing.")
 
-        session = auth_client.session
-        team = await dev_services.get_team(session)
-        team_id = team["teamId"]
-        from catapult.developer import team_is_free
-        cert, private_key = await dev_services.get_or_create_cert(
-            session, team_id, personal_team=team_is_free(team)
-        )
-
+        # Reach the device before touching Apple. A refresh that fails because
+        # the Apple TV is off or on another network must not have minted a
+        # certificate, registered a device, or issued a profile for nothing:
+        # retried hourly with backoff, that is how a team ends up with dozens
+        # of development certificates and an inbox of revocation mail.
         device_info = await device_manager.get_device_info(device_udid)
         if "remotepairing" in device_info.get("service", ""):
             tunnel = await device_manager.start_tunnel(
@@ -555,6 +552,15 @@ async def _refresh_install(rec, device_manager, auth_client, dev_services, signe
                 device_udid=device_udid,
                 device_host=device_info.get("host", ""),
             )
+
+        session = auth_client.session
+        team = await dev_services.get_team(session)
+        team_id = team["teamId"]
+        from catapult.developer import team_is_free
+        cert, private_key = await dev_services.get_or_create_cert(
+            session, team_id, personal_team=team_is_free(team)
+        )
+
         await dev_services.register_device(
             session,
             team_id,

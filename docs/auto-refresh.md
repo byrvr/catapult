@@ -95,15 +95,33 @@ on-device refreshers are iPhone/iPad only.
 Development certificates are valid for a **year**; only the provisioning
 profile carries the 7-day clock. Catapult persists the certificate and key in
 the Keychain and reuses them while Apple still lists the certificate and expiry
-is more than 7 days out.
+is more than 7 days out. If the Keychain cannot be written or read (locked, a
+launch agent without keychain access), the identity is kept in a 0600 file
+under `~/.catapult` instead — an identity that silently fails to persist means
+a new certificate on every signing call.
+
+"Still lists" is decided against the certificate itself, not only Apple's
+metadata: the CSR response often carries an empty `serialNumber` and the
+listing omits `certificateId` for some entries, so Catapult also matches on
+the x509 serial and on the DER Apple returns as `certContent`.
 
 When no usable certificate is stored, Catapult submits a certificate request
 first and revokes existing certificates only if Apple answers that the slot is
-taken (result code 7460), then retries once. On a paid team the revocation is
-limited to certificates Catapult itself created. Revoking used to happen up
+taken (result code 7460). On a paid team it revokes the smallest set that can
+be in the way: first the certificates this Mac minted (the request carries a
+stable `machineId`), and only if Apple still refuses every certificate Catapult
+created on the team. Certificates from Xcode or another tool are never
+touched. Each revocation is a separate "Your Certificate Has Been Revoked"
+mail to the account holder, so fewer is better. Revoking used to happen up
 front on every refresh, which invalidated the certificate belonging to any
 other machine or tool on the same Apple ID — Xcode, AltStore, a second Mac —
 and two Catapult Macs on one Apple ID took turns doing it to each other.
+
+A refresh reaches the device — tunnel up, UDID read — before it touches Apple.
+A refresh that fails because the Apple TV is off or on another network must
+not have minted a certificate or issued a profile for nothing; retried hourly
+with backoff, that is how a team ends up with dozens of development
+certificates.
 
 Note Apple's free-tier limits, which a scheduled loop can otherwise exhaust:
 10 App ID registrations per 7 days, 3 test devices per platform, 3 active apps.

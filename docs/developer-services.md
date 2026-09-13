@@ -73,17 +73,19 @@ Returns all development certificates for the team.
 }
 ```
 
-Free accounts have a certificate limit (typically 2). Catapult revokes all existing certs before creating a new one.
+Free accounts have a certificate limit (typically 2). Catapult reuses its stored certificate while Apple still lists it, and revokes only when a CSR comes back with result code 7460 — see `docs/auto-refresh.md` for the order in which it revokes.
 
 #### Create — `ios/submitDevelopmentCSR.action`
 ```python
 {
     "teamId": team_id,
     "csrContent": pem_string,
-    "machineId": str(uuid.uuid4()).upper(),
+    "machineId": device_id,        # this Mac's persistent UUID (~/.catapult/device_id.json)
     "machineName": "Catapult",
 }
 ```
+
+`machineId` and `machineName` come back in `listAllDevelopmentCerts`, which is how Catapult tells its own certificates — and this Mac's among them — from everything else on the team.
 
 The CSR response **does not include** the certificate content — only a `certificateId`. A follow-up `listAllDevelopmentCerts` is required to fetch the `certContent` PEM.
 
