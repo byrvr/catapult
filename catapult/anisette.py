@@ -361,10 +361,22 @@ class AnisetteV3Client:
 
     # ── HTTP plumbing ──
 
+    @staticmethod
+    def _ssl_context():
+        """The macOS system trust store: Apple's GSA chain is not in certifi."""
+        import ssl
+
+        try:
+            import truststore
+
+            return truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        except Exception:
+            return ssl.create_default_context()
+
     def _http(self):
         import httpx
 
-        return httpx.Client(timeout=30, follow_redirects=True)
+        return httpx.Client(timeout=30, follow_redirects=True, verify=self._ssl_context())
 
     def _ensure_client_info(self, http) -> None:
         if self.client_info and self.user_agent:
@@ -439,7 +451,10 @@ class AnisetteV3Client:
 
             ws_url = re.sub(r"^http", "ws", f"{self.server}/v3/provisioning_session")
             logger.info("Provisioning anisette v3 identity with %s", self.server)
-            with ws_connect(ws_url, open_timeout=30, close_timeout=10) as ws:
+            ws_kwargs = {"open_timeout": 30, "close_timeout": 10}
+            if ws_url.startswith("wss://"):
+                ws_kwargs["ssl"] = self._ssl_context()
+            with ws_connect(ws_url, **ws_kwargs) as ws:
                 for _ in range(8):  # the handshake is four messages; leave slack
                     msg = json.loads(ws.recv(timeout=60))
                     result = msg.get("result")
