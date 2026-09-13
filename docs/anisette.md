@@ -66,9 +66,48 @@ Start with Docker:
 docker run -d -p 6969:80 ghcr.io/sidestore/omnisette-server:latest
 ```
 
-### 3. Error
+### 3. SideStore anisette v3 — the only option on macOS 26+
 
-If neither source is available, `AnisetteError` is raised with instructions.
+macOS 26 gates AOSKit behind private entitlements: `retrieveOTPHeadersForDSID:`
+logs `AOSKit WARN: A: Info request failed: -45070` and returns nothing, so on
+macOS 27 the native source never answers. Catapult then speaks the SideStore
+anisette v3 protocol to a remote server, `https://ani.sidestore.zip` by default
+(`CATAPULT_ANISETTE_SERVER` overrides it, e.g. for a self-hosted
+`anisette-v3-server`).
+
+v3 is personal rather than shared: the identity is provisioned once and stored
+in `~/.catapult/anisette-v3.json` (mode 0600):
+
+1. `GET {server}/v3/client_info` → the machine description and user agent the
+   server's ADI library was set up for.
+2. `GET https://gsa.apple.com/grandslam/GsService2/lookup` → the MidService
+   `midStartProvisioning` / `midFinishProvisioning` URLs.
+3. WebSocket `wss://{server}/v3/provisioning_session`: the server asks for our
+   identifier (16 bytes, seeded from this Mac's device id), then for `spim`
+   (we POST `startMachine` to Apple), then for `ptm`/`tk` (we POST
+   `endMachine` with the server's `cpim`), and finally returns `adi_pb`.
+4. From then on `POST {server}/v3/get_headers` with `identifier` + `adi_pb`
+   yields `X-Apple-I-MD`, `X-Apple-I-MD-M` and `X-Apple-I-MD-RINFO`. A
+   `-45061` reply means the identity expired; Catapult re-provisions once.
+
+With v3 the identity headers come from the provider, exactly as SideStore
+derives them: `X-Mme-Device-Id` is the identifier as a UUID (so it stays equal
+to the module-level device id) and `X-Apple-I-MD-LU` is its SHA-256 hex.
+
+### X-MMe-Client-Info and the GSA 503
+
+Since September 2026 `gsa.apple.com/grandslam/GsService2` answers **503** to
+any `X-MMe-Client-Info` naming `com.apple.dt.Xcode` (AltServer 1.7.6 fixed the
+same thing). `anisette.gsa_client_info()` rewrites the identifier to
+`com.apple.akd/1.0` in whatever description is presented to GSA, the 2FA
+endpoints and developer services — the v3 server's own description included.
+Provisioning itself first presents the server's description verbatim and only
+falls back to the akd form if GSA refuses it.
+
+### 4. Error
+
+If no source answers, `AnisetteError` names each one and how to point Catapult
+at another v3 server.
 
 ## Usage in Requests
 

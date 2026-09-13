@@ -22,7 +22,12 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.padding import PKCS7
 
-from catapult.anisette import get_anisette_headers, get_anisette_http_headers, AnisetteError
+from catapult.anisette import (
+    AnisetteError,
+    current_client_info,
+    get_anisette_headers,
+    get_anisette_http_headers,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,13 +38,21 @@ srp.no_username_in_x()
 GSA_ENDPOINT = "https://gsa.apple.com/grandslam/GsService2"
 GSA_AUTH_ENDPOINT = "https://gsa.apple.com"
 
-HEADERS = {
+BASE_HEADERS = {
     "Content-Type": "text/x-xml-plist",
     "Accept": "*/*",
     "User-Agent": "akd/1.0 CFNetwork/1568.200.51 Darwin/24.1.0",
-    "X-MMe-Client-Info": "<MacBookPro18,3> <Mac OS X;13.4.1;22F8> "
-                         "<com.apple.AOSKit/282 (com.apple.dt.Xcode/3594.4.19)>",
 }
+
+
+def gsa_request_headers() -> dict:
+    """Headers for GsService2 posts.
+
+    X-MMe-Client-Info must describe the same machine the anisette OTP was
+    minted for, so it comes from the anisette module (which also drops the
+    Xcode identifier GSA has answered 503 to since September 2026).
+    """
+    return {**BASE_HEADERS, "X-MMe-Client-Info": current_client_info()}
 
 
 @dataclass
@@ -112,7 +125,7 @@ class AppleAuthClient:
 
     async def _gsa_request(self, request_body: dict) -> dict:
         body = plistlib.dumps({"Header": {"Version": "1.0.1"}, "Request": request_body})
-        resp = await self._client.post(GSA_ENDPOINT, content=body, headers=HEADERS)
+        resp = await self._client.post(GSA_ENDPOINT, content=body, headers=gsa_request_headers())
         logger.debug("GSA HTTP %d (%d bytes)", resp.status_code, len(resp.content))
         return plistlib.loads(resp.content)
 
