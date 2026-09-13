@@ -1,11 +1,12 @@
 # Changelog
 
-## 0.4.0 - 2026-09-14
+## 0.4.1 - 2026-09-14
 
 ### macOS 27
 
 - Signing works again on macOS 26 and 27. AOSKit stopped answering there (`Info request failed: -45070`), so Catapult now falls back to the SideStore anisette v3 protocol: a one-time provisioning handshake with `ani.sidestore.zip` (or any server named in `CATAPULT_ANISETTE_SERVER`), after which the server signs one-time passwords for this Mac's own identity. Existing sessions were bound to the old identity and need one sign-in again.
 - Apple ID sign-in no longer fails with HTTP 503: GSA started rejecting the Xcode client identifier in September 2026, so requests identify as `com.apple.akd/1.0` instead.
+- Sign-in no longer dies with no error when GSA answers one request in the sequence with a 5xx HTML page (a failed edge node on a kept-alive connection): the request is retried on a fresh connection, and a genuine failure now surfaces a readable message.
 
 ### iPhone and iPad
 
