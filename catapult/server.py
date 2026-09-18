@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 
 from fastapi import FastAPI, Request, UploadFile, WebSocket
@@ -132,13 +133,30 @@ async def index():
 # ── REST API ──
 
 
+# When this process began serving. Lets an upgrade check that the build it just
+# installed is the one answering, rather than a leftover the agent restarted.
+_STARTED_AT = time.time()
+
+
 @app.get("/api/health")
 async def health():
+    """Identifies the code actually serving this port.
+
+    The background agent restarts the backend the moment it is killed, so an
+    upgrade that replaces the app can leave the previous build still answering
+    on 9450 while everything looks installed. ``source`` and ``started_at``
+    make that visible instead of silent.
+    """
+    from catapult import __version__
+
     return {
         "status": "ok",
         "app": "catapult",
         "protocol": NATIVE_BACKEND_PROTOCOL,
         "pid": os.getpid(),
+        "version": __version__,
+        "source": str(Path(__file__).resolve().parent.parent),
+        "started_at": _STARTED_AT,
     }
 
 
