@@ -29,6 +29,9 @@ struct Device: Codable, Hashable, Identifiable, Sendable {
         switch deviceClass {
         case "ios": "iPhone"
         case "ipados": "iPad"
+        // Wi-Fi sync cannot tell an iPhone from an iPad, and guessing one was
+        // worse than saying which two it is.
+        case "iosfamily": "iPhone or iPad"
         case "tvos": "Apple TV"
         case "macos": "Mac"
         case "homepod": "HomePod"
@@ -368,7 +371,9 @@ struct ProvisionedApp: Codable, Hashable, Identifiable, Sendable {
     /// excluded: they belong to a parent app and removing one alone breaks it.
     /// Mirrors cleanup.deletable_app_ids on the backend.
     var isUnusedSlot: Bool {
-        guard !appIDID.isEmpty, !extensionSlot else { return false }
+        // isCatapult first: the account also holds real App Store identifiers,
+        // and those are never this app's to remove.
+        guard isCatapult, !appIDID.isEmpty, !extensionSlot else { return false }
         if reinstallable || savedIPAExists == true { return false }
         if let days = daysLeft, days > 0 { return false }
         return true

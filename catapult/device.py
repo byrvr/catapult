@@ -48,6 +48,18 @@ NEEDS_SETUP_SERVICES = {"_remotepairing._tcp.local."}
 # it over classic lockdown instead, via usbmux.
 TUNNEL_DEVICE_CLASSES = {"tvos"}
 
+# Only an iPhone or iPad advertises Wi-Fi sync. Those records carry no model
+# and no name, so the service is the only thing that says what the device is —
+# and it was saying nothing, leaving a phone on the network labelled "Apple
+# Device" and, worse, treated as a tunnel device everywhere a class is checked.
+SERVICE_DEVICE_CLASSES = {
+    "_apple-mobdev2._tcp.local.": "iosfamily",
+}
+
+# iPhone and iPad, however precisely we managed to identify one. Wi-Fi sync
+# cannot tell the two apart, so "iosfamily" means "one of these two".
+IOS_FAMILY_CLASSES = {"ios", "ipados", "iosfamily"}
+
 
 def device_class_for(name: str, model: str) -> str:
     """Best-effort device class from an advertised name and model.
@@ -298,6 +310,8 @@ def _collapse_group(group: list[dict]) -> dict:
             merged["name"] = best_named["name"]
 
     merged_class = device_class_for(name=merged.get("name", ""), model=merged.get("model", ""))
+    if merged_class == "unknown":
+        merged_class = SERVICE_DEVICE_CLASSES.get(merged.get("service", ""), "unknown")
     if merged_class != "unknown":
         merged["device_class"] = merged_class
         # A merged name/model can reveal an iPhone or iPad behind an mDNS record
@@ -538,6 +552,8 @@ class _Listener(ServiceListener):
         udid = (props.get("UniqueDeviceID") or props.get("rpMRtID")
                 or props.get("deviceid") or name)
         device_class = device_class_for(name=device_name, model=model)
+        if device_class == "unknown":
+            device_class = SERVICE_DEVICE_CLASSES.get(stype, "unknown")
 
         # mDNS says an iPhone/iPad is on the network; it does not say this Mac
         # can talk to it. Reaching installd needs a lockdown pair record, which
@@ -1041,8 +1057,10 @@ class DeviceManager:
         known = self._cache.get(device_udid or "") or {}
         if known.get("service") == "usbmux" and not known.get("installable"):
             return await self._request_usb_trust(device_udid or "", known)
-        if known.get("device_class") in {"ios", "ipados"}:
-            label = "iPad" if known.get("device_class") == "ipados" else "iPhone"
+        if known.get("device_class") in IOS_FAMILY_CLASSES:
+            label = {"ipados": "iPad", "ios": "iPhone"}.get(
+                known.get("device_class", ""), "iPhone or iPad"
+            )
             return {
                 "status": "error",
                 "message": (
@@ -2355,7 +2373,7 @@ echo installed
                 installable = True
 
         if not installable:
-            if device.get("device_class") in {"ios", "ipados"}:
+            if device.get("device_class") in IOS_FAMILY_CLASSES:
                 raise RuntimeError(
                     f"'{device['name']}' is on the network, but this Mac has "
                     f"not been paired with it. Connect it with a cable once, "

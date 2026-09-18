@@ -60,14 +60,22 @@ def unresolvable_records(installs: list[dict] | None) -> list[dict]:
 def deletable_app_ids(apps: list[dict] | None) -> list[dict]:
     """App IDs with nothing behind them and nothing live in front of them.
 
-    Deliberately conservative. An extension is never offered: it belongs to a
-    parent app, and removing it alone breaks that app. Neither is an App ID
-    whose install has not expired yet — deleting it would kill a working app on
-    a device. Both remain available one by one.
+    Deliberately conservative, and the first rule matters most: an App ID this
+    app did not create is never offered. The account also holds real App Store
+    identifiers, and one of those was offered here before Apple refused the
+    delete with "appears to be in use by the App Store". That refusal was luck,
+    not design.
+
+    An extension is never offered either: it belongs to a parent app, and
+    removing it alone breaks that app. Neither is an App ID whose install has
+    not expired yet — deleting it would kill a working app on a device. All of
+    them remain available one by one.
     """
     deletable = []
     for app in apps or []:
         if not app.get("app_id_id") or app.get("is_extension"):
+            continue
+        if not app.get("is_catapult"):
             continue
         if app.get("can_reinstall") or app.get("saved_ipa_exists"):
             continue

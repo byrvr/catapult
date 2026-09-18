@@ -69,6 +69,7 @@ def app(**kw):
         "can_reinstall": False,
         "saved_ipa_exists": False,
         "days_left": None,
+        "is_catapult": True,
     }
     base.update(kw)
     return base
@@ -125,3 +126,17 @@ def test_delete_keeps_going_past_a_failure(uploads):
 def test_total_bytes_ignores_files_that_vanished(uploads):
     a = ipa(uploads, "a.ipa", size=42)
     assert cleanup.total_bytes([a, uploads / "ghost.ipa"]) == 42
+
+
+def test_an_app_id_catapult_did_not_create_is_never_offered():
+    # The account also holds real App Store identifiers. One was offered here
+    # and only Apple's own refusal ("in use by the App Store") stopped it.
+    assert cleanup.deletable_app_ids([app(is_catapult=False)]) == []
+
+
+def test_only_catapult_slots_survive_a_mixed_list():
+    apps = [
+        app(app_id_id="MINE", is_catapult=True),
+        app(app_id_id="APPSTORE", is_catapult=False),
+    ]
+    assert [a["app_id_id"] for a in cleanup.deletable_app_ids(apps)] == ["MINE"]

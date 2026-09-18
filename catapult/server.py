@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 
 from catapult.apple_auth import AppleAuthClient
 from catapult.developer import DeveloperServices, team_is_free
-from catapult.device import DeviceManager, NEEDS_SETUP_SERVICES
+from catapult.device import DeviceManager, IOS_FAMILY_CLASSES, NEEDS_SETUP_SERVICES
 from catapult.errors import normalize_error, redact_sensitive
 from catapult.ipa import IpaProcessor
 from catapult.jobs import ActivityJob, job_manager
@@ -344,7 +344,7 @@ async def setup_device(payload: dict = None):
                 # them here made every Wi-Fi iPhone "Ready" after one TV setup.
                 is_tunnel_row = (
                     d.get("service") in NEEDS_SETUP_SERVICES
-                    and d.get("device_class") not in {"ios", "ipados"}
+                    and d.get("device_class") not in IOS_FAMILY_CLASSES
                 )
                 if (host and d.get("host") == host) or (d.get("needs_setup") and is_tunnel_row):
                     d["installable"] = True
@@ -1295,7 +1295,7 @@ async def _install_app(
             f"the tunnel. Details: {e}"
         ) from e
     if "remotepairing" in device_info.get("service", ""):
-        if device_info.get("device_class") in {"ios", "ipados"}:
+        if device_info.get("device_class") in IOS_FAMILY_CLASSES:
             # A Wi-Fi iPhone or iPad advertises _remotepairing too, but tunneld
             # cannot serve it. Say so before start_tunnel() fires an admin
             # prompt and a multi-minute poll for a tunnel that never comes.

@@ -340,3 +340,36 @@ def test_a_nameless_device_does_not_swallow_a_named_one():
     by_host = {d["host"]: d for d in out}
     assert by_host["192.168.100.92"]["name"] == "Living Room"
     assert by_host["192.168.100.20"]["name"] == "Apple Device"
+
+
+def test_wifi_sync_identifies_a_phone_that_advertises_nothing_else():
+    # _apple-mobdev2 is advertised only by an iPhone or iPad. The record carries
+    # no name and no model, so without the service the device came back
+    # "unknown" and was labelled "Apple Device" — and every check that asks
+    # "is this a phone?" answered no.
+    found = listen("_apple-mobdev2._tcp.local.",
+                   "aa:bb@fe80::1-supportsRP-26._apple-mobdev2._tcp.local.",
+                   {}, addresses=("192.168.100.20", "fe80::1033:1faf:b81c:b30f"))
+    assert found[0]["device_class"] == "iosfamily"
+    assert found[0]["host"] == "192.168.100.20"
+
+
+def test_a_real_model_still_wins_over_the_service():
+    found = listen("_apple-mobdev2._tcp.local.", "x._apple-mobdev2._tcp.local.",
+                   {"model": "iPad13,1"})
+    assert found[0]["device_class"] == "ipados"
+
+
+def test_the_service_class_survives_the_merge():
+    raw = [record(name="Apple Device", host="192.168.100.20",
+                  addresses=["192.168.100.20"],
+                  service="_apple-mobdev2._tcp.local.",
+                  device_class="iosfamily", needs_setup=True)]
+    assert merged(raw)[0]["device_class"] == "iosfamily"
+
+
+def test_an_apple_tv_is_not_reclassified_by_the_service_map():
+    raw = [record(name="Living Room", model="AppleTV14,1", host="192.168.100.92",
+                  addresses=["192.168.100.92"],
+                  service="_remotepairing._tcp.local.", needs_setup=True)]
+    assert merged(raw)[0]["device_class"] == "tvos"
