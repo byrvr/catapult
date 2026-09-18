@@ -1,0 +1,202 @@
+"""Discovery used to show one device as several rows, and call anything it could
+not classify an "Apple Device". These cover the shapes that produced that."""
+
+from catapult.device import (
+    device_class_for,
+    discovery_identity,
+    is_local_machine,
+    merge_discovered,
+    preferred_address,
+)
+
+LOCAL_TOKENS = {"ruslansmacbookpro"}
+LOCAL_ADDRESSES = {"192.168.100.196", "fe80::1"}
+
+
+def record(**kw):
+    base = {
+        "name": "",
+        "model": "",
+        "udid": "",
+        "host": "",
+        "addresses": [],
+        "port": 7000,
+        "service": "_airplay._tcp.local.",
+        "device_class": "unknown",
+        "connection": "network",
+        "installable": False,
+        "needs_setup": False,
+        "paired": False,
+        "requires_tunnel": False,
+        "tunnel_active": False,
+        "properties": {},
+    }
+    base.update(kw)
+    return base
+
+
+def merged(raw):
+    return merge_discovered(raw, local_tokens=LOCAL_TOKENS, local_addresses=LOCAL_ADDRESSES)
+
+
+# ── classification ──
+
+def test_lg_webos_tv_is_not_called_an_apple_device():
+    assert device_class_for(name="[LG] webOS TV QNED82A6B", model="") == "airplay"
+
+
+def test_other_airplay_vendors_are_recognised_too():
+    for name in ("Samsung Tizen TV", "Roku Streaming Stick", "SONOS Beam", "BRAVIA 55"):
+        assert device_class_for(name=name, model="") == "airplay", name
+
+
+def test_apple_devices_still_win_over_the_vendor_check():
+    assert device_class_for(name="Living Room", model="AppleTV6,2") == "tvos"
+    assert device_class_for(name="Ruslan's iPhone", model="iPhone15,2") == "ios"
+
+
+def test_a_vendor_word_inside_a_person_name_is_not_a_match():
+    # "Olga" contains "lg"; word boundaries keep it an unknown, not an AirPlay TV.
+    assert device_class_for(name="Olga's iPad", model="iPad13,1") == "ipados"
+    assert device_class_for(name="Olga", model="") == "unknown"
+
+
+# ── addresses ──
+
+def test_routable_ipv4_beats_link_local_ipv6():
+    assert preferred_address(["fe80::1%en0", "192.168.100.92"]) == "192.168.100.92"
+
+
+def test_routable_ipv6_beats_link_local():
+    assert preferred_address(["fe80::1", "2001:db8::5"]) == "2001:db8::5"
+
+
+def test_loopback_is_never_chosen():
+    assert preferred_address(["127.0.0.1", "::1", "10.0.0.4"]) == "10.0.0.4"
+
+
+# ── the local Mac ──
+
+def test_this_mac_is_dropped_by_name():
+    raw = [record(name="Ruslan's MacBook Pro", host="fe80::1", addresses=["fe80::1"])]
+    assert merged(raw) == []
+
+
+def test_this_mac_is_dropped_by_address():
+    raw = [record(name="Something Else", host="192.168.100.196", addresses=["192.168.100.196"])]
+    assert merged(raw) == []
+
+
+def test_a_second_mac_is_kept():
+    raw = [record(name="Office iMac", model="iMac21,1", host="192.168.100.50",
+                  addresses=["192.168.100.50"])]
+    out = merged(raw)
+    assert len(out) == 1
+    assert out[0]["device_class"] == "macos"
+
+
+# ── one device, one row ──
+
+def test_one_device_on_two_addresses_collapses_to_one_row():
+    raw = [
+        record(name="Living Room", model="AppleTV6,2", host="fe80::aaaa",
+               addresses=["fe80::aaaa"], service="_airplay._tcp.local.",
+               properties={"deviceid": "AA:BB:CC:DD:EE:FF"}),
+        record(name="Living Room", model="", host="192.168.100.92",
+               addresses=["192.168.100.92"], service="_remotepairing._tcp.local.",
+               needs_setup=True, properties={"deviceid": "aa:bb:cc:dd:ee:ff"}),
+    ]
+    out = merged(raw)
+    assert len(out) == 1
+    assert out[0]["name"] == "Living Room"
+    assert out[0]["host"] == "192.168.100.92"
+    assert set(out[0]["addresses"]) == {"192.168.100.92", "fe80::aaaa"}
+    assert out[0]["device_class"] == "tvos"
+
+
+def test_records_sharing_an_address_collapse_even_without_an_identifier():
+    raw = [
+        record(name="Apple Device", host="192.168.100.20", addresses=["192.168.100.20"],
+               service="_airplay._tcp.local."),
+        record(name="Kitchen HomePod", model="AudioAccessory5,1", host="192.168.100.20",
+               addresses=["192.168.100.20"], service="_companion-link._tcp.local."),
+    ]
+    out = merged(raw)
+    assert len(out) == 1
+    assert out[0]["name"] == "Kitchen HomePod"
+    assert out[0]["device_class"] == "homepod"
+
+
+def test_same_name_on_two_addresses_collapses_without_an_identifier():
+    raw = [
+        record(name="Guest Apple TV", host="192.168.100.77", addresses=["192.168.100.77"]),
+        record(name="Guest Apple TV", host="fe80::bbbb", addresses=["fe80::bbbb"]),
+    ]
+    out = merged(raw)
+    assert len(out) == 1
+    assert out[0]["host"] == "192.168.100.77"
+    assert "(" not in out[0]["name"]
+
+
+def test_two_different_devices_with_one_name_stay_separate():
+    raw = [
+        record(name="iPhone", model="iPhone15,2", host="192.168.100.31",
+               addresses=["192.168.100.31"], properties={"deviceid": "11:11:11:11:11:11"}),
+        record(name="iPhone", model="iPhone12,1", host="192.168.100.32",
+               addresses=["192.168.100.32"], properties={"deviceid": "22:22:22:22:22:22"}),
+    ]
+    out = merged(raw)
+    assert len(out) == 2
+    assert {d["name"] for d in out} == {"iPhone (31)", "iPhone (32)"}
+
+
+def test_disambiguation_never_uses_an_ipv6_tail():
+    # The old suffix was the address tail, which produced names like "(0::1)".
+    raw = [
+        record(name="Apple TV", host="fe80::dead", addresses=["fe80::dead"],
+               model="AppleTV6,2", properties={"deviceid": "33:33:33:33:33:33"}),
+        record(name="Apple TV", host="fe80::beef", addresses=["fe80::beef"],
+               model="AppleTV11,1", properties={"deviceid": "44:44:44:44:44:44"}),
+    ]
+    out = merged(raw)
+    assert len(out) == 2
+    assert {d["name"] for d in out} == {"Apple TV (AppleTV6,2)", "Apple TV (AppleTV11,1)"}
+    for d in out:
+        assert "::" not in d["name"]
+
+
+# ── identity + install rules preserved ──
+
+def test_identity_prefers_a_real_identifier_over_the_address():
+    assert discovery_identity(record(properties={"UniqueDeviceID": "ABC"})) == "id:abc"
+    assert discovery_identity(record(properties={"deviceid": "AA:BB"})) == "id:aa:bb"
+    assert discovery_identity(record(host="10.0.0.1")) == ""
+
+
+def test_a_phone_on_mobdev2_is_still_not_directly_installable():
+    raw = [record(name="Ruslan's iPhone", model="iPhone15,2", host="192.168.100.40",
+                  addresses=["192.168.100.40"], service="_apple-mobdev2._tcp.local.",
+                  installable=True, properties={"deviceid": "55:55:55:55:55:55"})]
+    out = merged(raw)
+    assert out[0]["installable"] is False
+    assert out[0]["needs_setup"] is True
+
+
+def test_usb_devices_are_never_treated_as_the_local_machine():
+    raw = [record(name="Ruslan's MacBook Pro", host="usb", addresses=[],
+                  connection="usb", udid="UDID1", installable=True)]
+    out = merge_discovered(raw, local_tokens=LOCAL_TOKENS, local_addresses=LOCAL_ADDRESSES)
+    assert len(out) == 1
+    assert out[0]["installable"] is True
+
+
+def test_two_usb_devices_do_not_merge_on_a_shared_placeholder_host():
+    raw = [
+        record(name="iPad A", model="iPad13,1", host="usb", connection="usb", udid="U1"),
+        record(name="iPad B", model="iPad14,1", host="usb", connection="usb", udid="U2"),
+    ]
+    assert len(merge_discovered(raw, local_tokens=set(), local_addresses=set())) == 2
+
+
+def test_is_local_machine_ignores_an_empty_token_set():
+    assert not is_local_machine(record(name="Living Room", host="192.168.1.5"), set(), set())

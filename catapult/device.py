@@ -4,6 +4,8 @@ import asyncio
 import json
 import logging
 import os
+import re
+import socket
 import sys
 import threading
 import time
@@ -53,7 +55,286 @@ def device_class_for(name: str, model: str) -> str:
         for prefix, cls in DEVICE_CLASS_MAP.items():
             if prefix.lower() in lowered:
                 return cls
+    # AirPlay is not an Apple-only protocol. LG, Samsung, Sony, Roku and others
+    # advertise _airplay too, and calling those "Apple Device" in the picker was
+    # the most confusing thing discovery did.
+    if _NON_APPLE_RE.search(f"{name or ''} {model or ''}".lower()):
+        return "airplay"
     return "unknown"
+
+
+_NON_APPLE_RE = re.compile(
+    r"\b(lg|webos|samsung|tizen|sony|bravia|philips|roku|vizio|tcl|hisense"
+    r"|sonos|chromecast|nvidia|shield|xbox|firetv|fire\s?tv)\b"
+)
+
+_LINK_LOCAL_PREFIXES = ("fe80:", "169.254.")
+
+
+def _strip_zone(address: object) -> str:
+    """``fe80::1%en0`` -> ``fe80::1``. Zone ids differ per interface, so two
+    records for one device would otherwise look like two addresses."""
+    return str(address or "").split("%")[0]
+
+
+def _address_sort_key(address: object) -> tuple[int, str]:
+    """Rank addresses: routable IPv4, then routable IPv6, then link-local.
+
+    The install path dials this address, and a link-local IPv6 is useless for
+    that. It used to win purely by arriving first in the mDNS answer.
+    """
+    addr = _strip_zone(address)
+    lowered = addr.lower()
+    if lowered.startswith(_LINK_LOCAL_PREFIXES):
+        rank = 2
+    elif ":" in addr:
+        rank = 1
+    else:
+        rank = 0
+    return (rank, addr)
+
+
+def _looks_like_ip(address: object) -> bool:
+    addr = _strip_zone(address)
+    return bool(addr) and ("." in addr or ":" in addr)
+
+
+def preferred_address(addresses) -> str:
+    usable = [
+        _strip_zone(a)
+        for a in (addresses or [])
+        if _strip_zone(a) and not _strip_zone(a).startswith("127.") and _strip_zone(a) != "::1"
+    ]
+    if not usable:
+        return ""
+    return sorted(usable, key=_address_sort_key)[0]
+
+
+def is_human_name(value: object) -> bool:
+    """Short, no colons (not a MAC or IPv6), not UUID-shaped."""
+    name = str(value or "")
+    if not name or len(name) >= 30:
+        return False
+    if ":" in name or "@" in name:
+        return False
+    if len(name) > 20 and name.count("-") >= 3:
+        return False
+    return True
+
+
+def name_token(value: object) -> str:
+    """Fold a display name to a comparable token: ``Ruslan's MacBook Pro (196)``
+    and the host name ``Ruslans-MacBook-Pro`` both become ``ruslansmacbookpro``."""
+    name = str(value or "")
+    name = re.sub(r"\s*\([^()]*\)\s*$", "", name)
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
+def record_addresses(device: dict) -> set[str]:
+    listed = device.get("addresses") or []
+    if not listed and device.get("host"):
+        listed = [device["host"]]
+    return {_strip_zone(a) for a in listed if _looks_like_ip(a)}
+
+
+def discovery_identity(device: dict) -> str:
+    """A key that is stable across services and addresses for one device."""
+    props = device.get("properties") or {}
+    for key in ("UniqueDeviceID", "rpMRtID", "deviceid"):
+        value = str(props.get(key) or "").strip().lower()
+        if value:
+            return f"id:{value}"
+    if device.get("udid") and device.get("connection") == "usb":
+        return f"id:{str(device['udid']).strip().lower()}"
+    return ""
+
+
+def _local_name_tokens() -> set[str]:
+    tokens = set()
+    try:
+        host = socket.gethostname()
+    except OSError:
+        return tokens
+    for candidate in (host, host.split(".")[0]):
+        token = name_token(candidate)
+        if token:
+            tokens.add(token)
+    return tokens
+
+
+def _local_addresses() -> set[str]:
+    found = set()
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None):
+            addr = _strip_zone(info[4][0])
+            if addr and not addr.startswith("127.") and addr != "::1":
+                found.add(addr)
+    except OSError:
+        pass
+    return found
+
+
+def is_local_machine(device: dict, local_tokens: set[str], local_addresses: set[str]) -> bool:
+    """This Mac cannot be an install target, so it does not belong in the picker.
+
+    It used to appear twice — once per address — because it answers
+    _companion-link and _airplay about itself.
+    """
+    if device.get("connection") == "usb":
+        return False
+    token = name_token(device.get("name", ""))
+    if token and token in local_tokens:
+        return True
+    return bool(record_addresses(device) & local_addresses)
+
+
+_PLACEHOLDER_NAME_TOKENS = {"appledevice", "device", "unknown"}
+
+
+def _name_quality(device: dict) -> int:
+    """Lower is better. The listener falls back to "Apple Device" or a model
+    family when a record advertises no name, and that placeholder used to win
+    the merge over the real name carried by another service."""
+    name = device.get("name")
+    if not is_human_name(name):
+        return 2
+    token = name_token(name)
+    if not token or token in _PLACEHOLDER_NAME_TOKENS:
+        return 1
+    model_family = name_token(str(device.get("model") or "").split(",")[0])
+    if model_family and token == model_family:
+        return 1
+    return 0
+
+
+def _collapse_group(group: list[dict]) -> dict:
+    def priority(dev: dict) -> int:
+        if dev.get("installable"):
+            return 2
+        if dev.get("needs_setup"):
+            return 1
+        return 0
+
+    merged = dict(max(group, key=priority))
+    addresses = sorted({a for d in group for a in record_addresses(d)}, key=_address_sort_key)
+    if addresses:
+        merged["host"] = addresses[0]
+        merged["addresses"] = addresses
+
+    best_named = sorted(group, key=_name_quality)[0]
+    if _name_quality(best_named) < 2 and best_named.get("name"):
+        merged["name"] = best_named["name"]
+    model = next((d.get("model") for d in group if d.get("model")), "")
+    if model and not merged.get("model"):
+        merged["model"] = model
+
+    merged_class = device_class_for(name=merged.get("name", ""), model=merged.get("model", ""))
+    if merged_class != "unknown":
+        merged["device_class"] = merged_class
+        # A merged name/model can reveal an iPhone or iPad behind an mDNS record
+        # that was marked installable. Re-apply that rule, but only to mDNS
+        # records: a usbmux device is on a cable and genuinely installable.
+        if (
+            merged.get("service") in INSTALLABLE_SERVICES
+            and merged_class not in TUNNEL_DEVICE_CLASSES
+        ):
+            merged["installable"] = False
+            merged["needs_setup"] = True
+    return merged
+
+
+def _name_suffix(device: dict) -> str:
+    host = str(device.get("host") or "")
+    if "." in host and ":" not in host:
+        return host.rsplit(".", 1)[-1]
+    model = str(device.get("model") or "")
+    return model or host[-4:] or "?"
+
+
+def _disambiguate_names(devices: list[dict]) -> None:
+    groups: dict[str, list[dict]] = {}
+    for d in devices:
+        groups.setdefault(d.get("name", ""), []).append(d)
+    for name, group in groups.items():
+        if len(group) < 2:
+            continue
+        for d in group:
+            d["name"] = f"{name} ({_name_suffix(d)})"
+
+
+def merge_discovered(
+    raw: list[dict],
+    local_tokens: set[str] | None = None,
+    local_addresses: set[str] | None = None,
+) -> list[dict]:
+    """Collapse raw records into one entry per physical device.
+
+    Grouping used to be by host address, so a Mac answering on both a routable
+    IPv4 and a link-local IPv6 appeared twice and the picker told them apart
+    with the address tail — "(0::1)" and "(196)". Group by device identity,
+    union the addresses, and fall back to the name only when nothing carries an
+    identifier.
+    """
+    if local_tokens is None:
+        local_tokens = _local_name_tokens()
+    if local_addresses is None:
+        local_addresses = _local_addresses()
+
+    records = [d for d in raw if not is_local_machine(d, local_tokens, local_addresses)]
+    if not records:
+        return []
+
+    parent = list(range(len(records)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    seen_identity: dict[str, int] = {}
+    seen_address: dict[str, int] = {}
+    for idx, d in enumerate(records):
+        identity = discovery_identity(d)
+        if identity:
+            if identity in seen_identity:
+                union(seen_identity[identity], idx)
+            else:
+                seen_identity[identity] = idx
+        for addr in record_addresses(d):
+            if addr in seen_address:
+                union(seen_address[addr], idx)
+            else:
+                seen_address[addr] = idx
+
+    # Records with no identifier on either side still have a name. Merge on that
+    # only when the models do not contradict, so two same-named phones stay two
+    # rows.
+    for i in range(len(records)):
+        for j in range(i + 1, len(records)):
+            if find(i) == find(j):
+                continue
+            token = name_token(records[i].get("name", ""))
+            if not token or token != name_token(records[j].get("name", "")):
+                continue
+            mi = str(records[i].get("model") or "").lower()
+            mj = str(records[j].get("model") or "").lower()
+            if mi and mj and mi != mj:
+                continue
+            union(i, j)
+
+    groups: dict[int, list[dict]] = {}
+    for idx, d in enumerate(records):
+        groups.setdefault(find(idx), []).append(d)
+
+    devices = [_collapse_group(g) for g in groups.values()]
+    _disambiguate_names(devices)
+    return devices
 
 
 STATE_DIR = Path.home() / ".catapult"
@@ -137,7 +418,14 @@ class _Listener(ServiceListener):
         info = zc.get_service_info(stype, name)
         if not info:
             return
-        addresses = [a for a in info.parsed_scoped_addresses() if a and not a.startswith("127.")]
+        addresses = sorted(
+            {
+                _strip_zone(a)
+                for a in info.parsed_scoped_addresses()
+                if _strip_zone(a) and not _strip_zone(a).startswith("127.") and _strip_zone(a) != "::1"
+            },
+            key=_address_sort_key,
+        )
         if not addresses:
             return
 
@@ -186,6 +474,7 @@ class _Listener(ServiceListener):
             "model": model,
             "udid": udid,
             "host": addresses[0],
+            "addresses": addresses,
             "port": info.port,
             "service": stype,
             "device_class": device_class,
@@ -287,59 +576,7 @@ class DeviceManager:
         if mdns_failed and not usb_devices:
             raise RuntimeError("Local network scan timed out")
 
-        # Deduplicate by host — prefer installable, merge best name/model
-        by_host: dict[str, dict] = {}
-        best_names: dict[str, str] = {}
-        best_models: dict[str, str] = {}
-        for d in raw:
-            host = d["host"]
-            n = d["name"]
-            # A "good" name is short, no colons (not MAC), no dashes-only (not UUID)
-            if n and len(n) < 30 and ":" not in n and not (len(n) > 20 and n.count("-") >= 3):
-                best_names[host] = n
-            if d.get("model"):
-                best_models[host] = d["model"]
-            # Priority: installable > needs_setup > other
-            def _priority(dev):
-                if dev["installable"]: return 2
-                if dev.get("needs_setup"): return 1
-                return 0
-            if host not in by_host or _priority(d) > _priority(by_host[host]):
-                by_host[host] = d
-        for host, d in by_host.items():
-            if host in best_names:
-                d["name"] = best_names[host]
-            if host in best_models and not d.get("model"):
-                d["model"] = best_models[host]
-            # Recompute device_class against the merged name+model — the
-            # per-service entry that won deduplication (often _remotepairing)
-            # may have arrived with neither, leaving class as "unknown".
-            merged_class = device_class_for(name=d["name"], model=d.get("model", ""))
-            if merged_class != "unknown":
-                d["device_class"] = merged_class
-                # A merged name/model can reveal an iPhone or iPad behind an
-                # mDNS record that was marked installable. Re-apply that rule —
-                # but ONLY to mDNS records. A usbmux device is on a cable and is
-                # genuinely installable; applying this to it marked a trusted,
-                # paired iPad as needing setup.
-                if (
-                    d.get("service") in INSTALLABLE_SERVICES
-                    and merged_class not in TUNNEL_DEVICE_CLASSES
-                ):
-                    d["installable"] = False
-                    d["needs_setup"] = True
-
-        devices = list(by_host.values())
-
-        # Disambiguate duplicate names by appending short host suffix
-        name_counts: dict[str, list[dict]] = {}
-        for d in devices:
-            name_counts.setdefault(d["name"], []).append(d)
-        for name, group in name_counts.items():
-            if len(group) > 1:
-                for d in group:
-                    suffix = d["host"].rsplit(".", 1)[-1] if "." in d["host"] else d["host"][-4:]
-                    d["name"] = f"{name} ({suffix})"
+        devices = merge_discovered(raw)
 
         remote_pair_ids = self._remote_paired_identifiers()
         for d in devices:

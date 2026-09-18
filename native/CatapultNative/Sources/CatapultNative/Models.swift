@@ -32,6 +32,8 @@ struct Device: Codable, Hashable, Identifiable, Sendable {
         case "tvos": "Apple TV"
         case "macos": "Mac"
         case "homepod": "HomePod"
+        // _airplay is not Apple-only: LG, Samsung, Roku and others advertise it.
+        case "airplay": "AirPlay device"
         default: "Apple Device"
         }
     }
