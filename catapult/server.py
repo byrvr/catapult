@@ -20,6 +20,7 @@ from catapult.errors import normalize_error, redact_sensitive
 from catapult.ipa import IpaProcessor
 from catapult.jobs import ActivityJob, job_manager
 from catapult.signer import Signer
+from catapult import cleanup as _cleanup
 from catapult import power as _power
 from catapult import provisioning as _provisioning
 from catapult import refresh as _refresh
@@ -1075,6 +1076,62 @@ async def delete_app_id(payload: dict):
     except Exception as e:
         logger.exception("Failed to delete app ID %s", app_id_id)
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+
+@app.get("/api/account/cleanup-preview")
+async def cleanup_preview():
+    """What is safe to delete locally. Reports only; deletes nothing."""
+    from catapult.ipa import UPLOAD_DIR
+
+    state = _refresh.load_state()
+    installs = state.get("installs", [])
+    orphans = _cleanup.orphaned_ipas(UPLOAD_DIR, installs)
+    dead = _cleanup.unresolvable_records(installs)
+    return {
+        "files": {
+            "count": len(orphans),
+            "bytes": _cleanup.total_bytes(orphans),
+            "names": [p.name for p in orphans[:50]],
+        },
+        "records": {"count": len(dead), "total": len(installs)},
+    }
+
+
+@app.post("/api/account/cleanup")
+async def run_cleanup(payload: dict):
+    """Delete orphaned IPAs and prune records that can never resolve.
+
+    Files go first, while the record list is still intact, so a record that
+    still resolves keeps protecting its file.
+    """
+    from catapult.ipa import UPLOAD_DIR
+
+    state = _refresh.load_state()
+    installs = state.get("installs", [])
+
+    deleted = freed = pruned = 0
+    errors: list[str] = []
+
+    if payload.get("delete_files"):
+        orphans = _cleanup.orphaned_ipas(UPLOAD_DIR, installs)
+        deleted, freed, errors = _cleanup.delete_files(orphans)
+        logger.info("Cleanup: removed %d unused IPA(s), freed %d bytes", deleted, freed)
+
+    if payload.get("prune_records"):
+        keep = [r for r in installs if _vault.resolve_ipa_path(r) is not None]
+        pruned = len(installs) - len(keep)
+        if pruned:
+            state["installs"] = keep
+            _refresh.save_state(state)
+            logger.info("Cleanup: pruned %d unresolvable install record(s)", pruned)
+
+    return {
+        "status": "ok",
+        "deleted_files": deleted,
+        "freed_bytes": freed,
+        "pruned_records": pruned,
+        "errors": errors,
+    }
 
 
 @app.post("/api/upload")

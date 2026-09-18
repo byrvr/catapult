@@ -364,6 +364,16 @@ struct ProvisionedApp: Codable, Hashable, Identifiable, Sendable {
     var historyOnlyRow: Bool { historyOnly == true }
     var expired: Bool { isExpired == true }
 
+    /// Nothing behind it and nothing live in front of it. Extensions are
+    /// excluded: they belong to a parent app and removing one alone breaks it.
+    /// Mirrors cleanup.deletable_app_ids on the backend.
+    var isUnusedSlot: Bool {
+        guard !appIDID.isEmpty, !extensionSlot else { return false }
+        if reinstallable || savedIPAExists == true { return false }
+        if let days = daysLeft, days > 0 { return false }
+        return true
+    }
+
     enum CodingKeys: String, CodingKey {
         case rowID = "row_id"
         case name
@@ -389,6 +399,48 @@ struct ProvisionedApp: Codable, Hashable, Identifiable, Sendable {
         case accountSlotExists = "account_slot_exists"
         case historyOnly = "history_only"
         case isExpired = "is_expired"
+    }
+}
+
+struct CleanupFiles: Codable, Sendable {
+    let count: Int
+    let bytes: Int
+    let names: [String]
+
+    var sizeText: String {
+        ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
+    }
+}
+
+struct CleanupRecords: Codable, Sendable {
+    let count: Int
+    let total: Int
+}
+
+struct CleanupPreview: Codable, Sendable {
+    let files: CleanupFiles
+    let records: CleanupRecords
+
+    var isEmpty: Bool { files.count == 0 && records.count == 0 }
+}
+
+struct CleanupResult: Codable, Sendable {
+    let status: String?
+    let deletedFiles: Int
+    let freedBytes: Int
+    let prunedRecords: Int
+    let errors: [String]
+
+    var freedText: String {
+        ByteCountFormatter.string(fromByteCount: Int64(freedBytes), countStyle: .file)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case status
+        case deletedFiles = "deleted_files"
+        case freedBytes = "freed_bytes"
+        case prunedRecords = "pruned_records"
+        case errors
     }
 }
 

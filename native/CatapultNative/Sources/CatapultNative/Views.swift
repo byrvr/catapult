@@ -701,10 +701,93 @@ private struct VerificationCodeField: View {
     }
 }
 
+/// Everything provably dead: files nothing points at, records that can never
+/// resolve, and App ID slots with neither. Each action confirms first and says
+/// exactly what it will remove.
+private struct CleanupRow: View {
+    @EnvironmentObject private var state: AppState
+    let preview: CleanupPreview
+    let unusedSlots: [ProvisionedApp]
+
+    @State private var confirmingFiles = false
+    @State private var confirmingSlots = false
+
+    private var fileCount: Int { preview.files.count }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Clean up")
+                .font(.headline)
+
+            if fileCount > 0 || preview.records.count > 0 {
+                HStack(alignment: .firstTextBaseline) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("\(fileCount) unused IPA\(fileCount == 1 ? "" : "s") · \(preview.files.sizeText)")
+                        Text("\(preview.records.count) of \(preview.records.total) install records point at files that are gone.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Free space") { confirmingFiles = true }
+                        .disabled(state.isCleaningUp)
+                }
+            }
+
+            if !unusedSlots.isEmpty {
+                HStack(alignment: .firstTextBaseline) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("\(unusedSlots.count) App ID\(unusedSlots.count == 1 ? "" : "s") with nothing installed")
+                        Text("Extensions and apps still running on a device are left alone.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Remove") { confirmingSlots = true }
+                        .disabled(state.isCleaningUp)
+                }
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.secondary.opacity(0.08))
+        )
+        .confirmationDialog(
+            "Delete \(fileCount) unused IPA\(fileCount == 1 ? "" : "s") and free \(preview.files.sizeText)?",
+            isPresented: $confirmingFiles,
+            titleVisibility: .visible
+        ) {
+            Button("Delete", role: .destructive) {
+                Task { await state.runCleanup() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("These files are on this Mac and no install record points at them. This cannot be undone.")
+        }
+        .confirmationDialog(
+            "Remove \(unusedSlots.count) App ID\(unusedSlots.count == 1 ? "" : "s") from your Apple account?",
+            isPresented: $confirmingSlots,
+            titleVisibility: .visible
+        ) {
+            Button("Remove", role: .destructive) {
+                Task { await state.deleteUnusedAppIDs(unusedSlots) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Frees slots on the account. Anything still installed from one of these App IDs stops working. This cannot be undone.")
+        }
+    }
+}
+
 private struct AccountSheet: View {
     @EnvironmentObject private var state: AppState
     @Environment(\.dismiss) private var dismiss
     @State private var pendingDelete: ProvisionedApp?
+
+    private var unusedSlots: [ProvisionedApp] {
+        (state.accountInfo?.apps ?? []).filter(\.isUnusedSlot)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -730,6 +813,10 @@ private struct AccountSheet: View {
 
                 if let sync = info.sync {
                     SyncSummaryRow(sync: sync)
+                }
+
+                if let preview = state.cleanup, !preview.isEmpty || !unusedSlots.isEmpty {
+                    CleanupRow(preview: preview, unusedSlots: unusedSlots)
                 }
 
                 Divider()

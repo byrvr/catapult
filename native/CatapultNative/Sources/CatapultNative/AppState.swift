@@ -24,6 +24,8 @@ final class AppState: ObservableObject {
     @Published var isInstalling = false
     @Published var isSettingUpDevice = false
     @Published var isLoadingAccountInfo = false
+    @Published var cleanup: CleanupPreview?
+    @Published var isCleaningUp = false
     @Published var isLoadingActivity = false
     @Published var activityJobs: [ActivityJob] = []
     @Published var reinstallingAppID: String?
@@ -213,6 +215,7 @@ final class AppState: ObservableObject {
         } catch {
             accountInfo = nil
         }
+        await loadCleanupPreview()
     }
 
     func reloadAccountInfo() async {
@@ -288,6 +291,49 @@ final class AppState: ObservableObject {
         } catch {
             show(error)
         }
+    }
+
+    func loadCleanupPreview() async {
+        cleanup = try? await client.cleanupPreview()
+    }
+
+    func runCleanup() async {
+        guard !isCleaningUp else { return }
+        isCleaningUp = true
+        defer { isCleaningUp = false }
+        do {
+            let result = try await client.runCleanup(deleteFiles: true, pruneRecords: true)
+            if !result.errors.isEmpty {
+                errorMessage = result.errors.joined(separator: "\n")
+            }
+            await loadCleanupPreview()
+            await loadAccountInfo()
+        } catch {
+            show(error)
+        }
+    }
+
+    /// Deletes App IDs one at a time and keeps going past a failure, so one
+    /// stubborn slot does not strand the rest.
+    func deleteUnusedAppIDs(_ apps: [ProvisionedApp]) async {
+        guard !isCleaningUp else { return }
+        isCleaningUp = true
+        defer { isCleaningUp = false }
+        var failures: [String] = []
+        for app in apps where app.isUnusedSlot {
+            do {
+                let response = try await client.deleteAppID(app.appIDID)
+                if response.status != "ok" {
+                    failures.append("\(app.name): \(response.displayMessage)")
+                }
+            } catch {
+                failures.append("\(app.name): \(error.localizedDescription)")
+            }
+        }
+        if !failures.isEmpty {
+            errorMessage = failures.joined(separator: "\n")
+        }
+        await loadAccountInfo()
     }
 
     func reinstallProvisionedApp(_ app: ProvisionedApp) async {

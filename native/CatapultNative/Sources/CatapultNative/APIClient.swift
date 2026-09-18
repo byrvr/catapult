@@ -28,6 +28,18 @@ struct APIClient: Sendable {
         try await get("/api/account/info", as: AccountInfo.self)
     }
 
+    func cleanupPreview() async throws -> CleanupPreview {
+        try await get("/api/account/cleanup-preview", as: CleanupPreview.self)
+    }
+
+    func runCleanup(deleteFiles: Bool, pruneRecords: Bool) async throws -> CleanupResult {
+        try await postJSON(
+            "/api/account/cleanup",
+            body: ["delete_files": deleteFiles, "prune_records": pruneRecords],
+            as: CleanupResult.self
+        )
+    }
+
     func activity() async throws -> ActivityListResponse {
         try await get("/api/activity", as: ActivityListResponse.self)
     }
