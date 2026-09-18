@@ -255,16 +255,20 @@ def load(team_id: str) -> SigningIdentity | None:
         raw = _keychain_get(_account(team_id))
     except Exception:
         logger.warning("Keychain lookup for the signing identity failed", exc_info=True)
-    source = "Keychain"
-    if not raw:
-        raw = _read_fallback(team_id)
-        source = "file"
+    if raw:
+        try:
+            return SigningIdentity.from_json(raw)
+        except Exception:
+            # Catapult before 0.4.2 stored the identity through a Keychain write
+            # that silently cut it at 2 KB, so a truncated copy may still be here.
+            logger.warning("Stored signing identity (Keychain) is unreadable — trying the file copy")
+    raw = _read_fallback(team_id)
     if not raw:
         return None
     try:
         return SigningIdentity.from_json(raw)
     except Exception:
-        logger.warning("Stored signing identity (%s) is unreadable — discarding", source)
+        logger.warning("Stored signing identity (file) is unreadable — discarding")
         return None
 
 

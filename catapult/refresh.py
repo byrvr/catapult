@@ -1,6 +1,7 @@
 """Persistent install records and opportunistic background refresh scheduler."""
 
 import asyncio
+import base64
 import json
 import logging
 import shlex
@@ -16,6 +17,17 @@ logger = logging.getLogger(__name__)
 STATE_DIR = Path.home() / ".catapult"
 STATE_FILE = STATE_DIR / "state.json"
 _KEYCHAIN_SERVICE = "com.catapult.session"
+# ``security -i`` reads one command per line into a fixed 4096-byte buffer. A
+# longer line is cut there: the first 4096 bytes run as a command that stores a
+# truncated value, the remainder fails as a second command. Hex-encoding doubles
+# the value, so anything past about 2 KB (a signing certificate plus its key is
+# 5-6 KB) never survived a write. Larger values are stored as base64 pieces in
+# numbered items and joined on read; a piece of 1600 characters is 3200 hex
+# bytes plus the command itself, comfortably under the limit.
+_KEYCHAIN_PIECE_CHARS = 1600
+_KEYCHAIN_INLINE_LIMIT = 1600
+_KEYCHAIN_PIECES_MARKER = "catapult-pieces:"
+_KEYCHAIN_MAX_PIECES = 64
 
 REFRESH_INTERVAL_DAYS = 7
 REFRESH_VALID_SECONDS = REFRESH_INTERVAL_DAYS * 86400
@@ -250,8 +262,12 @@ def _security_quote(value: str) -> str | None:
     return None
 
 
-def _keychain_set(account: str, data: str) -> bool:
-    """Store a value in macOS Keychain.
+def _piece_account(account: str, index: int) -> str:
+    return f"{account}#{index}"
+
+
+def _keychain_put(account: str, data: str) -> bool:
+    """Store one item. ``data`` must fit a single ``security -i`` line.
 
     The command is fed to ``security -i`` over stdin with the value hex-encoded
     (``-X``), so the secret never sits in the process table the way a
@@ -270,8 +286,7 @@ def _keychain_set(account: str, data: str) -> bool:
     return result.returncode == 0
 
 
-def _keychain_get(account: str) -> str | None:
-    """Retrieve a value from macOS Keychain."""
+def _keychain_read(account: str) -> str | None:
     result = subprocess.run(
         ["security", "find-generic-password", "-s", _KEYCHAIN_SERVICE, "-a", account, "-w"],
         capture_output=True, text=True,
@@ -281,12 +296,87 @@ def _keychain_get(account: str) -> str | None:
     return None
 
 
-def _keychain_delete(account: str):
-    """Remove a value from macOS Keychain."""
-    subprocess.run(
+def _keychain_remove(account: str) -> bool:
+    result = subprocess.run(
         ["security", "delete-generic-password", "-s", _KEYCHAIN_SERVICE, "-a", account],
         capture_output=True,
     )
+    return result.returncode == 0
+
+
+def _piece_count(raw: str | None) -> int | None:
+    """Number of pieces a stored value points at, or None for an inline value."""
+    if not raw or not raw.startswith(_KEYCHAIN_PIECES_MARKER):
+        return None
+    try:
+        count = int(raw[len(_KEYCHAIN_PIECES_MARKER):])
+    except ValueError:
+        return None
+    return count if 0 < count <= _KEYCHAIN_MAX_PIECES else None
+
+
+def _drop_pieces(account: str, start: int = 0) -> None:
+    """Delete piece items from ``start`` up to the first one that does not exist."""
+    for index in range(start, _KEYCHAIN_MAX_PIECES):
+        if not _keychain_remove(_piece_account(account, index)):
+            return
+
+
+def _keychain_set(account: str, data: str) -> bool:
+    """Store a value in macOS Keychain.
+
+    A short value is stored inline. A longer one — the signing certificate and
+    its private key — is base64-encoded, split into pieces small enough for
+    ``security -i``, stored under ``<account>#<n>``, and the main item is left
+    pointing at the piece count. Pieces of an earlier, longer value are removed.
+    """
+    if len(data) <= _KEYCHAIN_INLINE_LIMIT and not data.startswith(_KEYCHAIN_PIECES_MARKER):
+        if not _keychain_put(account, data):
+            return False
+        _drop_pieces(account)
+        return True
+
+    encoded = base64.b64encode(data.encode("utf-8")).decode("ascii")
+    pieces = [
+        encoded[i:i + _KEYCHAIN_PIECE_CHARS]
+        for i in range(0, len(encoded), _KEYCHAIN_PIECE_CHARS)
+    ]
+    if len(pieces) > _KEYCHAIN_MAX_PIECES:
+        logger.warning("Keychain value for %r is too large to store (%d bytes)", account, len(data))
+        return False
+    for index, piece in enumerate(pieces):
+        if not _keychain_put(_piece_account(account, index), piece):
+            return False
+    if not _keychain_put(account, f"{_KEYCHAIN_PIECES_MARKER}{len(pieces)}"):
+        return False
+    _drop_pieces(account, start=len(pieces))
+    return True
+
+
+def _keychain_get(account: str) -> str | None:
+    """Retrieve a value from macOS Keychain, reassembling a pieced value."""
+    raw = _keychain_read(account)
+    count = _piece_count(raw)
+    if count is None:
+        return raw
+    pieces = []
+    for index in range(count):
+        piece = _keychain_read(_piece_account(account, index))
+        if piece is None:
+            logger.warning("Keychain value for %r is missing piece %d of %d", account, index, count)
+            return None
+        pieces.append(piece)
+    try:
+        return base64.b64decode("".join(pieces), validate=True).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        logger.warning("Keychain value for %r is corrupt", account)
+        return None
+
+
+def _keychain_delete(account: str):
+    """Remove a value from macOS Keychain, including any pieces."""
+    _keychain_remove(account)
+    _drop_pieces(account)
 
 
 def save_session(session) -> None:

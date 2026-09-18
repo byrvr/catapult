@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.2 - 2026-09-18
+
+### macOS 27
+
+- Catapult now keeps one signing certificate instead of minting a new one on every refresh. The certificate and its private key were stored in the Keychain through a `security -i` command whose line is capped at 4096 bytes; hex-encoded, the 5-6 KB identity always overran it, so the write kept a truncated fragment and the next signing call, unable to read it back, revoked the account's certificates and requested another. A weekly install could turn into a dozen certificates and a dozen revocation emails. The identity is now split into Keychain-sized pieces and reassembled on read, and a truncated pre-0.4.2 copy falls back to the private file instead of forcing a new certificate.
+
 ## 0.4.1 - 2026-09-14
 
 ### macOS 27
