@@ -547,6 +547,9 @@ private struct SignInSheet: View {
     @State private var appleID = ""
     @State private var password = ""
     @State private var code = ""
+    @State private var isSubmitting = false
+
+    private static let codeLength = 6
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -573,15 +576,18 @@ private struct SignInSheet: View {
             case .signingIn:
                 LoadingRow("Signing in...")
             case .twoFactorRequired:
-                VStack(alignment: .leading, spacing: 10) {
-                    TextField("Verification code", text: $code)
-                        .textFieldStyle(.roundedBorder)
-                        .onSubmit { submitCode() }
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Enter the \(Self.codeLength)-digit code from your trusted device.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    VerificationCodeField(code: $code, length: Self.codeLength) {
+                        submitCode()
+                    }
                     HStack {
                         Spacer()
                         Button("Verify") { submitCode() }
                             .buttonStyle(.borderedProminent)
-                            .disabled(code.count < 4)
+                            .disabled(code.count < Self.codeLength)
                     }
                 }
             case .signedOut:
@@ -610,7 +616,88 @@ private struct SignInSheet: View {
     }
 
     private func submitCode() {
-        Task { await state.submit2FA(code: code) }
+        guard code.count == Self.codeLength, !isSubmitting else { return }
+        isSubmitting = true
+        Task {
+            await state.submit2FA(code: code)
+            isSubmitting = false
+            if state.authPhase == .twoFactorRequired {
+                // Wrong code: empty the boxes so a retry is just typing again.
+                code = ""
+            }
+        }
+    }
+}
+
+/// Six boxes that read like Apple's own verification-code field. A single hidden
+/// text field does the typing, so paste, delete and autofill keep working without
+/// juggling focus across six separate fields.
+private struct VerificationCodeField: View {
+    @Binding var code: String
+    let length: Int
+    var onComplete: () -> Void
+
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        ZStack {
+            TextField("", text: $code)
+                .textFieldStyle(.plain)
+                .textContentType(.oneTimeCode)
+                .focused($isFocused)
+                .opacity(0.02)
+                .onSubmit { onComplete() }
+
+            HStack(spacing: 8) {
+                ForEach(0..<length, id: \.self) { index in
+                    box(at: index)
+                }
+            }
+            .allowsHitTesting(false)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { isFocused = true }
+        .onAppear { isFocused = true }
+        .onChange(of: code) { _, newValue in
+            let digits = String(newValue.filter(\.isNumber).prefix(length))
+            if digits != newValue {
+                code = digits
+                return
+            }
+            if digits.count == length {
+                onComplete()
+            }
+        }
+    }
+
+    private var activeIndex: Int {
+        min(code.count, length - 1)
+    }
+
+    private func character(at index: Int) -> String {
+        guard index < code.count else { return "" }
+        let position = code.index(code.startIndex, offsetBy: index)
+        return String(code[position])
+    }
+
+    private func box(at index: Int) -> some View {
+        let isActive = isFocused && index == activeIndex
+        return RoundedRectangle(cornerRadius: 8, style: .continuous)
+            .fill(Color(nsColor: .textBackgroundColor))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(
+                        isActive ? Color.accentColor : Color.secondary.opacity(0.35),
+                        lineWidth: isActive ? 2 : 1
+                    )
+            }
+            .overlay {
+                Text(character(at: index))
+                    .font(.system(size: 22, weight: .medium, design: .rounded))
+                    .monospacedDigit()
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 52)
     }
 }
 

@@ -269,7 +269,7 @@ async function handleLogin(e) {
         } else if (data.status === "2fa_required") {
             $("#authForm").hidden = true;
             $("#tfaSection").hidden = false;
-            $("#tfaCode").focus();
+            clearTfa(true);
             setAuthStatus("Enter the code sent to your trusted devices", "");
         } else {
             setAuthStatus(data.message || "Authentication failed", "err");
@@ -282,15 +282,102 @@ async function handleLogin(e) {
     }
 }
 
+const TFA_LENGTH = 6;
+let tfaSubmitting = false;
+
 bindAuthForm();
 
-async function submitTfa() {
-    const btn = $("#tfaBtn");
-    const code = $("#tfaCode").value.trim();
-    if (code.length < 6) return;
+function tfaDigits() {
+    return Array.from(document.querySelectorAll("#tfaCode .tfa-digit"));
+}
 
-    btn.disabled = true;
-    btn.textContent = "Verifying...";
+function tfaValue() {
+    return tfaDigits().map((input) => input.value).join("");
+}
+
+function clearTfa(focus) {
+    const digits = tfaDigits();
+    digits.forEach((input) => { input.value = ""; });
+    if (focus && digits.length) digits[0].focus();
+}
+
+function setTfaBusy(busy) {
+    const box = $("#tfaCode");
+    if (box) box.classList.toggle("busy", busy);
+    tfaDigits().forEach((input) => { input.disabled = busy; });
+}
+
+function shakeTfa() {
+    const box = $("#tfaCode");
+    if (!box) return;
+    box.classList.remove("shake");
+    void box.offsetWidth;
+    box.classList.add("shake");
+}
+
+// Spread `text` across the boxes starting at `from`, then land the caret on the
+// first box still empty. Used by both paste and multi-character input.
+function fillTfa(text, from) {
+    const digits = tfaDigits();
+    const chars = String(text).replace(/\D/g, "").slice(0, TFA_LENGTH - from).split("");
+    chars.forEach((char, n) => { digits[from + n].value = char; });
+    const next = Math.min(from + chars.length, TFA_LENGTH - 1);
+    digits[next].focus();
+    digits[next].select();
+    maybeSubmitTfa();
+}
+
+function maybeSubmitTfa() {
+    if (tfaValue().length === TFA_LENGTH) submitTfa();
+}
+
+function setupTfaInputs() {
+    const digits = tfaDigits();
+    digits.forEach((input, idx) => {
+        input.addEventListener("input", () => {
+            const value = input.value.replace(/\D/g, "");
+            if (value.length > 1) {
+                input.value = "";
+                fillTfa(value, idx);
+                return;
+            }
+            input.value = value;
+            if (value && idx < TFA_LENGTH - 1) digits[idx + 1].focus();
+            maybeSubmitTfa();
+        });
+        input.addEventListener("keydown", (e) => {
+            if (e.key === "Backspace" && !input.value && idx > 0) {
+                e.preventDefault();
+                digits[idx - 1].value = "";
+                digits[idx - 1].focus();
+            } else if (e.key === "ArrowLeft" && idx > 0) {
+                e.preventDefault();
+                digits[idx - 1].focus();
+            } else if (e.key === "ArrowRight" && idx < TFA_LENGTH - 1) {
+                e.preventDefault();
+                digits[idx + 1].focus();
+            } else if (e.key === "Enter") {
+                e.preventDefault();
+                maybeSubmitTfa();
+            }
+        });
+        input.addEventListener("paste", (e) => {
+            e.preventDefault();
+            const clip = e.clipboardData || window.clipboardData;
+            fillTfa(clip ? clip.getData("text") : "", idx);
+        });
+        input.addEventListener("focus", () => input.select());
+    });
+}
+
+async function submitTfa() {
+    if (tfaSubmitting) return;
+    const code = tfaValue();
+    if (code.length < TFA_LENGTH) return;
+
+    tfaSubmitting = true;
+    setTfaBusy(true);
+    setAuthStatus("Verifying\u2026", "");
 
     try {
         const resp = await fetch("/api/auth/2fa", {
@@ -303,15 +390,19 @@ async function submitTfa() {
         if (data.status === "ok") {
             $("#tfaSection").hidden = true;
             onAuthSuccess();
-        } else {
-            setAuthStatus(data.message || "Verification failed", "err");
+            return;
         }
+        setAuthStatus(data.message || "Verification failed", "err");
     } catch {
         setAuthStatus("Connection error", "err");
-    } finally {
-        btn.disabled = false;
-        btn.textContent = "Verify";
     }
+
+    // Wrong or unusable code: empty the boxes and put the caret back at the start,
+    // so a retry is just typing again.
+    shakeTfa();
+    setTfaBusy(false);
+    clearTfa(true);
+    tfaSubmitting = false;
 }
 
 function onAuthSuccess() {
@@ -357,9 +448,13 @@ async function signOut() {
         </form>
         <div id="tfaSection" hidden>
             <p class="hint">On your iPhone: Settings \u2192 [your name] \u2192 Sign-In &amp; Security \u2192 Get Verification Code</p>
-            <div class="tfa-inputs">
-                <input type="text" id="tfaCode" maxlength="6" placeholder="000000" inputmode="numeric" pattern="[0-9]*" autocomplete="one-time-code">
-                <button class="btn-primary" id="tfaBtn">Verify</button>
+            <div class="tfa-code" id="tfaCode" role="group" aria-label="Verification code">
+                <input type="text" class="tfa-digit" inputmode="numeric" pattern="[0-9]*" maxlength="1" autocomplete="one-time-code" aria-label="Digit 1 of 6">
+                <input type="text" class="tfa-digit" inputmode="numeric" pattern="[0-9]*" maxlength="1" autocomplete="off" aria-label="Digit 2 of 6">
+                <input type="text" class="tfa-digit" inputmode="numeric" pattern="[0-9]*" maxlength="1" autocomplete="off" aria-label="Digit 3 of 6">
+                <input type="text" class="tfa-digit" inputmode="numeric" pattern="[0-9]*" maxlength="1" autocomplete="off" aria-label="Digit 4 of 6">
+                <input type="text" class="tfa-digit" inputmode="numeric" pattern="[0-9]*" maxlength="1" autocomplete="off" aria-label="Digit 5 of 6">
+                <input type="text" class="tfa-digit" inputmode="numeric" pattern="[0-9]*" maxlength="1" autocomplete="off" aria-label="Digit 6 of 6">
             </div>
         </div>
         <div class="auth-status" id="authStatus"></div>`;
@@ -369,10 +464,7 @@ async function signOut() {
 
 function bindAuthForm() {
     $("#authForm").addEventListener("submit", handleLogin);
-    $("#tfaBtn").addEventListener("click", submitTfa);
-    $("#tfaCode").addEventListener("keydown", (e) => {
-        if (e.key === "Enter") submitTfa();
-    });
+    setupTfaInputs();
 }
 
 async function loadAccountInfo() {

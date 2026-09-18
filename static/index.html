@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Catapult</title>
-    <link rel="stylesheet" href="/static/styles.css?v=2">
+    <link rel="stylesheet" href="/static/styles.css?v=3">
 </head>
 <body>
     <div class="app">
@@ -70,9 +70,13 @@
             </form>
             <div id="tfaSection" hidden>
                 <p class="hint">On your iPhone: Settings → [your name] → Sign-In &amp; Security → Get Verification Code</p>
-                <div class="tfa-inputs">
-                    <input type="text" id="tfaCode" maxlength="6" placeholder="000000" inputmode="numeric" pattern="[0-9]*" autocomplete="one-time-code">
-                    <button class="btn-primary" id="tfaBtn">Verify</button>
+                <div class="tfa-code" id="tfaCode" role="group" aria-label="Verification code">
+                    <input type="text" class="tfa-digit" inputmode="numeric" pattern="[0-9]*" maxlength="1" autocomplete="one-time-code" aria-label="Digit 1 of 6">
+                    <input type="text" class="tfa-digit" inputmode="numeric" pattern="[0-9]*" maxlength="1" autocomplete="off" aria-label="Digit 2 of 6">
+                    <input type="text" class="tfa-digit" inputmode="numeric" pattern="[0-9]*" maxlength="1" autocomplete="off" aria-label="Digit 3 of 6">
+                    <input type="text" class="tfa-digit" inputmode="numeric" pattern="[0-9]*" maxlength="1" autocomplete="off" aria-label="Digit 4 of 6">
+                    <input type="text" class="tfa-digit" inputmode="numeric" pattern="[0-9]*" maxlength="1" autocomplete="off" aria-label="Digit 5 of 6">
+                    <input type="text" class="tfa-digit" inputmode="numeric" pattern="[0-9]*" maxlength="1" autocomplete="off" aria-label="Digit 6 of 6">
                 </div>
             </div>
             <div class="auth-status" id="authStatus"></div>
@@ -92,6 +96,6 @@
         </section>
     </div>
 
-    <script src="/static/app.js?v=2"></script>
+    <script src="/static/app.js?v=3"></script>
 </body>
 </html>

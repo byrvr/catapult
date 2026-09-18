@@ -333,17 +333,44 @@ input::placeholder { color: var(--text-dim); }
     margin-bottom: 8px;
 }
 
-.tfa-inputs {
+.tfa-code {
     display: flex;
     gap: 8px;
 }
 
-.tfa-inputs input {
+.tfa-code .tfa-digit {
     flex: 1;
+    min-width: 0;
+    height: 48px;
+    padding: 0;
     text-align: center;
-    font-size: 18px;
-    letter-spacing: 0.3em;
+    font-size: 20px;
+    font-weight: 500;
     font-variant-numeric: tabular-nums;
+    caret-color: var(--accent);
+    transition: border-color 0.15s, box-shadow 0.15s, opacity 0.15s;
+}
+
+.tfa-code .tfa-digit:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+.tfa-code.busy { opacity: 0.5; }
+.tfa-code .tfa-digit:disabled { cursor: progress; }
+
+.tfa-code.shake { animation: tfa-shake 0.4s ease-in-out; }
+
+@keyframes tfa-shake {
+    0%, 100% { transform: translateX(0); }
+    20% { transform: translateX(-6px); }
+    40% { transform: translateX(6px); }
+    60% { transform: translateX(-4px); }
+    80% { transform: translateX(3px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .tfa-code.shake { animation: none; }
 }
 
 .auth-status {
