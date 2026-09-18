@@ -383,10 +383,14 @@ def merge_discovered(
 
     # Records with no identifier on either side still have a name. Merge on that
     # only when the models do not contradict, so two same-named phones stay two
-    # rows.
+    # rows — and only for a name the owner chose. Every nameless device is
+    # called "Apple Device", so merging on that collapsed two unrelated Apple
+    # TVs into one row and made the second disappear from the picker.
     for i in range(len(records)):
         for j in range(i + 1, len(records)):
             if find(i) == find(j):
+                continue
+            if _name_quality(records[i]) != 0 or _name_quality(records[j]) != 0:
                 continue
             token = name_token(records[i].get("name", ""))
             if not token or token != name_token(records[j].get("name", "")):
@@ -655,7 +659,19 @@ class DeviceManager:
         if mdns_failed and not usb_devices:
             raise RuntimeError("Local network scan timed out")
 
+        for r in raw:
+            logger.info(
+                "  mDNS: %s | name=%r model=%r addrs=%s",
+                r.get("service", "?"), r.get("name", ""), r.get("model", ""),
+                ",".join(sorted(record_addresses(r))) or "-",
+            )
         devices = merge_discovered(raw)
+        for d in devices:
+            logger.info(
+                "  device: %r class=%s host=%s service=%s installable=%s needs_setup=%s",
+                d.get("name"), d.get("device_class"), d.get("host"),
+                d.get("service"), d.get("installable"), d.get("needs_setup"),
+            )
 
         remote_pair_ids = self._remote_paired_identifiers()
         for d in devices:

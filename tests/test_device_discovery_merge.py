@@ -310,3 +310,33 @@ def test_an_undecodable_model_falls_back_to_the_host_name():
     out = merged(raw)
     # "box" is the Bonjour host name; still more use than "Apple Device".
     assert out[0]["name"] == "box"
+
+
+def test_two_nameless_devices_do_not_collapse_into_one():
+    # Every device that advertises no name is called "Apple Device". Merging on
+    # that placeholder made a second Apple TV vanish from the picker entirely.
+    raw = [
+        record(name="Apple Device", host="192.168.100.20", addresses=["192.168.100.20"],
+               service="_remotepairing._tcp.local.", needs_setup=True),
+        record(name="Apple Device", host="192.168.100.22", addresses=["192.168.100.22"],
+               service="_remotepairing._tcp.local.", needs_setup=True),
+    ]
+    out = merged(raw)
+    assert len(out) == 2
+    assert {d["host"] for d in out} == {"192.168.100.20", "192.168.100.22"}
+
+
+def test_a_nameless_device_does_not_swallow_a_named_one():
+    raw = [
+        record(name="Living Room", model="AppleTV14,1", host="192.168.100.92",
+               addresses=["192.168.100.92"], service="_airplay._tcp.local."),
+        record(name="Apple Device", host="192.168.100.92", addresses=["192.168.100.92"],
+               service="_remotepairing._tcp.local.", needs_setup=True),
+        record(name="Apple Device", host="192.168.100.20", addresses=["192.168.100.20"],
+               service="_remotepairing._tcp.local.", needs_setup=True),
+    ]
+    out = merged(raw)
+    assert len(out) == 2, [d["name"] for d in out]
+    by_host = {d["host"]: d for d in out}
+    assert by_host["192.168.100.92"]["name"] == "Living Room"
+    assert by_host["192.168.100.20"]["name"] == "Apple Device"
