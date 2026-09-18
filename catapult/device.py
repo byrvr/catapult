@@ -20,7 +20,14 @@ MDNS_SERVICES = [
     "_apple-mobdev2._tcp.local.",
     "_companion-link._tcp.local.",
     "_airplay._tcp.local.",
+    # Bonjour's device descriptor. It is the one service whose TXT reliably
+    # carries a model, which is how a device that advertises nothing useful
+    # anywhere else stops being called "Apple Device".
+    "_device-info._tcp.local.",
 ]
+
+# Describes a device but is not a device in its own right.
+INFO_ONLY_SERVICES = {"_device-info._tcp.local."}
 
 DEVICE_CLASS_MAP = {
     "AppleTV": "tvos",
@@ -61,6 +68,49 @@ def device_class_for(name: str, model: str) -> str:
     if _NON_APPLE_RE.search(f"{name or ''} {model or ''}".lower()):
         return "airplay"
     return "unknown"
+
+
+APPLE_MODEL_NAMES = {
+    "appletv5,3": "Apple TV HD",
+    "appletv6,2": "Apple TV 4K",
+    "appletv11,1": "Apple TV 4K (2nd gen)",
+    "appletv14,1": "Apple TV 4K (3rd gen)",
+    "audioaccessory1,1": "HomePod",
+    "audioaccessory1,2": "HomePod",
+    "audioaccessory5,1": "HomePod mini",
+    "audioaccessory6,1": "HomePod (2nd gen)",
+}
+
+# Longest prefix first: macbookpro must win over macbook, and macbook over mac.
+_MODEL_FAMILIES = (
+    ("appletv", "Apple TV"),
+    ("audioaccessory", "HomePod"),
+    ("homepod", "HomePod"),
+    ("macbookpro", "MacBook Pro"),
+    ("macbookair", "MacBook Air"),
+    ("macbook", "MacBook"),
+    ("macmini", "Mac mini"),
+    ("macpro", "Mac Pro"),
+    ("imac", "iMac"),
+    ("mac", "Mac"),
+    ("iphone", "iPhone"),
+    ("ipad", "iPad"),
+    ("ipod", "iPod touch"),
+    ("watch", "Apple Watch"),
+)
+
+
+def human_model_name(model: object) -> str:
+    """``AppleTV14,1`` -> ``Apple TV 4K (3rd gen)``; unknown codes -> ""."""
+    key = re.sub(r"[^a-z0-9,]", "", str(model or "").lower())
+    if not key:
+        return ""
+    if key in APPLE_MODEL_NAMES:
+        return APPLE_MODEL_NAMES[key]
+    for prefix, label in _MODEL_FAMILIES:
+        if key.startswith(prefix):
+            return label
+    return ""
 
 
 _NON_APPLE_RE = re.compile(
@@ -192,23 +242,31 @@ _PLACEHOLDER_NAME_TOKENS = {"appledevice", "device", "unknown"}
 
 
 def _name_quality(device: dict) -> int:
-    """Lower is better. The listener falls back to "Apple Device" or a model
-    family when a record advertises no name, and that placeholder used to win
-    the merge over the real name carried by another service."""
+    """Lower is better.
+
+    0  a name the owner chose ("Living Room")
+    1  a _device-info instance name, which is really the Bonjour host name
+    2  the "Apple Device" placeholder the listener falls back to
+    3  nothing usable
+    """
     name = device.get("name")
     if not is_human_name(name):
-        return 2
+        return 3
     token = name_token(name)
     if not token or token in _PLACEHOLDER_NAME_TOKENS:
-        return 1
+        return 2
     model_family = name_token(str(device.get("model") or "").split(",")[0])
     if model_family and token == model_family:
+        return 2
+    if device.get("info_only"):
         return 1
     return 0
 
 
 def _collapse_group(group: list[dict]) -> dict:
     def priority(dev: dict) -> int:
+        if dev.get("info_only"):
+            return -1
         if dev.get("installable"):
             return 2
         if dev.get("needs_setup"):
@@ -221,12 +279,23 @@ def _collapse_group(group: list[dict]) -> dict:
         merged["host"] = addresses[0]
         merged["addresses"] = addresses
 
-    best_named = sorted(group, key=_name_quality)[0]
-    if _name_quality(best_named) < 2 and best_named.get("name"):
-        merged["name"] = best_named["name"]
     model = next((d.get("model") for d in group if d.get("model")), "")
     if model and not merged.get("model"):
         merged["model"] = model
+
+    best_named = sorted(group, key=_name_quality)[0]
+    quality = _name_quality(best_named)
+    if quality == 0:
+        merged["name"] = best_named["name"]
+    else:
+        # Nobody advertised a chosen name. A model reads better than both the
+        # host name and the "Apple Device" placeholder; the host name beats the
+        # placeholder when the model is one we cannot decode.
+        friendly = human_model_name(merged.get("model"))
+        if friendly:
+            merged["name"] = friendly
+        elif quality < 3 and best_named.get("name"):
+            merged["name"] = best_named["name"]
 
     merged_class = device_class_for(name=merged.get("name", ""), model=merged.get("model", ""))
     if merged_class != "unknown":
@@ -332,7 +401,11 @@ def merge_discovered(
     for idx, d in enumerate(records):
         groups.setdefault(find(idx), []).append(d)
 
-    devices = [_collapse_group(g) for g in groups.values()]
+    devices = [
+        _collapse_group(g)
+        for g in groups.values()
+        if not all(d.get("info_only") for d in g)
+    ]
     _disambiguate_names(devices)
     return devices
 
@@ -436,7 +509,12 @@ class _Listener(ServiceListener):
 
         # Friendly name is in the service name (e.g. "Living Room._companion-link...")
         friendly_name = name.split(f".{stype}")[0] if f".{stype}" in name else ""
-        model = props.get("model", "") or props.get("rpMd", "")
+        # Each service hides the model under a different key: companion-link and
+        # device-info use "model", remotepairing "rpMd", AirPlay "am"/"md".
+        model = next(
+            (props.get(k, "") for k in ("model", "rpMd", "am", "md") if props.get(k)),
+            "",
+        )
 
         # Filter out raw MAC/UUID/IPv6 names — they're not human-readable
         def _is_good_name(n: str) -> bool:
@@ -477,6 +555,7 @@ class _Listener(ServiceListener):
             "addresses": addresses,
             "port": info.port,
             "service": stype,
+            "info_only": stype in INFO_ONLY_SERVICES,
             "device_class": device_class,
             "connection": "network",
             "installable": installable,
@@ -580,6 +659,7 @@ class DeviceManager:
 
         remote_pair_ids = self._remote_paired_identifiers()
         for d in devices:
+            self._apply_remembered_model(d)
             if self._is_known_paired(d, remote_pair_ids):
                 d["paired"] = True
                 d["needs_setup"] = False
@@ -749,6 +829,50 @@ class DeviceManager:
             return remembered
         raise RuntimeError(f"Device {udid} not found on the network")
 
+    def _remember_device_model(self, host: str | None, model: str | None) -> None:
+        """Store a model learned over the tunnel against its paired record."""
+        if not host or not model:
+            return
+        changed = False
+        for device in self._paired_devices.get("devices", []):
+            if device.get("host") == host and device.get("model") != model:
+                device["model"] = model
+                changed = True
+        if not changed:
+            return
+        # A naming cache must never be able to break an install.
+        try:
+            self._save_paired_devices()
+        except Exception:
+            logger.debug("Could not persist model for %s", host, exc_info=True)
+            return
+        logger.info("Remembered model %s for %s", model, host)
+
+    def _apply_remembered_model(self, device: dict) -> None:
+        """Fill in a model this device does not advertise but we have seen before."""
+        if device.get("model"):
+            return
+        needs_name = _name_quality(device) > 0
+        model = ""
+        host = device.get("host")
+        for remembered in self._paired_devices.get("devices", []):
+            if host and remembered.get("host") == host and remembered.get("model"):
+                model = remembered["model"]
+                break
+        if not model:
+            # The lease may have moved; identifiers still match.
+            model = (self._remembered_device_info(device.get("udid", "")) or {}).get("model", "")
+        if not model:
+            return
+        device["model"] = model
+        merged_class = device_class_for(name=device.get("name", ""), model=model)
+        if merged_class != "unknown":
+            device["device_class"] = merged_class
+        if needs_name:
+            friendly = human_model_name(model)
+            if friendly:
+                device["name"] = friendly
+
     def _remembered_device_info(self, udid: str) -> dict | None:
         normalized_udid = str(udid).split("._", 1)[0]
         for device in self._paired_devices.get("devices", []):
@@ -757,7 +881,7 @@ class DeviceManager:
                 continue
             model = device.get("model", "")
             return {
-                "name": device.get("name") or "Apple TV",
+                "name": device.get("name") or human_model_name(model) or "Apple TV",
                 "model": model,
                 "udid": udid,
                 "host": device.get("host", ""),
@@ -2058,6 +2182,11 @@ echo installed
         sub_platform = "tvOS" if is_tv else None
         logger.info("Real device UDID: %s, ProductType: %s, subPlatform: %s",
                     udid, product_type, sub_platform)
+        # mDNS carries no model for a device in remote-pairing mode: the service
+        # name is a rotating UUID and rpMd is empty, so the picker could only
+        # call it "Apple Device". This handshake knows the real ProductType —
+        # keep it so the next scan can name the device properly.
+        self._remember_device_model(device_host, product_type)
         for candidate in rsds:
             try:
                 await candidate.close()

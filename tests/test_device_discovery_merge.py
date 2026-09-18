@@ -200,3 +200,113 @@ def test_two_usb_devices_do_not_merge_on_a_shared_placeholder_host():
 
 def test_is_local_machine_ignores_an_empty_token_set():
     assert not is_local_machine(record(name="Living Room", host="192.168.1.5"), set(), set())
+
+
+# ── naming a device that advertises nothing ──
+
+from catapult.device import _Listener, human_model_name
+
+
+class FakeInfo:
+    def __init__(self, props, addresses, port=7000):
+        self.properties = {k.encode(): v.encode() for k, v in props.items()}
+        self.port = port
+        self._addresses = addresses
+
+    def parsed_scoped_addresses(self):
+        return self._addresses
+
+
+class FakeZeroconf:
+    def __init__(self, info):
+        self._info = info
+
+    def get_service_info(self, stype, name):
+        return self._info
+
+
+def listen(stype, name, props, addresses=("192.168.100.20",)):
+    listener = _Listener()
+    listener.add_service(FakeZeroconf(FakeInfo(props, list(addresses))), stype, name)
+    return list(listener.found.values())
+
+
+def test_model_codes_become_human_names():
+    assert human_model_name("AppleTV14,1") == "Apple TV 4K (3rd gen)"
+    assert human_model_name("AudioAccessory5,1") == "HomePod mini"
+
+
+def test_unmapped_codes_fall_back_to_the_family():
+    assert human_model_name("AppleTV99,9") == "Apple TV"
+    assert human_model_name("MacBookPro18,3") == "MacBook Pro"
+    assert human_model_name("iPhone15,2") == "iPhone"
+
+
+def test_a_model_we_cannot_read_gives_nothing_rather_than_a_guess():
+    assert human_model_name("J305AP") == ""
+    assert human_model_name("") == ""
+
+
+def test_airplay_advertises_its_model_under_am():
+    found = listen("_airplay._tcp.local.", "Living Room._airplay._tcp.local.",
+                   {"am": "AppleTV14,1", "deviceid": "AA:BB:CC:DD:EE:FF"})
+    assert found[0]["model"] == "AppleTV14,1"
+    assert found[0]["device_class"] == "tvos"
+
+
+def test_device_info_records_are_marked_as_descriptions_only():
+    found = listen("_device-info._tcp.local.", "box._device-info._tcp.local.",
+                   {"model": "AppleTV14,1"})
+    assert found[0]["info_only"] is True
+
+
+def test_a_description_alone_is_not_a_device():
+    raw = [record(name="box", model="AppleTV14,1", host="192.168.100.20",
+                  addresses=["192.168.100.20"], service="_device-info._tcp.local.",
+                  info_only=True)]
+    assert merged(raw) == []
+
+
+def test_a_nameless_remotepairing_device_is_named_by_its_descriptor():
+    # Exactly the row from the screenshot: a rotating UUID for a name, no model,
+    # and a _device-info record on the same address that knows what it is.
+    raw = [
+        record(name="Apple Device", host="192.168.100.20", addresses=["192.168.100.20"],
+               service="_remotepairing._tcp.local.", needs_setup=True,
+               udid="9E108FA2-5C19-43F5-B04A-71ABC57B4677._remotepairing._tcp.local."),
+        record(name="box", model="AppleTV14,1", host="192.168.100.20",
+               addresses=["192.168.100.20"], service="_device-info._tcp.local.",
+               info_only=True),
+    ]
+    out = merged(raw)
+    assert len(out) == 1
+    assert out[0]["name"] == "Apple TV 4K (3rd gen)"
+    assert out[0]["device_class"] == "tvos"
+    # the real row wins, so Setup still works
+    assert out[0]["service"] == "_remotepairing._tcp.local."
+    assert out[0]["needs_setup"] is True
+
+
+def test_a_real_name_still_beats_the_model():
+    raw = [
+        record(name="Living Room", host="192.168.100.92", addresses=["192.168.100.92"],
+               service="_remotepairing._tcp.local.", needs_setup=True),
+        record(name="livingroom", model="AppleTV14,1", host="192.168.100.92",
+               addresses=["192.168.100.92"], service="_device-info._tcp.local.",
+               info_only=True),
+    ]
+    out = merged(raw)
+    assert out[0]["name"] == "Living Room"
+
+
+def test_an_undecodable_model_falls_back_to_the_host_name():
+    raw = [
+        record(name="Apple Device", host="192.168.100.20", addresses=["192.168.100.20"],
+               service="_remotepairing._tcp.local.", needs_setup=True),
+        record(name="box", model="J305AP", host="192.168.100.20",
+               addresses=["192.168.100.20"], service="_device-info._tcp.local.",
+               info_only=True),
+    ]
+    out = merged(raw)
+    # "box" is the Bonjour host name; still more use than "Apple Device".
+    assert out[0]["name"] == "box"
