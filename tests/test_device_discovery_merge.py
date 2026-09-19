@@ -25,6 +25,7 @@ def record(**kw):
         "service": "_airplay._tcp.local.",
         "device_class": "unknown",
         "connection": "network",
+        "info_only": False,
         "installable": False,
         "needs_setup": False,
         "paired": False,
@@ -472,3 +473,75 @@ def test_the_wifi_sync_instance_name_is_never_shown_as_a_name():
                    addresses=("192.168.100.43",))
     assert "supportsRP" not in found[0]["name"]
     assert "@" not in found[0]["name"]
+
+
+# ── a cable beats mDNS ──
+
+def usb_record(**kw):
+    base = dict(
+        name="Ruslan's iPhone", model="iPhone17,1", udid="00008140-00141DCC0AF3001C",
+        host="usb:00008140-00141DCC0AF3001C", addresses=[], service="usbmux",
+        connection="usb", device_class="ios",
+    )
+    base.update(kw)
+    return record(**base)
+
+
+def test_a_connected_but_untrusted_phone_is_represented_by_the_cable():
+    # Setup branches on the service. While the mDNS record won this group, the
+    # button could only say "iPhones pair over USB" with the cable attached,
+    # instead of asking the phone to trust this Mac.
+    raw = [
+        record(name="Ruslans-iPhone", host="172.20.10.1", addresses=["172.20.10.1"],
+               hostname="Ruslans-iPhone", service="_apple-mobdev2._tcp.local.",
+               device_class="ios", needs_setup=True,
+               properties={"deviceid": "aa:bb:cc:dd:ee:ff"}),
+        usb_record(installable=False, needs_setup=True,
+                   properties={"deviceid": "aa:bb:cc:dd:ee:ff"}),
+    ]
+    out = merged(raw)
+    assert len(out) == 1
+    assert out[0]["service"] == "usbmux"
+
+
+def test_a_trusted_cable_still_wins():
+    raw = [
+        record(name="Ruslans-iPhone", host="172.20.10.1", addresses=["172.20.10.1"],
+               hostname="Ruslans-iPhone", service="_apple-mobdev2._tcp.local.",
+               device_class="ios", needs_setup=True,
+               properties={"deviceid": "aa:bb:cc:dd:ee:ff"}),
+        usb_record(installable=True, properties={"deviceid": "aa:bb:cc:dd:ee:ff"}),
+    ]
+    out = merged(raw)
+    assert out[0]["service"] == "usbmux"
+    assert out[0]["installable"] is True
+
+
+def test_the_usbmux_pseudo_address_never_takes_the_host_slot():
+    raw = [
+        record(name="Ruslans-iPhone", host="172.20.10.1", addresses=["172.20.10.1"],
+               hostname="Ruslans-iPhone", service="_apple-mobdev2._tcp.local.",
+               device_class="ios", needs_setup=True,
+               properties={"deviceid": "aa:bb:cc:dd:ee:ff"}),
+        usb_record(installable=True, properties={"deviceid": "aa:bb:cc:dd:ee:ff"}),
+    ]
+    out = merged(raw)
+    assert out[0]["host"] == "172.20.10.1"
+    assert not out[0]["host"].startswith("usb:")
+
+
+def test_two_cabled_devices_do_not_merge_on_their_pseudo_addresses():
+    raw = [
+        usb_record(name="Phone A", udid="U1", host="usb:U1", properties={}),
+        usb_record(name="Phone B", udid="U2", host="usb:U2", properties={}),
+    ]
+    assert len(merge_discovered(raw, local_tokens=set(), local_addresses=set())) == 2
+
+
+def test_a_phone_with_no_cable_keeps_its_network_row():
+    raw = [record(name="Ruslans-iPhone", host="172.20.10.1", addresses=["172.20.10.1"],
+                  hostname="Ruslans-iPhone", service="_apple-mobdev2._tcp.local.",
+                  device_class="ios", needs_setup=True)]
+    out = merged(raw)
+    assert out[0]["service"] == "_apple-mobdev2._tcp.local."
+    assert out[0]["needs_setup"] is True

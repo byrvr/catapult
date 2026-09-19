@@ -157,8 +157,13 @@ def _address_sort_key(address: object) -> tuple[int, str]:
 
 
 def _looks_like_ip(address: object) -> bool:
+    """usbmux names its devices ``usb:<udid>``, which has a colon in it and was
+    being taken for an IPv6 address — winning the host slot from the real one
+    and putting ``usb:00008140-...`` in the picker where an address belongs."""
     addr = _strip_zone(address)
-    return bool(addr) and ("." in addr or ":" in addr)
+    if not addr or addr.lower().startswith("usb:"):
+        return False
+    return "." in addr or ":" in addr
 
 
 def preferred_address(addresses) -> str:
@@ -293,6 +298,13 @@ def _collapse_group(group: list[dict]) -> dict:
         if dev.get("info_only"):
             return -1
         if dev.get("installable"):
+            return 3
+        # A cable beats any mDNS record of the same device. Setup branches on
+        # the service, so while a connected phone was represented by its
+        # _apple-mobdev2 record the button could only answer "iPhones pair over
+        # USB" — never reaching the branch that asks the phone to trust this
+        # Mac, with the cable already attached.
+        if dev.get("service") == "usbmux" or dev.get("connection") == "usb":
             return 2
         if dev.get("needs_setup"):
             return 1
@@ -301,6 +313,8 @@ def _collapse_group(group: list[dict]) -> dict:
     merged = dict(max(group, key=priority))
     addresses = sorted({a for d in group for a in record_addresses(d)}, key=_address_sort_key)
     if addresses:
+        # Even when the cable record wins, show where the device is on the
+        # network rather than its usbmux pseudo-address.
         merged["host"] = addresses[0]
         merged["addresses"] = addresses
 
