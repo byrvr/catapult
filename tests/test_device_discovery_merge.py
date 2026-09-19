@@ -21,6 +21,7 @@ def record(**kw):
         "host": "",
         "addresses": [],
         "port": 7000,
+        "hostname": "",
         "service": "_airplay._tcp.local.",
         "device_class": "unknown",
         "connection": "network",
@@ -208,9 +209,10 @@ from catapult.device import _Listener, human_model_name
 
 
 class FakeInfo:
-    def __init__(self, props, addresses, port=7000):
+    def __init__(self, props, addresses, port=7000, server=""):
         self.properties = {k.encode(): v.encode() for k, v in props.items()}
         self.port = port
+        self.server = server
         self._addresses = addresses
 
     def parsed_scoped_addresses(self):
@@ -225,9 +227,11 @@ class FakeZeroconf:
         return self._info
 
 
-def listen(stype, name, props, addresses=("192.168.100.20",)):
+def listen(stype, name, props, addresses=("192.168.100.20",), server=""):
     listener = _Listener()
-    listener.add_service(FakeZeroconf(FakeInfo(props, list(addresses))), stype, name)
+    listener.add_service(
+        FakeZeroconf(FakeInfo(props, list(addresses), server=server)), stype, name
+    )
     return list(listener.found.values())
 
 
@@ -373,3 +377,98 @@ def test_an_apple_tv_is_not_reclassified_by_the_service_map():
                   addresses=["192.168.100.92"],
                   service="_remotepairing._tcp.local.", needs_setup=True)]
     assert merged(raw)[0]["device_class"] == "tvos"
+
+
+# ── the Bonjour hostname: a name, and the key that ties records together ──
+
+from catapult.device import bonjour_hostname
+
+
+def test_hostname_is_stripped_to_something_showable():
+    assert bonjour_hostname("Ruslans-iPhone.local.") == "Ruslans-iPhone"
+    assert bonjour_hostname("Living-Room.local") == "Living-Room"
+    assert bonjour_hostname("") == ""
+
+
+def test_wifi_sync_falls_back_to_the_hostname_for_a_name():
+    # The only thing this record carries besides an address.
+    found = listen("_apple-mobdev2._tcp.local.",
+                   "7a:8b:06:7f:5d:25@fe80::788b:6ff:fe7f:5d25-supportsRP-26._apple-mobdev2._tcp.local.",
+                   {}, addresses=("192.168.100.39",), server="Ruslans-iPhone.local.")
+    assert found[0]["name"] == "Ruslans-iPhone"
+    assert found[0]["hostname"] == "Ruslans-iPhone"
+    # Better than the service alone could manage: the hostname names the model
+    # family outright, so this is an iPhone rather than "iPhone or iPad".
+    assert found[0]["device_class"] == "ios"
+
+
+def test_a_chosen_name_still_beats_the_hostname():
+    found = listen("_companion-link._tcp.local.", "Living Room._companion-link._tcp.local.",
+                   {"model": "AppleTV14,1"}, server="Living-Room.local.")
+    assert found[0]["name"] == "Living Room"
+
+
+def test_a_device_info_record_survives_having_no_address():
+    # These describe a host and carry no address, and requiring one dropped
+    # every one of them — which is why browsing the service found nothing.
+    found = listen("_device-info._tcp.local.", "Ruslans-iPhone._device-info._tcp.local.",
+                   {"model": "iPhone15,2"}, addresses=(), server="Ruslans-iPhone.local.")
+    assert len(found) == 1
+    assert found[0]["model"] == "iPhone15,2"
+    assert found[0]["info_only"] is True
+    assert found[0]["host"] == ""
+
+
+def test_a_record_with_neither_address_nor_hostname_is_still_dropped():
+    assert listen("_airplay._tcp.local.", "x._airplay._tcp.local.", {}, addresses=()) == []
+
+
+def test_device_info_hands_its_model_to_the_device_it_describes():
+    raw = [
+        record(name="Ruslans-iPhone", host="192.168.100.39",
+               addresses=["192.168.100.39"], hostname="Ruslans-iPhone",
+               service="_apple-mobdev2._tcp.local.", device_class="iosfamily",
+               needs_setup=True),
+        record(name="Ruslans-iPhone", model="iPhone15,2", host="", addresses=[],
+               hostname="Ruslans-iPhone", service="_device-info._tcp.local.",
+               info_only=True),
+    ]
+    out = merged(raw)
+    assert len(out) == 1
+    assert out[0]["model"] == "iPhone15,2"
+    assert out[0]["device_class"] == "ios"
+    assert out[0]["host"] == "192.168.100.39"
+    assert out[0]["name"] == "Ruslans-iPhone"
+
+
+def test_hostnames_that_differ_do_not_merge():
+    raw = [
+        record(name="A", host="192.168.1.5", addresses=["192.168.1.5"], hostname="phone-a"),
+        record(name="B", host="192.168.1.6", addresses=["192.168.1.6"], hostname="phone-b"),
+    ]
+    assert len(merged(raw)) == 2
+
+
+# What Wi-Fi sync actually calls its record: a MAC, an address and a suffix.
+# It is filtered out as a name, which is exactly why the hostname matters.
+MOBDEV_INSTANCE = "7a:8b:06:7f:5d:25@fe80::788b:6ff:fe7f:5d25-supportsRP-26._apple-mobdev2._tcp.local."
+
+
+def test_an_ipad_hostname_is_read_as_an_ipad():
+    found = listen("_apple-mobdev2._tcp.local.", MOBDEV_INSTANCE, {},
+                   addresses=("192.168.100.41",), server="Ruslans-iPad.local.")
+    assert found[0]["device_class"] == "ipados"
+
+
+def test_a_hostname_that_names_no_model_still_falls_back_to_the_service():
+    found = listen("_apple-mobdev2._tcp.local.", MOBDEV_INSTANCE, {},
+                   addresses=("192.168.100.43",), server="Telefon.local.")
+    assert found[0]["name"] == "Telefon"
+    assert found[0]["device_class"] == "iosfamily"
+
+
+def test_the_wifi_sync_instance_name_is_never_shown_as_a_name():
+    found = listen("_apple-mobdev2._tcp.local.", MOBDEV_INSTANCE, {},
+                   addresses=("192.168.100.43",))
+    assert "supportsRP" not in found[0]["name"]
+    assert "@" not in found[0]["name"]

@@ -192,6 +192,19 @@ def name_token(value: object) -> str:
     return re.sub(r"[^a-z0-9]", "", name.lower())
 
 
+def bonjour_hostname(server: object) -> str:
+    """``Ruslans-iPhone.local.`` -> ``Ruslans-iPhone``.
+
+    Every mDNS answer names the host it belongs to, and for a device that
+    advertises nothing else this is both a usable name and the only key that
+    ties its records together across services.
+    """
+    name = str(server or "").strip().rstrip(".")
+    if name.lower().endswith(".local"):
+        name = name[: -len(".local")]
+    return name
+
+
 def record_addresses(device: dict) -> set[str]:
     listed = device.get("addresses") or []
     if not listed and device.get("host"):
@@ -382,6 +395,7 @@ def merge_discovered(
 
     seen_identity: dict[str, int] = {}
     seen_address: dict[str, int] = {}
+    seen_hostname: dict[str, int] = {}
     for idx, d in enumerate(records):
         identity = discovery_identity(d)
         if identity:
@@ -394,6 +408,12 @@ def merge_discovered(
                 union(seen_address[addr], idx)
             else:
                 seen_address[addr] = idx
+        host = str(d.get("hostname") or "").lower()
+        if host:
+            if host in seen_hostname:
+                union(seen_hostname[host], idx)
+            else:
+                seen_hostname[host] = idx
 
     # Records with no identifier on either side still have a name. Merge on that
     # only when the models do not contradict, so two same-named phones stay two
@@ -517,7 +537,12 @@ class _Listener(ServiceListener):
             },
             key=_address_sort_key,
         )
-        if not addresses:
+        # A _device-info record describes a host and carries no address of its
+        # own, so requiring one dropped every single one of them — which is why
+        # browsing that service produced nothing at all. Keep it: it is matched
+        # to its device by hostname below.
+        hostname = bonjour_hostname(getattr(info, "server", ""))
+        if not addresses and not (stype in INFO_ONLY_SERVICES and hostname):
             return
 
         props = {
@@ -544,7 +569,10 @@ class _Listener(ServiceListener):
                 return False
             return True
 
-        candidates = [friendly_name, props.get("deviceName", ""), model]
+        # The Bonjour hostname is derived from the name its owner gave the
+        # device ("Ruslan's iPhone" -> "Ruslans-iPhone"), which beats every
+        # placeholder. A Wi-Fi sync record carries nothing else.
+        candidates = [friendly_name, props.get("deviceName", ""), hostname, model]
         device_name = next((n for n in candidates if _is_good_name(n)), "")
         if not device_name:
             # Last resort: use model family or generic label
@@ -566,13 +594,14 @@ class _Listener(ServiceListener):
             installable = False
             needs_setup = True
 
-        key = f"{addresses[0]}:{info.port}:{stype}"
+        key = f"{addresses[0] if addresses else hostname}:{info.port}:{stype}"
         self.found[key] = {
             "name": device_name,
             "model": model,
             "udid": udid,
-            "host": addresses[0],
+            "host": addresses[0] if addresses else "",
             "addresses": addresses,
+            "hostname": hostname,
             "port": info.port,
             "service": stype,
             "info_only": stype in INFO_ONLY_SERVICES,
@@ -585,6 +614,16 @@ class _Listener(ServiceListener):
             "tunnel_active": False,
             "properties": props,
         }
+        if not model and name_token(device_name) in _PLACEHOLDER_NAME_TOKENS:
+            # We learned nothing at all about this one. Print everything the
+            # record carries, at a level that is actually written, so the next
+            # unnamed device is a question about the data rather than a guess
+            # about the code. Rare by construction: it fires only when both the
+            # name and the model came up empty.
+            logger.info(
+                "  unidentified %s: txt=%s server=%r instance=%r",
+                stype, props, hostname, name,
+            )
 
     def remove_service(self, *a):
         pass
